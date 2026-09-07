@@ -256,6 +256,37 @@ static void readStageResources(ProfileJSONReader &reader,
     profile.indirectDependencyLatencyCycles =
         reader.number(*indirect, "dependency_latency_system_cycles", path);
   }
+  if (const auto *atomic =
+          reader.object(*resources, "atomic_memory", prefix)) {
+    const std::string path = prefix + ".atomic_memory";
+    auto readRate = [&](const llvm::json::Object &object,
+                        llvm::StringRef key) {
+      const std::string ratePath = path + "." + key.str();
+      StageAtomicRate rate;
+      rate.logicalElementsPerCycle = reader.number(
+          object, "logical_elements_per_system_cycle", ratePath);
+      rate.operationStartupCycles = reader.number(
+          object, "operation_startup_system_cycles", ratePath);
+      rate.resultDependencyCycles = reader.number(
+          object, "result_dependency_system_cycles", ratePath);
+      rate.unknownContentionMultiplier = reader.number(
+          object, "unknown_contention_multiplier", ratePath);
+      profile.atomicRates[key] = rate;
+    };
+    if (const auto *fallback = reader.object(*atomic, "default", path))
+      readRate(*fallback, "default");
+    if (const auto *operations = reader.object(*atomic, "operations", path)) {
+      for (const auto &[key, value] : *operations) {
+        const auto *operation = value.getAsObject();
+        if (!operation) {
+          reader.setError(path + ".operations." + key.str() +
+                          " must be an object");
+          break;
+        }
+        readRate(*operation, key);
+      }
+    }
+  }
   if (const auto *control = reader.object(*resources, "control_flow", prefix)) {
     const std::string path = prefix + ".control_flow";
     profile.controlFlow.loopBackedgeCycles =
@@ -294,10 +325,10 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     return llvm::createStringError(std::errc::invalid_argument,
                                    "SIMD/SIMT profile root must be an object");
   auto selectionSchemaVersion = root->getInteger("schema_version");
-  if (!selectionSchemaVersion || *selectionSchemaVersion != 10)
+  if (!selectionSchemaVersion || *selectionSchemaVersion != 11)
     return llvm::createStringError(
         std::errc::invalid_argument,
-        "SIMD/SIMT profile schema_version must be 10");
+        "SIMD/SIMT profile schema_version must be 11");
 
   CandidateProfile profile;
   ProfileJSONReader reader;
@@ -472,17 +503,15 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     return llvm::createStringError(
         std::errc::invalid_argument, "invalid SIMD/SIMT profile '%s': %s",
         path.c_str(), reader.getError().str().c_str());
-  if (hardware.profileVersion != "david-v100-simd-simt-20260903-v20" &&
-      hardware.profileVersion != "david-v100-simd-simt-20260905-v21")
+  if (hardware.profileVersion != "david-v100-simd-simt-20260906-v22")
     return llvm::createStringError(
         std::errc::invalid_argument,
         "unsupported SIMD/SIMT profile version '%s' "
-        "(expected david-v100-simd-simt-20260903-v20 or "
-        "david-v100-simd-simt-20260905-v21)",
+        "(expected david-v100-simd-simt-20260906-v22)",
         hardware.profileVersion.c_str());
   if (!microbench)
     return llvm::createStringError(std::errc::invalid_argument,
-                                   "SIMD/SIMT v19 profile must reference "
+                                   "SIMD/SIMT v22 profile must reference "
                                    "microbenchmark_profile");
   if (!hardware.isValid())
     return llvm::createStringError(
