@@ -17,19 +17,15 @@ class AtomicProfileCalibrationTest(unittest.TestCase):
         measured_hotspot_simd_us = 8503.260612487793
         measured_hotspot_simt_us = 13636.185646057129
 
-        modeled_unique_cost_ratio = (
-            simt["logical_elements_per_system_cycle"]
-            / simd["logical_elements_per_system_cycle"]
-        )
+        modeled_unique_cost_ratio = (simt["logical_elements_per_system_cycle"] /
+                                     simd["logical_elements_per_system_cycle"])
         measured_unique_throughput_ratio = measured_unique_simd_us / measured_unique_simt_us
         self.assertAlmostEqual(modeled_unique_cost_ratio, measured_unique_throughput_ratio, places=12)
 
-        modeled_unknown_contention_cost_ratio = (
-            simd["logical_elements_per_system_cycle"]
-            / simt["logical_elements_per_system_cycle"]
-            * simt["unknown_contention_multiplier"]
-            / simd["unknown_contention_multiplier"]
-        )
+        modeled_unknown_contention_cost_ratio = (simd["logical_elements_per_system_cycle"] /
+                                                 simt["logical_elements_per_system_cycle"] *
+                                                 simt["unknown_contention_multiplier"] /
+                                                 simd["unknown_contention_multiplier"])
         measured_hotspot_cost_ratio = measured_hotspot_simt_us / measured_hotspot_simd_us
         self.assertAlmostEqual(
             modeled_unknown_contention_cost_ratio,

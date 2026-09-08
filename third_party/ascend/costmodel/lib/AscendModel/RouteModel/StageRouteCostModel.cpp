@@ -156,9 +156,7 @@ bool StageModelFeatures::permitsSimdRoofline() const {
   return !hasLoopCarriedDataDependency;
 }
 
-std::string AtomicWorkload::profileKey() const {
-  return kind + "." + dataType;
-}
+std::string AtomicWorkload::profileKey() const { return kind + "." + dataType; }
 
 bool AtomicWorkload::isFiniteAndNonNegative() const {
   const std::array<double, 3> values = {
@@ -235,18 +233,15 @@ llvm::json::Object StageWorkload::toJSON() const {
   result["store_bytes_per_iteration"] = storeBytes;
   result["load_warp_instructions_per_iteration"] = loadWarpInstructions;
   result["store_warp_instructions_per_iteration"] = storeWarpInstructions;
-  result["direct_load_bytes_per_iteration"] =
-      loadBytes - indirectLoadBytes;
-  result["direct_store_bytes_per_iteration"] =
-      storeBytes - indirectStoreBytes;
+  result["direct_load_bytes_per_iteration"] = loadBytes - indirectLoadBytes;
+  result["direct_store_bytes_per_iteration"] = storeBytes - indirectStoreBytes;
   result["direct_load_warp_instructions_per_iteration"] =
       loadWarpInstructions - indirectLoadTransactions;
   result["direct_store_warp_instructions_per_iteration"] =
       storeWarpInstructions - indirectStoreTransactions;
   result["indirect_load_bytes_per_iteration"] = indirectLoadBytes;
   result["indirect_store_bytes_per_iteration"] = indirectStoreBytes;
-  result["indirect_load_transactions_per_iteration"] =
-      indirectLoadTransactions;
+  result["indirect_load_transactions_per_iteration"] = indirectLoadTransactions;
   result["indirect_store_transactions_per_iteration"] =
       indirectStoreTransactions;
   llvm::json::Array atomics;

@@ -256,21 +256,19 @@ static void readStageResources(ProfileJSONReader &reader,
     profile.indirectDependencyLatencyCycles =
         reader.number(*indirect, "dependency_latency_system_cycles", path);
   }
-  if (const auto *atomic =
-          reader.object(*resources, "atomic_memory", prefix)) {
+  if (const auto *atomic = reader.object(*resources, "atomic_memory", prefix)) {
     const std::string path = prefix + ".atomic_memory";
-    auto readRate = [&](const llvm::json::Object &object,
-                        llvm::StringRef key) {
+    auto readRate = [&](const llvm::json::Object &object, llvm::StringRef key) {
       const std::string ratePath = path + "." + key.str();
       StageAtomicRate rate;
-      rate.logicalElementsPerCycle = reader.number(
-          object, "logical_elements_per_system_cycle", ratePath);
-      rate.operationStartupCycles = reader.number(
-          object, "operation_startup_system_cycles", ratePath);
-      rate.resultDependencyCycles = reader.number(
-          object, "result_dependency_system_cycles", ratePath);
-      rate.unknownContentionMultiplier = reader.number(
-          object, "unknown_contention_multiplier", ratePath);
+      rate.logicalElementsPerCycle =
+          reader.number(object, "logical_elements_per_system_cycle", ratePath);
+      rate.operationStartupCycles =
+          reader.number(object, "operation_startup_system_cycles", ratePath);
+      rate.resultDependencyCycles =
+          reader.number(object, "result_dependency_system_cycles", ratePath);
+      rate.unknownContentionMultiplier =
+          reader.number(object, "unknown_contention_multiplier", ratePath);
       profile.atomicRates[key] = rate;
     };
     if (const auto *fallback = reader.object(*atomic, "default", path))
