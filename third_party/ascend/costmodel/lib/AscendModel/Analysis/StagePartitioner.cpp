@@ -242,25 +242,25 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
       operation->getNumResults() > 0) {
     Value result = operation->getResult(0);
     const double bytes = getValueBytes(result);
-    const double transactions = std::ceil(elements / 32.0);
+    const double logicalMemoryGroups = std::ceil(elements / 32.0);
     work.loadBytes += bytes;
-    work.loadWarpInstructions += transactions;
+    work.loadWarpInstructions += logicalMemoryGroups;
     if (name == "tt.gather" || isLoadedIndexDependentMemoryOp(operation)) {
       work.indirectLoadBytes += bytes;
-      work.indirectLoadTransactions += transactions;
+      work.indirectLoadTransactions += logicalMemoryGroups;
     }
     return;
   }
   if (name == "tt.store" && operation->getNumOperands() > 1) {
     Value value = operation->getOperand(1);
     const double bytes = getValueBytes(value);
-    const double transactions =
+    const double logicalMemoryGroups =
         std::ceil(getTypeElementCount(value.getType()) / 32.0);
     work.storeBytes += bytes;
-    work.storeWarpInstructions += transactions;
+    work.storeWarpInstructions += logicalMemoryGroups;
     if (isLoadedIndexDependentMemoryOp(operation)) {
       work.indirectStoreBytes += bytes;
-      work.indirectStoreTransactions += transactions;
+      work.indirectStoreTransactions += logicalMemoryGroups;
     }
     return;
   }
