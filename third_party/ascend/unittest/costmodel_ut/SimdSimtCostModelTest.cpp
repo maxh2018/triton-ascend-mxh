@@ -627,9 +627,8 @@ TEST(SimdSimtCostModelTest, IndirectMemoryUsesDependencyProfile) {
 
 TEST(SimdSimtCostModelTest,
      AtomicCostDoesNotRepriceOrdinaryLoadsAsIndirectMemory) {
-  LogicalStage stage =
-      logicalStage("atomic", StageCostModelKind::AtomicMemory,
-                   StageScheduleKind::PartiallyDependent);
+  LogicalStage stage = logicalStage("atomic", StageCostModelKind::AtomicMemory,
+                                    StageScheduleKind::PartiallyDependent);
   stage.features.hasAtomicMemory = true;
   stage.features.hasIndirectMemory = true;
   stage.features.hasContiguousMemory = true;

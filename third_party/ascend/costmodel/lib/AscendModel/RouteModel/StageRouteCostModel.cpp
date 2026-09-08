@@ -156,9 +156,7 @@ bool StageModelFeatures::permitsSimdRoofline() const {
   return !hasLoopCarriedDataDependency;
 }
 
-std::string AtomicWorkload::profileKey() const {
-  return kind + "." + dataType;
-}
+std::string AtomicWorkload::profileKey() const { return kind + "." + dataType; }
 
 bool AtomicWorkload::isFiniteAndNonNegative() const {
   const std::array<double, 3> values = {
@@ -190,24 +188,23 @@ llvm::json::Object AtomicWorkload::toJSON() const {
 }
 
 bool StageWorkload::isFiniteAndNonNegative() const {
-  const std::array<double, 14> values = {
-      scalarOperations,
-      loadBytes,
-      storeBytes,
-      loadWarpInstructions,
-      storeWarpInstructions,
-      indirectLoadBytes,
-      indirectStoreBytes,
-      indirectLoadTransactions,
-      indirectStoreTransactions,
-      predicateElements,
-      shuffleLaneSteps,
-      dotFlops,
-      issueElements,
-      estimatedSpillTransactions};
-  if (!std::all_of(values.begin(), values.end(), [](double value) {
-        return std::isfinite(value) && value >= 0.0;
-      }) ||
+  const std::array<double, 14> values = {scalarOperations,
+                                         loadBytes,
+                                         storeBytes,
+                                         loadWarpInstructions,
+                                         storeWarpInstructions,
+                                         indirectLoadBytes,
+                                         indirectStoreBytes,
+                                         indirectLoadTransactions,
+                                         indirectStoreTransactions,
+                                         predicateElements,
+                                         shuffleLaneSteps,
+                                         dotFlops,
+                                         issueElements,
+                                         estimatedSpillTransactions};
+  if (!std::all_of(
+          values.begin(), values.end(),
+          [](double value) { return std::isfinite(value) && value >= 0.0; }) ||
       indirectLoadBytes > loadBytes || indirectStoreBytes > storeBytes ||
       indirectLoadTransactions > loadWarpInstructions ||
       indirectStoreTransactions > storeWarpInstructions)
@@ -233,18 +230,15 @@ llvm::json::Object StageWorkload::toJSON() const {
   result["store_bytes_per_iteration"] = storeBytes;
   result["load_warp_instructions_per_iteration"] = loadWarpInstructions;
   result["store_warp_instructions_per_iteration"] = storeWarpInstructions;
-  result["direct_load_bytes_per_iteration"] =
-      loadBytes - indirectLoadBytes;
-  result["direct_store_bytes_per_iteration"] =
-      storeBytes - indirectStoreBytes;
+  result["direct_load_bytes_per_iteration"] = loadBytes - indirectLoadBytes;
+  result["direct_store_bytes_per_iteration"] = storeBytes - indirectStoreBytes;
   result["direct_load_warp_instructions_per_iteration"] =
       loadWarpInstructions - indirectLoadTransactions;
   result["direct_store_warp_instructions_per_iteration"] =
       storeWarpInstructions - indirectStoreTransactions;
   result["indirect_load_bytes_per_iteration"] = indirectLoadBytes;
   result["indirect_store_bytes_per_iteration"] = indirectStoreBytes;
-  result["indirect_load_transactions_per_iteration"] =
-      indirectLoadTransactions;
+  result["indirect_load_transactions_per_iteration"] = indirectLoadTransactions;
   result["indirect_store_transactions_per_iteration"] =
       indirectStoreTransactions;
   llvm::json::Array atomics;
@@ -286,9 +280,9 @@ llvm::json::Object StageModelFeatures::toJSON() const {
 
 bool StageResourceCycles::isFiniteAndNonNegative() const {
   const std::array<double, 16> values = {
-      setup,      scalar,          load,  store,  atomic,      compute,
-      predicate,  shuffle,         dot,   loopControl, branchControl,
-      divergence, synchronization, spill, issue,       criticalPath};
+      setup,           scalar,  load,  store,       atomic,        compute,
+      predicate,       shuffle, dot,   loopControl, branchControl, divergence,
+      synchronization, spill,   issue, criticalPath};
   return std::all_of(values.begin(), values.end(), [](double value) {
     return std::isfinite(value) && value >= 0.0;
   });

@@ -198,19 +198,18 @@ static std::string getAtomicEnumName(Operation *operation,
 }
 
 static AtomicWorkload getAtomicWorkload(Operation *operation) {
-  static const llvm::StringRef rmwNames[] = {
-      "", "and", "or", "xor", "add", "fadd", "max", "min", "umax",
-      "umin", "exch"};
-  static const llvm::StringRef semanticNames[] = {
-      "", "relaxed", "acquire", "release", "acq_rel"};
+  static const llvm::StringRef rmwNames[] = {"",     "and",  "or",  "xor",
+                                             "add",  "fadd", "max", "min",
+                                             "umax", "umin", "exch"};
+  static const llvm::StringRef semanticNames[] = {"", "relaxed", "acquire",
+                                                  "release", "acq_rel"};
   static const llvm::StringRef scopeNames[] = {"", "gpu", "cta", "sys"};
   const llvm::StringRef name = operation->getName().getStringRef();
   AtomicWorkload atomic;
   atomic.kind = name == "tt.atomic_cas"
                     ? "cas"
                     : getAtomicEnumName(operation, "atomic_rmw_op", rmwNames);
-  atomic.memorySemantic =
-      getAtomicEnumName(operation, "sem", semanticNames);
+  atomic.memorySemantic = getAtomicEnumName(operation, "sem", semanticNames);
   atomic.memoryScope = getAtomicEnumName(operation, "scope", scopeNames);
   const unsigned valueOperand = name == "tt.atomic_cas" ? 2 : 1;
   Value value = operation->getNumOperands() > valueOperand
@@ -220,8 +219,8 @@ static AtomicWorkload getAtomicWorkload(Operation *operation) {
   atomic.dataType = elementType ? typeToString(elementType) : "unknown";
   atomic.logicalElements = value ? getTypeElementCount(value.getType()) : 0.0;
   atomic.logicalOperationInstances = 1.0;
-  atomic.resultUsed = operation->getNumResults() > 0 &&
-                      !operation->getResult(0).use_empty();
+  atomic.resultUsed =
+      operation->getNumResults() > 0 && !operation->getResult(0).use_empty();
   atomic.addressDependsOnLoadedIndex =
       isLoadedIndexDependentMemoryOp(operation);
   // TTIR tensor shape alone does not prove that addresses are contiguous or
@@ -1152,16 +1151,15 @@ llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
         ++facts.synchronizationCount;
       if (name == "tt.load" || name == "tt.store" || name == "tt.gather") {
         hasMemory = true;
-        const bool indirect = isLoadedIndexDependentMemoryOp(operation) ||
-                              name == "tt.gather";
+        const bool indirect =
+            isLoadedIndexDependentMemoryOp(operation) || name == "tt.gather";
         facts.hasIndirectMemory |= indirect;
         hasContiguousMemory |= !indirect;
       }
       if (name.starts_with("tt.atomic")) {
         hasMemory = true;
         facts.hasAtomicMemory = true;
-        facts.hasIndirectMemory |=
-            isLoadedIndexDependentMemoryOp(operation);
+        facts.hasIndirectMemory |= isLoadedIndexDependentMemoryOp(operation);
       }
       facts.hasReduction |=
           name == "tt.reduce" || name == "tt.scan" || name == "linalg.reduce";
@@ -1234,9 +1232,9 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
     if (stage.costModelKind == StageCostModelKind::AutoBlockifyDispatch ||
         stage.costModelKind == StageCostModelKind::AutoBlockifyLoop)
       continue;
-    if (facts.hasDot && (facts.hasReduction || facts.hasIndirectMemory ||
-                         facts.hasAtomicMemory ||
-                         facts.hasLoopCarriedDataDependency))
+    if (facts.hasDot &&
+        (facts.hasReduction || facts.hasIndirectMemory ||
+         facts.hasAtomicMemory || facts.hasLoopCarriedDataDependency))
       return llvm::createStringError(
           std::errc::invalid_argument,
           "requires_split: Stage '%s' owns incompatible dominant structures",
