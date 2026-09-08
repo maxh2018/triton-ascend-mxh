@@ -6,16 +6,15 @@ import unittest
 
 
 class ScanProfileCalibrationTest(unittest.TestCase):
+
     def test_recorded_ratio_accounts_for_base_shuffle_rates(self):
         ascend = Path(__file__).resolve().parents[2]
         path = ascend / "costmodel/profiles/simd_simt/david_v100_simd_simt_v1.json"
-        profile = json.loads(path.read_text())
+        profile = json.loads(path.read_text(encoding="utf-8"))
         measurements = json.loads(
-            (path.parent / profile["microbenchmark_profile"]).read_text()
-        )["measurements"]
+            (path.parent / profile["microbenchmark_profile"]).read_text(encoding="utf-8"))["measurements"]
         simd_rate = measurements["simd.vector_width_bits"]["value"] / 32
-        simt_rate = (measurements["simt.warp_size"]["value"] *
-                     measurements["simt.shuffle.throughput"]["value"])
+        simt_rate = (measurements["simt.warp_size"]["value"] * measurements["simt.shuffle.throughput"]["value"])
         simd_factor = profile["simd"]["stage_resources"]["prefix_scan"]["dependency_factor"]
         simt_factor = profile["simt"]["stage_resources"]["prefix_scan"]["dependency_factor"]
         # Equal lane-step workloads cancel. Exclude scalar/setup/issue terms.
