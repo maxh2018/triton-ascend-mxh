@@ -44,6 +44,7 @@ namespace {
 constexpr llvm::StringLiteral kAllSimd = "all_simd";
 constexpr llvm::StringLiteral kAllSimtOnly = "all_simt_only";
 constexpr llvm::StringLiteral kMixedSimdSimt = "mixed_simd_simt";
+constexpr int64_t kSupportedProfileSchemaVersion = 11;
 
 struct StructuralProfile {
   int64_t tinyDotFlopsMax = 0;
@@ -323,10 +324,12 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     return llvm::createStringError(std::errc::invalid_argument,
                                    "SIMD/SIMT profile root must be an object");
   auto selectionSchemaVersion = root->getInteger("schema_version");
-  if (!selectionSchemaVersion || *selectionSchemaVersion != 11)
+  if (!selectionSchemaVersion ||
+      *selectionSchemaVersion != kSupportedProfileSchemaVersion)
     return llvm::createStringError(
         std::errc::invalid_argument,
-        "SIMD/SIMT profile schema_version must be 11");
+        "SIMD/SIMT profile schema_version must be %lld",
+        static_cast<long long>(kSupportedProfileSchemaVersion));
 
   CandidateProfile profile;
   ProfileJSONReader reader;
@@ -501,15 +504,12 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     return llvm::createStringError(
         std::errc::invalid_argument, "invalid SIMD/SIMT profile '%s': %s",
         path.c_str(), reader.getError().str().c_str());
-  if (hardware.profileVersion != "david-v100-simd-simt-20260906-v22")
-    return llvm::createStringError(
-        std::errc::invalid_argument,
-        "unsupported SIMD/SIMT profile version '%s' "
-        "(expected david-v100-simd-simt-20260906-v22)",
-        hardware.profileVersion.c_str());
+  if (hardware.profileVersion.empty())
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "SIMD/SIMT profile_version must be non-empty");
   if (!microbench)
     return llvm::createStringError(std::errc::invalid_argument,
-                                   "SIMD/SIMT v22 profile must reference "
+                                   "SIMD/SIMT profile must reference "
                                    "microbenchmark_profile");
   if (!hardware.isValid())
     return llvm::createStringError(
