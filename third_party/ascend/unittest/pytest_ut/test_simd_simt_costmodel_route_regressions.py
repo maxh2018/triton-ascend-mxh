@@ -27,9 +27,6 @@ import triton
 import triton.language as tl
 from triton.backends.ascend.utils import is_compile_on_910_95
 
-ALL_SIMD_ROUTE = "all_simd"
-ALL_SIMT_ONLY_ROUTE = "all_simt_only"
-
 simd_simt_910_95_only = pytest.mark.xfail(
     not is_compile_on_910_95(),
     reason="SIMD/SIMT cost model only supports 910_95",
@@ -194,7 +191,7 @@ def test_index_put_atomic_selects_all_simd(tmp_path):
 
     torch.testing.assert_close(output[:z0_numel], torch.ones_like(output[:z0_numel]))
     assert torch.count_nonzero(output[z0_numel:]).item() == 0
-    _assert_effective_route(report_path, ALL_SIMD_ROUTE)
+    _assert_effective_route(report_path, "all_simd")
 
 
 @simd_simt_910_95_only
@@ -248,4 +245,4 @@ def test_dacs_segsum_selects_all_simt_only(tmp_path):
     torch.testing.assert_close(da_cs_rev[0, 0, :chunk_size], expected_cs_rev, rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(segsum[0, 0, 0], expected_segsum, rtol=1e-4, atol=1e-4)
 
-    _assert_effective_route(report_path, ALL_SIMT_ONLY_ROUTE)
+    _assert_effective_route(report_path, "all_simt_only")

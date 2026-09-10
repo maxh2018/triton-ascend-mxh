@@ -505,8 +505,9 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
         std::errc::invalid_argument, "invalid SIMD/SIMT profile '%s': %s",
         path.c_str(), reader.getError().str().c_str());
   if (hardware.profileVersion.empty())
-    return llvm::createStringError(std::errc::invalid_argument,
-                                   "SIMD/SIMT profile_version must be non-empty");
+    return llvm::createStringError(
+        std::errc::invalid_argument,
+        "SIMD/SIMT profile_version must be non-empty");
   if (!microbench)
     return llvm::createStringError(std::errc::invalid_argument,
                                    "SIMD/SIMT profile must reference "
