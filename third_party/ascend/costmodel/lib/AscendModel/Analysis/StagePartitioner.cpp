@@ -129,6 +129,17 @@ static double getOperationElements(Operation *operation) {
   return elements;
 }
 
+static double getMaximumTensorElements(Operation *operation) {
+  double elements = 0.0;
+  for (Type type : operation->getResultTypes())
+    if (isa<ShapedType>(type))
+      elements = std::max(elements, getTypeElementCount(type));
+  for (Value value : operation->getOperands())
+    if (isa<ShapedType>(value.getType()))
+      elements = std::max(elements, getTypeElementCount(value.getType()));
+  return elements;
+}
+
 static bool hasTensorResult(Operation *operation) {
   return llvm::any_of(operation->getResultTypes(),
                       [](Type type) { return isa<ShapedType>(type); });
@@ -281,6 +292,16 @@ static void accumulateReductionWorkload(Operation *operation,
   work.shuffleLaneSteps += steps;
   if (isScan)
     work.scanShuffleLaneSteps += steps;
+  int64_t pairStrideElements = 1;
+  for (int64_t index = dimension + 1; index < input.getRank(); ++index) {
+    int64_t product = 0;
+    if (__builtin_mul_overflow(pairStrideElements, input.getShape()[index],
+                               &product))
+      return;
+    pairStrideElements = product;
+  }
+  work.reductionWorkloads.push_back(
+      {extent, pairStrideElements, typeToString(input.getElementType()), 1.0});
 }
 
 static std::string getAtomicEnumName(Operation *operation,
@@ -333,6 +354,9 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
     return;
   const llvm::StringRef name = operation->getName().getStringRef();
   const double elements = getOperationElements(operation);
+  work.maximumLogicalTensorElements =
+      std::max(work.maximumLogicalTensorElements,
+               getMaximumTensorElements(operation));
 
   if ((name == "tt.load" || name == "tt.gather") &&
       operation->getNumResults() > 0) {
@@ -409,6 +433,8 @@ static void scaleWorkload(StageWorkload &work, double scale) {
     tensor.segmentCount *= scale;
     tensor.logicalOperationInstances *= scale;
   }
+  for (ReductionWorkload &reduction : work.reductionWorkloads)
+    reduction.logicalOperationInstances *= scale;
   work.predicateElements *= scale;
   work.shuffleLaneSteps *= scale;
   work.scanShuffleLaneSteps *= scale;
@@ -521,6 +547,11 @@ static void mergeWorkload(StageWorkload &into, StageWorkload from) {
     destination->segmentCount += source.segmentCount;
     destination->logicalOperationInstances += source.logicalOperationInstances;
   }
+  llvm::append_range(into.reductionWorkloads,
+                     std::move(from.reductionWorkloads));
+  into.maximumLogicalTensorElements =
+      std::max(into.maximumLogicalTensorElements,
+               from.maximumLogicalTensorElements);
   into.predicateElements += from.predicateElements;
   into.shuffleLaneSteps += from.shuffleLaneSteps;
   into.scanShuffleLaneSteps += from.scanShuffleLaneSteps;

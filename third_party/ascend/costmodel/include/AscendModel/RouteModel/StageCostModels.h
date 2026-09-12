@@ -110,6 +110,15 @@ struct StageOperationRate {
   double factor = 1.0;
 };
 
+struct ExtentTwoReductionPairStrideRate {
+  int64_t pairStrideElements = 0;
+  std::string dataType;
+  double systemCycles = 0.0;
+  double referenceModelSystemCycles = 0.0;
+
+  bool isValid() const;
+};
+
 struct StageAtomicRate {
   double logicalElementsPerCycle = 0.0;
   double operationStartupCycles = 0.0;
@@ -149,6 +158,8 @@ struct StageModeProfile {
   double indirectStoreTransactionsPerCycle = 0.0;
   double indirectDependencyLatencyCycles = 0.0;
   llvm::StringMap<StageAtomicRate> atomicRates;
+  std::vector<ExtentTwoReductionPairStrideRate>
+      extentTwoReductionPairStrideRates;
   StageControlFlowRates controlFlow;
 
   bool isValid(StageMode mode) const;
@@ -161,6 +172,9 @@ struct HardwareProfile {
   /// option, not a hardware constant, and bounds cross-group interleaving in
   /// recurrence Stage models.
   int64_t logicalWarpGroupCount = 1;
+  /// Maximum independently useful warp groups for one logical tensor
+  /// operation. This measured capacity is separate from num_warps.
+  int64_t simtLogicalTensorParallelismCapacity = 1;
   /// Long-lived recurrence state consumes finite register/stack bandwidth.
   /// The byte rate is shared by the SIMD recurrence-state term and the extra
   /// pressure created when a SIMT SuperBlock replicates that state; neither

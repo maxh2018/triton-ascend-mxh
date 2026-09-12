@@ -401,7 +401,9 @@ module {
       %sel = arith.select %mask, %acc, %zero : tensor<16x16xi1>, tensor<16x16xf32>
       scf.yield %sel : tensor<16x16xf32>
     }
-    return %b : tensor<16x16xf32>
+    %dot = "tt.dot"(%b, %b)
+      : (tensor<16x16xf32>, tensor<16x16xf32>) -> tensor<16x16xf32>
+    return %dot : tensor<16x16xf32>
   }
 }
 )mlir");
@@ -427,9 +429,11 @@ module {
     EXPECT_EQ(anchor.triangularSolve->recurrenceStartRow, 2);
     // Two recurrence loops, each with 14 body iterations.
     EXPECT_EQ(anchor.triangularSolve->recurrenceLoopCount, 28);
-    EXPECT_EQ(anchor.triangularSolve->denseDotTailOps, 0);
-    EXPECT_FALSE(anchor.triangularSolve->requiresCubeTailPartition);
+    EXPECT_EQ(anchor.triangularSolve->denseDotTailOps, 1);
+    EXPECT_TRUE(anchor.triangularSolve->requiresCubeTailPartition);
+    EXPECT_FALSE(anchor.lowerability.allSimtOnly);
   }
+  EXPECT_FALSE(plan.kernelLowerability.allSimtOnly);
   EXPECT_TRUE(plan.kernelLowerability.mixed);
 
   auto features = analyzeSimdSimtFeatures(*module, plan);

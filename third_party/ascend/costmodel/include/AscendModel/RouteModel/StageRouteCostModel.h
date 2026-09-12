@@ -129,6 +129,19 @@ struct TensorOperationWorkload {
   llvm::json::Object toJSON() const;
 };
 
+/// Route-independent description of one reduction operation. Pair stride is
+/// the row-major logical element distance between adjacent values on the
+/// reduced axis. It is derived from tensor shape, not a workload name.
+struct ReductionWorkload {
+  int64_t extent = 0;
+  int64_t pairStrideElements = 0;
+  std::string dataType;
+  double logicalOperationInstances = 0.0;
+
+  bool isValid() const;
+  llvm::json::Object toJSON() const;
+};
+
 /// Mode-independent work owned exactly once by one Stage.  Values are
 /// logical elements/bytes, not mode-specific instructions or cycles.
 struct StageWorkload {
@@ -148,6 +161,11 @@ struct StageWorkload {
   double indirectLoadTransactions = 0.0;
   double indirectStoreTransactions = 0.0;
   std::vector<AtomicWorkload> atomicWorkloads;
+  std::vector<ReductionWorkload> reductionWorkloads;
+  /// Maximum width of one logical tensor operation in this Stage. Unlike
+  /// issueElements this is not additive across operations or loop trips; it
+  /// bounds the number of useful warp groups for one tensor operation.
+  double maximumLogicalTensorElements = 0.0;
   double predicateElements = 0.0;
   double shuffleLaneSteps = 0.0;
   /// Portion of shuffleLaneSteps contributed by tt.scan (prefix-scan class).
@@ -193,6 +211,9 @@ struct StageResourceCycles {
 struct StageImplementationCost {
   StageImplementation implementation;
   double totalCycles = 0.0;
+  /// Intra-program SIMT warp groups used to price logical tensor work. This is
+  /// distinct from SuperBlock, which groups independent logical programs.
+  int64_t logicalTensorParallelismFactor = 1;
   StageResourceCycles resources;
 
   bool isValid() const;

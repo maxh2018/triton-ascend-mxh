@@ -530,6 +530,12 @@ static std::optional<SimtAnchorDescriptor> analyzeAnchor(Operation *op,
   } else if (isTriangularSolveLoop(op)) {
     descriptor.kind = SimtAnchorKind::TriangularSolveLoop;
     descriptor.triangularSolve = analyzeTriangularSolveFacts(op);
+    // The recurrence itself is a legal local SIMT scope, but a dense dot tail
+    // is intentionally kept outside that scope for SIMD/Cube lowering.  A
+    // whole-kernel pure-SIMT candidate would incorrectly absorb that tail;
+    // solve_tril confirms that such a candidate is not executable even at F1.
+    if (descriptor.triangularSolve->requiresCubeTailPartition)
+      descriptor.lowerability.allSimtOnly = false;
   } else if (isLoadedIndexDependentMemoryOp(op)) {
     descriptor.kind = SimtAnchorKind::LoadedIndexDependentMemory;
   } else {

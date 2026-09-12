@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <initializer_list>
+#include <optional>
 #include <system_error>
 
 using namespace mlir;
@@ -56,6 +57,57 @@ static double serialBody(const StageResourceCycles &resources) {
 static bool permitsSimdOverlap(const LogicalStage &stage) {
   return stage.scheduleKind == StageScheduleKind::IndependentPipelined &&
          stage.features.permitsSimdRoofline();
+}
+
+static std::optional<double>
+extentTwoPairStrideMultiplier(const LogicalStage &stage,
+                              const StageModeProfile &profile) {
+  // The calibration is an isolated one-reduction experiment.  Applying its
+  // absolute cycle count to a different logical tensor width overprices tiny
+  // reductions.  Transfer only the measured/reference-model ratio; the
+  // analytical model below continues to scale the amount of work.
+  if (stage.workload.reductionWorkloads.size() != 1)
+    return std::nullopt;
+  const ReductionWorkload &reduction =
+      stage.workload.reductionWorkloads.front();
+  if (reduction.extent != 2 || reduction.logicalOperationInstances != 1.0)
+    return std::nullopt;
+  auto rate = llvm::find_if(
+      profile.extentTwoReductionPairStrideRates,
+      [&](const ExtentTwoReductionPairStrideRate &candidate) {
+        return candidate.pairStrideElements == reduction.pairStrideElements &&
+               candidate.dataType == reduction.dataType;
+      });
+  if (rate == profile.extentTwoReductionPairStrideRates.end())
+    return std::nullopt;
+  return rate->systemCycles / rate->referenceModelSystemCycles;
+}
+
+static int64_t logicalTensorParallelismFactor(const LogicalStage &stage,
+                                              const HardwareProfile &profile,
+                                              StageMode mode) {
+  if (mode != StageMode::SIMT ||
+      stage.workload.maximumLogicalTensorElements <= 0.0 ||
+      stage.features.hasDot)
+    return 1;
+  const int64_t operationWarpGroups = std::max<int64_t>(
+      1, static_cast<int64_t>(std::ceil(
+             stage.workload.maximumLogicalTensorElements /
+             static_cast<double>(profile.simt.issueWidth))));
+  return std::max<int64_t>(
+      1, std::min({profile.logicalWarpGroupCount,
+                   profile.simtLogicalTensorParallelismCapacity,
+                   operationWarpGroups}));
+}
+
+static double applyLogicalTensorParallelism(double stageCycles,
+                                            const StageResourceCycles &resources,
+                                            int64_t factor) {
+  if (factor <= 1)
+    return stageCycles;
+  return resources.setup +
+         std::max(0.0, stageCycles - resources.setup) /
+             static_cast<double>(factor);
 }
 
 static StageResourceCycles
@@ -344,11 +396,18 @@ static double estimateStage(const LogicalStage &stage,
            std::max(std::ceil(count / static_cast<double>(groups)) * critical,
                     count * r.issue);
   }
-  case StageCostModelKind::RowwiseReduction:
-    return r.setup +
-           count * std::max(r.scalar + r.load + r.store + r.atomic +
-                                r.criticalPath + controlBody(r) + r.spill,
-                            r.issue);
+  case StageCostModelKind::RowwiseReduction: {
+    const double base =
+        r.setup +
+        count * std::max(r.scalar + r.load + r.store + r.atomic +
+                             r.criticalPath + controlBody(r) + r.spill,
+                         r.issue);
+    if (mode != StageMode::SIMD)
+      return base;
+    std::optional<double> multiplier =
+        extentTwoPairStrideMultiplier(stage, profile.simd);
+    return multiplier ? r.setup + (base - r.setup) * *multiplier : base;
+  }
   case StageCostModelKind::PrefixScan: {
     const double scanCritical =
         r.compute + r.predicate +
@@ -467,6 +526,13 @@ bool StageAtomicRate::isValid() const {
          unknownContentionMultiplier >= 1.0;
 }
 
+bool ExtentTwoReductionPairStrideRate::isValid() const {
+  return pairStrideElements > 0 && !dataType.empty() &&
+         std::isfinite(systemCycles) && systemCycles > 0.0 &&
+         std::isfinite(referenceModelSystemCycles) &&
+         referenceModelSystemCycles > 0.0;
+}
+
 bool StageModeProfile::isValid(StageMode mode) const {
   const std::array<double, 14> common = {setupCycles,
                                          predicateOperationsPerCycle,
@@ -505,12 +571,18 @@ bool StageModeProfile::isValid(StageMode mode) const {
                       }) &&
          atomicRates.contains("default") &&
          llvm::all_of(atomicRates,
-                      [](const auto &entry) { return entry.second.isValid(); });
+                      [](const auto &entry) { return entry.second.isValid(); }) &&
+         llvm::all_of(extentTwoReductionPairStrideRates,
+                      [](const ExtentTwoReductionPairStrideRate &rate) {
+                        return rate.isValid();
+                      });
 }
 
 bool HardwareProfile::isValid() const {
   return !profileVersion.empty() && !target.empty() &&
-         logicalWarpGroupCount > 0 && superblockUsefulFactorLimit > 0 &&
+         logicalWarpGroupCount > 0 &&
+         simtLogicalTensorParallelismCapacity > 0 &&
+         superblockUsefulFactorLimit > 0 &&
          superblockPersistentStatePressureFreeFactor > 0 &&
          superblockPersistentStatePressureFreeFactor <=
              superblockUsefulFactorLimit &&
@@ -601,9 +673,13 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       StageImplementationCost cost;
       cost.implementation = implementation;
       cost.resources = resources;
+      cost.logicalTensorParallelismFactor = logicalTensorParallelismFactor(
+          stage, profile, implementation.mode);
+      const double tensorParallelCycles = applyLogicalTensorParallelism(
+          estimateStage(stage, profile, implementation.mode, resources),
+          resources, cost.logicalTensorParallelismFactor);
       cost.totalCycles = applySuperBlock(
-          stage, resources, implementation, profile,
-          estimateStage(stage, profile, implementation.mode, resources));
+          stage, resources, implementation, profile, tensorParallelCycles);
       if (!cost.isValid())
         return llvm::createStringError(std::errc::invalid_argument,
                                        "Stage '%s' produced an invalid cost",

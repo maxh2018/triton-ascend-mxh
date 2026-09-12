@@ -1,7 +1,7 @@
 {
   "$schema": "./simd_simt_profile_schema.json",
-  "schema_version": 11,
-  "profile_version": "david-v100-simd-simt-20260906-v22",
+  "schema_version": 12,
+  "profile_version": "david-v100-simd-simt-20260915-v25-pair-stride-nondot-multiwarp",
   "target": "Ascend950PR/dav-c310",
   "description": "Stage Route Model hardware profile. Stage partitions and workloads are generated online from transformed TTIR; this file contains no workload-specific Stage template or route multiplier.",
   "microbenchmark_profile": "../microbench/ascend_davidv100_v1.json",
@@ -159,6 +159,31 @@
       "prefix_scan": {
         "dependency_factor": 42.45581534582609,
         "description": "Normalize the recorded A5 batch-8, extent-16 identity-subtracted scan ratio by base shuffle rates: factor_SIMD = (143.398 / 8.267) * 64 / (32 * 0.817124) * factor_SIMT. The model charges lane_steps / lane_rate * factor, so the measured time ratio is not itself the factor. This effective calibration includes lowering effects, not intrinsic latency or forward/reverse asymmetry. Recalibrate if base rates or lowering change."
+      },
+      "extent_two_reduction_pair_stride": {
+        "description": "Route-matched SIMD SYS_CNT calibration for one extent-two reduction, keyed by logical row-major pair stride and scalar dtype. Each entry also records the old analytical score for the identical 512-element calibration shape; the measured/reference ratio transfers the stride effect while the analytical model retains logical-width scaling. Unknown combinations retain the analytical reduction model.",
+        "rates": [
+          {"pair_stride_elements": 1, "data_type": "f32", "system_cycles": 10.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 1, "data_type": "i32", "system_cycles": 10.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 2, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 2, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 4, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 4, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 8, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 8, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 16, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 16, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 32, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 32, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 64, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 64, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 128, "data_type": "f32", "system_cycles": 20.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 128, "data_type": "i32", "system_cycles": 20.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 256, "data_type": "f32", "system_cycles": 11.0, "reference_model_system_cycles": 9.0},
+          {"pair_stride_elements": 256, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0}
+        ],
+        "source": "topk_validation/kernel5_stage_audit/kernel5_stage_validation.csv; SIMD SYS_CNT special kernels, 20 launches and 1280 counters per calibrated reduction shape",
+        "confidence": "medium"
       },
       "indirect_memory": {
         "load_transactions_per_system_cycle": 0.125,
@@ -336,6 +361,12 @@
       "prefix_scan": {
         "dependency_factor": 1.0,
         "description": "SIMT shuffle throughput already represents the lane dependency chain measured by the A5 scan sweep."
+      },
+      "logical_tensor_parallelism": {
+        "max_effective_warp_groups": 4,
+        "description": "Maximum useful intra-program warp groups for one non-dot logical tensor operation. Dot/Cube stages retain Q=1 because route-matched prefix measurements show a serial first-Cube activation and pure-SIMT solve_tril dot tails are not executable. The first throughput saturation knee is used; num_warps remains a separate upper bound.",
+        "source": "profiles/microbench/data_provider/tput.cce warp sweep; first measured saturation knee",
+        "confidence": "medium"
       },
       "indirect_memory": {
         "load_transactions_per_system_cycle": 0.5,
