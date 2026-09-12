@@ -12,6 +12,7 @@
 using mlir::ascend::HardwareProfile;
 using mlir::ascend::LogicalStage;
 using mlir::ascend::LogicalStageCost;
+using mlir::ascend::ReductionWorkload;
 using mlir::ascend::SimdSimtFeatureSummary;
 using mlir::ascend::solveStageRoutes;
 using mlir::ascend::StageCostEvaluator;
@@ -540,6 +541,129 @@ TEST(SimdSimtCostModelTest, LoopCarriedRecurrenceAppliesScanDependencyFactor) {
     FAIL() << llvm::toString(plainScaled.takeError());
   EXPECT_DOUBLE_EQ(plainScaled->stages.front().implementations[0].totalCycles,
                    baseline->stages.front().implementations[0].totalCycles);
+}
+
+TEST(SimdSimtCostModelTest, ExtentTwoReductionUsesPairStrideCalibration) {
+  LogicalStage stage =
+      logicalStage("pair_stride_reduce", StageCostModelKind::RowwiseReduction);
+  stage.features.hasReduction = true;
+  stage.workload.paysKernelSetup = false;
+  stage.workload.operationElements.clear();
+  stage.workload.issueElements = 64.0;
+  stage.workload.shuffleLaneSteps = 256.0;
+  stage.workload.reductionWorkloads.push_back({2, 128, "f32", 1.0});
+
+  HardwareProfile profile = hardwareProfile();
+  profile.simd.extentTwoReductionPairStrideRates.push_back(
+      {128, "f32", 20.0, 10.0});
+  auto table = evaluateOneStage(std::move(stage), profile);
+  if (!table)
+    FAIL() << llvm::toString(table.takeError());
+
+  const StageImplementationCost &simd =
+      table->stages.front().implementations.front();
+  ASSERT_EQ(simd.implementation.mode, StageMode::SIMD);
+  // The analytical body is 8 cycles, so a measured/reference ratio of two
+  // produces 16 cycles while retaining workload-width scaling.
+  EXPECT_DOUBLE_EQ(simd.totalCycles, 16.0);
+}
+
+TEST(SimdSimtCostModelTest,
+     SimtLogicalTensorWorkUsesMeasuredWarpGroupCapacity) {
+  LogicalStage stage =
+      logicalStage("logical_tensor", StageCostModelKind::ScalarIssue);
+  stage.workload.maximumLogicalTensorElements = 512.0;
+
+  HardwareProfile profile = hardwareProfile();
+  profile.logicalWarpGroupCount = 32;
+  profile.simtLogicalTensorParallelismCapacity = 4;
+  auto table = evaluateOneStage(std::move(stage), profile);
+  if (!table)
+    FAIL() << llvm::toString(table.takeError());
+
+  const StageImplementationCost &simt =
+      table->stages.front().implementations.back();
+  ASSERT_EQ(simt.implementation.mode, StageMode::SIMT);
+  EXPECT_EQ(simt.logicalTensorParallelismFactor, 4);
+  // setup=10 is preserved; the 64-cycle logical tensor body uses four groups.
+  EXPECT_DOUBLE_EQ(simt.totalCycles, 26.0);
+}
+
+TEST(SimdSimtCostModelTest,
+     SimtLogicalTensorParallelismIsLimitedByOperationWidth) {
+  LogicalStage stage =
+      logicalStage("narrow_logical_tensor", StageCostModelKind::ScalarIssue);
+  stage.workload.maximumLogicalTensorElements = 64.0;
+
+  HardwareProfile profile = hardwareProfile();
+  profile.logicalWarpGroupCount = 32;
+  profile.simtLogicalTensorParallelismCapacity = 4;
+  auto table = evaluateOneStage(std::move(stage), profile);
+  if (!table)
+    FAIL() << llvm::toString(table.takeError());
+
+  const StageImplementationCost &simt =
+      table->stages.front().implementations.back();
+  EXPECT_EQ(simt.logicalTensorParallelismFactor, 2);
+  EXPECT_DOUBLE_EQ(simt.totalCycles, 42.0);
+}
+
+TEST(SimdSimtCostModelTest, SimtDotRetainsSerialLogicalTensorSpan) {
+  LogicalStage stage =
+      logicalStage("dot", StageCostModelKind::CubeRoofline);
+  stage.features.hasDot = true;
+  stage.workload.maximumLogicalTensorElements = 512.0;
+  stage.workload.dotFlops = 8192.0;
+
+  HardwareProfile profile = hardwareProfile();
+  profile.logicalWarpGroupCount = 32;
+  profile.simtLogicalTensorParallelismCapacity = 4;
+  auto table = evaluateOneStage(std::move(stage), profile);
+  if (!table)
+    FAIL() << llvm::toString(table.takeError());
+
+  const StageImplementationCost &simt =
+      table->stages.front().implementations.back();
+  ASSERT_EQ(simt.implementation.mode, StageMode::SIMT);
+  EXPECT_EQ(simt.logicalTensorParallelismFactor, 1);
+}
+
+TEST(SimdSimtCostModelTest, WorkloadAnalysisExtractsReductionPairStride) {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<mlir::func::FuncDialect>();
+  context.allowUnregisteredDialects();
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+    module {
+      func.func @kernel(%arg0: tensor<2x2x8xf32>) {
+        %0 = "tt.reduce"(%arg0) {axis = 1 : i32}
+             : (tensor<2x2x8xf32>) -> tensor<2x8xf32>
+        return
+      }
+    }
+  )mlir",
+                                                        &context);
+  ASSERT_TRUE(module);
+
+  StagePartition partition;
+  auto function = module->lookupSymbol<mlir::func::FuncOp>("kernel");
+  ASSERT_TRUE(function);
+  LogicalStage stage =
+      logicalStage("reduce_workload", StageCostModelKind::RowwiseReduction);
+  stage.workload = {};
+  stage.operations.push_back(&function.getBody().front().front());
+  partition.stages.push_back(std::move(stage));
+  partition.operationOwnershipComplete = true;
+  if (llvm::Error error = StageWorkloadAnalysis().analyze(partition))
+    FAIL() << llvm::toString(std::move(error));
+
+  const StageWorkload &workload = partition.stages.front().workload;
+  ASSERT_EQ(workload.reductionWorkloads.size(), 1u);
+  const ReductionWorkload &reduction = workload.reductionWorkloads.front();
+  EXPECT_EQ(reduction.extent, 2);
+  EXPECT_EQ(reduction.pairStrideElements, 8);
+  EXPECT_EQ(reduction.dataType, "f32");
+  EXPECT_DOUBLE_EQ(reduction.logicalOperationInstances, 1.0);
+  EXPECT_DOUBLE_EQ(workload.maximumLogicalTensorElements, 32.0);
 }
 
 TEST(SimdSimtCostModelTest, IndependentLoopUsesSimdRooflineAndSerialSimtCost) {

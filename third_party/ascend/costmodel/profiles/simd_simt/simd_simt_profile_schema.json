@@ -23,8 +23,8 @@
       "description": "Relative path to this JSON Schema; used by editors and offline validators, not by Route Model scoring."
     },
     "schema_version": {
-      "const": 11,
-      "description": "Machine-readable Stage Route Model hardware-profile layout. Version 11 adds independent atomic-RMW rates and an explicit unknown-contention policy."
+      "const": 12,
+      "description": "Machine-readable Stage Route Model hardware-profile layout. Version 12 adds extent-two reduction pair-stride rates and SIMT logical-tensor warp-group capacity."
     },
     "profile_version": {
       "type": "string",
@@ -522,6 +522,88 @@
             "description": {
               "type": "string",
               "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "extent_two_reduction_pair_stride": {
+          "type": "object",
+          "required": [
+            "description",
+            "rates",
+            "source",
+            "confidence"
+          ],
+          "properties": {
+            "description": {
+              "type": "string",
+              "minLength": 1
+            },
+            "rates": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "pair_stride_elements",
+                  "data_type",
+                  "system_cycles",
+                  "reference_model_system_cycles"
+                ],
+                "properties": {
+                  "pair_stride_elements": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "data_type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "system_cycles": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "reference_model_system_cycles": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "confidence": {
+              "$ref": "#/definitions/confidence"
+            }
+          },
+          "additionalProperties": false
+        },
+        "logical_tensor_parallelism": {
+          "type": "object",
+          "required": [
+            "max_effective_warp_groups",
+            "description",
+            "source",
+            "confidence"
+          ],
+          "properties": {
+            "max_effective_warp_groups": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "confidence": {
+              "$ref": "#/definitions/confidence"
             }
           },
           "additionalProperties": false

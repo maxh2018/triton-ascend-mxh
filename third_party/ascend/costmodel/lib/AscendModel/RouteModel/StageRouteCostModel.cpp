@@ -210,6 +210,21 @@ llvm::json::Object TensorOperationWorkload::toJSON() const {
                             : "segmented_vector"}};
 }
 
+bool ReductionWorkload::isValid() const {
+  return extent > 1 && pairStrideElements > 0 && !dataType.empty() &&
+         std::isfinite(logicalOperationInstances) &&
+         logicalOperationInstances >= 0.0;
+}
+
+llvm::json::Object ReductionWorkload::toJSON() const {
+  return llvm::json::Object{
+      {"extent", extent},
+      {"pair_stride_elements", pairStrideElements},
+      {"data_type", dataType},
+      {"logical_operation_instances_per_iteration",
+       logicalOperationInstances}};
+}
+
 bool StageWorkload::isFiniteAndNonNegative() const {
   const std::array<double, 15> values = {scalarOperations,
                                          loadBytes,
@@ -220,6 +235,7 @@ bool StageWorkload::isFiniteAndNonNegative() const {
                                          indirectStoreBytes,
                                          indirectLoadTransactions,
                                          indirectStoreTransactions,
+                                         maximumLogicalTensorElements,
                                          predicateElements,
                                          shuffleLaneSteps,
                                          scanShuffleLaneSteps,
@@ -245,6 +261,10 @@ bool StageWorkload::isFiniteAndNonNegative() const {
                       }) &&
          llvm::all_of(atomicWorkloads, [](const AtomicWorkload &atomic) {
            return atomic.isFiniteAndNonNegative();
+         }) &&
+         llvm::all_of(reductionWorkloads,
+                      [](const ReductionWorkload &reduction) {
+                        return reduction.isValid();
          });
 }
 
@@ -278,6 +298,12 @@ llvm::json::Object StageWorkload::toJSON() const {
   for (const AtomicWorkload &atomic : atomicWorkloads)
     atomics.push_back(atomic.toJSON());
   result["atomic_workloads"] = std::move(atomics);
+  llvm::json::Array reductions;
+  for (const ReductionWorkload &reduction : reductionWorkloads)
+    reductions.push_back(reduction.toJSON());
+  result["reduction_workloads"] = std::move(reductions);
+  result["maximum_logical_tensor_elements"] =
+      maximumLogicalTensorElements;
   result["predicate_elements_per_iteration"] = predicateElements;
   result["shuffle_lane_steps_per_iteration"] = shuffleLaneSteps;
   result["scan_shuffle_lane_steps_per_iteration"] = scanShuffleLaneSteps;
@@ -347,12 +373,15 @@ llvm::json::Object StageResourceCycles::toJSON() const {
 
 bool StageImplementationCost::isValid() const {
   return implementation.isValid() && std::isfinite(totalCycles) &&
-         totalCycles >= 0.0 && resources.isFiniteAndNonNegative();
+         totalCycles >= 0.0 && logicalTensorParallelismFactor > 0 &&
+         resources.isFiniteAndNonNegative();
 }
 
 llvm::json::Object StageImplementationCost::toJSON() const {
   return llvm::json::Object{{"implementation", implementation.toJSON()},
                             {"total_system_cycles", totalCycles},
+                            {"logical_tensor_parallelism_factor",
+                             logicalTensorParallelismFactor},
                             {"resource_system_cycles", resources.toJSON()}};
 }
 

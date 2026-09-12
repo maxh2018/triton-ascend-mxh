@@ -44,7 +44,7 @@ namespace {
 constexpr llvm::StringLiteral kAllSimd = "all_simd";
 constexpr llvm::StringLiteral kAllSimtOnly = "all_simt_only";
 constexpr llvm::StringLiteral kMixedSimdSimt = "mixed_simd_simt";
-constexpr int64_t kSupportedProfileSchemaVersion = 11;
+constexpr int64_t kSupportedProfileSchemaVersion = 12;
 
 struct StructuralProfile {
   int64_t tinyDotFlopsMax = 0;
@@ -247,6 +247,36 @@ static void readStageResources(ProfileJSONReader &reader,
   if (const auto *scan = resources->getObject("prefix_scan"))
     profile.prefixScanDependencyFactor =
         reader.number(*scan, "dependency_factor", prefix + ".prefix_scan");
+  if (const auto *reduction =
+          resources->getObject("extent_two_reduction_pair_stride")) {
+    const auto *rates = reduction->getArray("rates");
+    if (!rates) {
+      reader.setError(prefix +
+                      ".extent_two_reduction_pair_stride.rates must be an "
+                      "array");
+    } else {
+      for (const llvm::json::Value &value : *rates) {
+        const auto *rateObject = value.getAsObject();
+        if (!rateObject) {
+          reader.setError(prefix +
+                          ".extent_two_reduction_pair_stride.rates entries "
+                          "must be objects");
+          break;
+        }
+        ExtentTwoReductionPairStrideRate rate;
+        const std::string ratePath =
+            prefix + ".extent_two_reduction_pair_stride.rates";
+        rate.pairStrideElements =
+            reader.integer(*rateObject, "pair_stride_elements", ratePath);
+        rate.dataType = reader.string(*rateObject, "data_type", ratePath);
+        rate.systemCycles =
+            reader.number(*rateObject, "system_cycles", ratePath);
+        rate.referenceModelSystemCycles = reader.number(
+            *rateObject, "reference_model_system_cycles", ratePath);
+        profile.extentTwoReductionPairStrideRates.push_back(std::move(rate));
+      }
+    }
+  }
   if (const auto *indirect =
           reader.object(*resources, "indirect_memory", prefix)) {
     const std::string path = prefix + ".indirect_memory";
@@ -475,6 +505,11 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     }
     readStageResources(reader, *simt, "simt", hardware.simt);
     if (const auto *resources = simt->getObject("stage_resources")) {
+      if (const auto *parallelism =
+              resources->getObject("logical_tensor_parallelism"))
+        hardware.simtLogicalTensorParallelismCapacity = reader.integer(
+            *parallelism, "max_effective_warp_groups",
+            "simt.stage_resources.logical_tensor_parallelism");
       if (const auto *superblock = resources->getObject("superblock")) {
         hardware.superblockUsefulFactorLimit =
             reader.integer(*superblock, "useful_factor_limit", "superblock");
