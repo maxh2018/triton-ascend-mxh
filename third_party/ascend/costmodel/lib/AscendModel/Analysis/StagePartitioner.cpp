@@ -150,6 +150,96 @@ static llvm::StringRef getProfileOperationName(Operation *operation) {
       .Default("generic.issue");
 }
 
+static RankedTensorType getRepresentativeTensorType(Operation *operation) {
+  RankedTensorType representative;
+  int64_t maximumElements = -1;
+  auto consider = [&](Type type) {
+    auto tensor = dyn_cast<RankedTensorType>(type);
+    if (!tensor || !tensor.hasStaticShape())
+      return;
+    const int64_t elements = tensor.getNumElements();
+    if (elements > maximumElements) {
+      representative = tensor;
+      maximumElements = elements;
+    }
+  };
+  for (Type type : operation->getResultTypes())
+    consider(type);
+  if (!representative)
+    for (Value operand : operation->getOperands())
+      consider(operand.getType());
+  return representative;
+}
+
+static bool hasTensorBroadcast(Operation *operation,
+                               RankedTensorType outputType) {
+  if (!outputType || !outputType.hasStaticShape())
+    return false;
+  for (Value operand : operation->getOperands()) {
+    if (Operation *producer = operand.getDefiningOp()) {
+      const llvm::StringRef producerName = producer->getName().getStringRef();
+      if (producerName == "tt.broadcast" || producerName == "tt.expand_dims")
+        return true;
+    }
+    auto input = dyn_cast<RankedTensorType>(operand.getType());
+    if (!input || !input.hasStaticShape() ||
+        input.getRank() != outputType.getRank())
+      continue;
+    for (int64_t dimension = 0; dimension < input.getRank(); ++dimension)
+      if (input.getShape()[dimension] == 1 &&
+          outputType.getShape()[dimension] > 1)
+        return true;
+  }
+  return false;
+}
+
+static void accumulateTensorOperationWorkload(Operation *operation,
+                                              llvm::StringRef profileName,
+                                              double elements,
+                                              StageWorkload &work) {
+  RankedTensorType tensor = getRepresentativeTensorType(operation);
+  if (!tensor || tensor.getRank() == 0 || !tensor.hasStaticShape())
+    return;
+  const int64_t elementBits = getScalarBitWidth(tensor.getElementType());
+  const int64_t contiguousElements = tensor.getShape().back();
+  if (elementBits <= 0 || contiguousElements <= 0)
+    return;
+  const double segments = elements / static_cast<double>(contiguousElements);
+  // Dense TTIR tensors lower to row-major memrefs for this template.  For a
+  // non-broadcast multidimensional operation, a row shorter than one 32-byte
+  // block makes the outer stride illegal and NPUIR selects scalar_eltwise_*.
+  constexpr int64_t npuVectorDataBlockBits = 32 * 8;
+  // The scalar fallback rule belongs to NPU-IR elementwise templates.  Shape
+  // construction and pointer bookkeeping currently share generic.issue in the
+  // profile, but they do not lower through scalar_eltwise_* and must not
+  // inherit this rule.
+  const bool scalarFallback =
+      profileName != "generic.issue" && tensor.getRank() > 1 &&
+      !hasTensorBroadcast(operation, tensor) &&
+      (contiguousElements * elementBits) % npuVectorDataBlockBits != 0;
+
+  for (TensorOperationWorkload &group : work.tensorOperationWorkloads) {
+    if (group.operation == profileName &&
+        group.elementBitWidth == elementBits &&
+        group.contiguousElementsPerSegment == contiguousElements &&
+        group.simdScalarFallback == scalarFallback) {
+      group.logicalElements += elements;
+      group.segmentCount += segments;
+      group.logicalOperationInstances += 1.0;
+      return;
+    }
+  }
+  TensorOperationWorkload group;
+  group.operation = profileName.str();
+  group.elementBitWidth = elementBits;
+  group.logicalElements = elements;
+  group.segmentCount = segments;
+  group.contiguousElementsPerSegment = contiguousElements;
+  group.logicalOperationInstances = 1.0;
+  group.simdScalarFallback = scalarFallback;
+  work.tensorOperationWorkloads.push_back(std::move(group));
+}
+
 static void accumulateDotWorkload(Operation *operation, StageWorkload &work) {
   if (operation->getNumOperands() < 2)
     return;
@@ -278,6 +368,8 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
     accumulateReductionWorkload(operation, work, name == "tt.scan");
   if (name == "arith.cmpi" || name == "arith.cmpf") {
     work.predicateElements += elements;
+    accumulateTensorOperationWorkload(operation, "predicate.cmp", elements,
+                                      work);
     return;
   }
   if (name == "scf.for" || name == "scf.if" || name == "scf.while")
@@ -287,7 +379,9 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
     work.scalarOperations += 1.0;
     return;
   }
-  work.operationElements[getProfileOperationName(operation)] += elements;
+  const llvm::StringRef profileName = getProfileOperationName(operation);
+  work.operationElements[profileName] += elements;
+  accumulateTensorOperationWorkload(operation, profileName, elements, work);
 }
 
 static void mergeWorkload(StageWorkload &into, StageWorkload from);
@@ -305,6 +399,11 @@ static void scaleWorkload(StageWorkload &work, double scale) {
   for (AtomicWorkload &atomic : work.atomicWorkloads) {
     atomic.logicalElements *= scale;
     atomic.logicalOperationInstances *= scale;
+  }
+  for (TensorOperationWorkload &tensor : work.tensorOperationWorkloads) {
+    tensor.logicalElements *= scale;
+    tensor.segmentCount *= scale;
+    tensor.logicalOperationInstances *= scale;
   }
   work.predicateElements *= scale;
   work.shuffleLaneSteps *= scale;
@@ -400,6 +499,24 @@ static void mergeWorkload(StageWorkload &into, StageWorkload from) {
   into.indirectLoadTransactions += from.indirectLoadTransactions;
   into.indirectStoreTransactions += from.indirectStoreTransactions;
   llvm::append_range(into.atomicWorkloads, std::move(from.atomicWorkloads));
+  for (TensorOperationWorkload &source : from.tensorOperationWorkloads) {
+    auto destination = llvm::find_if(
+        into.tensorOperationWorkloads,
+        [&](const TensorOperationWorkload &item) {
+          return item.operation == source.operation &&
+                 item.elementBitWidth == source.elementBitWidth &&
+                 item.contiguousElementsPerSegment ==
+                     source.contiguousElementsPerSegment &&
+                 item.simdScalarFallback == source.simdScalarFallback;
+        });
+    if (destination == into.tensorOperationWorkloads.end()) {
+      into.tensorOperationWorkloads.push_back(std::move(source));
+      continue;
+    }
+    destination->logicalElements += source.logicalElements;
+    destination->segmentCount += source.segmentCount;
+    destination->logicalOperationInstances += source.logicalOperationInstances;
+  }
   into.predicateElements += from.predicateElements;
   into.shuffleLaneSteps += from.shuffleLaneSteps;
   into.scanShuffleLaneSteps += from.scanShuffleLaneSteps;

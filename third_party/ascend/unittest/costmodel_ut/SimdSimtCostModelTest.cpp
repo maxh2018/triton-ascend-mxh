@@ -28,6 +28,7 @@ using mlir::ascend::StageScheduleKind;
 using mlir::ascend::StageTransitionCost;
 using mlir::ascend::StageWorkload;
 using mlir::ascend::StageWorkloadAnalysis;
+using mlir::ascend::TensorOperationWorkload;
 using mlir::ascend::TriangularSolveFacts;
 
 namespace {
@@ -58,6 +59,7 @@ HardwareProfile hardwareProfile(StageTransitionCost transition = {}) {
   profile.superblockPersistentStateBytesPerCycle = 8.0;
   auto fill = [](auto &mode) {
     mode.setupCycles = 10.0;
+    mode.vectorWidthBits = 2048;
     mode.vectorWidth = 64;
     mode.issueWidth = 64;
     mode.operationRates["f32.add"] = {1.0, 1.0};
@@ -84,6 +86,7 @@ HardwareProfile hardwareProfile(StageTransitionCost transition = {}) {
   fill(profile.simd);
   fill(profile.simt);
   profile.simt.vectorWidth = 1;
+  profile.simt.vectorWidthBits = 1;
   profile.simt.issueWidth = 32;
   profile.transition = std::move(transition);
   return profile;
@@ -127,6 +130,108 @@ TEST(SimdSimtCostModelTest, StageHasOnlySimdOrSimtImplementations) {
             StageMode::SIMD);
   EXPECT_EQ(table->stages.front().implementations[1].implementation.mode,
             StageMode::SIMT);
+}
+
+TEST(SimdSimtCostModelTest, SimdPricesShortAxesPerSegmentAndElementWidth) {
+  auto simdCost = [](int64_t elementBits, int64_t contiguousElements,
+                     double segmentCount, bool scalarFallback) {
+    LogicalStage stage =
+        logicalStage("short-axis", StageCostModelKind::ScalarMath);
+    stage.workload.operationElements["f32.add"] =
+        static_cast<double>(contiguousElements) * segmentCount;
+    TensorOperationWorkload tensor;
+    tensor.operation = "f32.add";
+    tensor.elementBitWidth = elementBits;
+    tensor.logicalElements =
+        static_cast<double>(contiguousElements) * segmentCount;
+    tensor.segmentCount = segmentCount;
+    tensor.contiguousElementsPerSegment = contiguousElements;
+    tensor.logicalOperationInstances = 1.0;
+    tensor.simdScalarFallback = scalarFallback;
+    stage.workload.tensorOperationWorkloads.push_back(std::move(tensor));
+    auto table = evaluateOneStage(std::move(stage));
+    if (!table) {
+      ADD_FAILURE() << llvm::toString(table.takeError());
+      return mlir::ascend::StageResourceCycles{};
+    }
+    return table->stages.front().implementations.front().resources;
+  };
+
+  // All three shapes contain 64 FP32 elements.  Aggregating before ceil would
+  // price each as one 256-byte vector instruction; the segmented model keeps
+  // the four and eight independently masked rows visible.
+  auto fourBySixteen = simdCost(32, 16, 4.0, false);
+  auto eightByEight = simdCost(32, 8, 8.0, false);
+  auto sixteenByFour = simdCost(32, 4, 16.0, true);
+  EXPECT_DOUBLE_EQ(fourBySixteen.compute, 4.0);
+  EXPECT_DOUBLE_EQ(eightByEight.compute, 8.0);
+  EXPECT_DOUBLE_EQ(sixteenByFour.compute, 0.0);
+  EXPECT_DOUBLE_EQ(sixteenByFour.scalar, 64.0);
+
+  // FP16 uses twice as many elements per 256-byte instruction; width is not
+  // silently inherited from the old FP32-only vectorWidth field.
+  auto fp16Rows = simdCost(16, 128, 2.0, false);
+  EXPECT_DOUBLE_EQ(fp16Rows.compute, 2.0);
+}
+
+TEST(SimdSimtCostModelTest,
+     WorkloadPreservesEqualTotalElementwiseSegmentGeometry) {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<mlir::arith::ArithDialect>();
+  context.getOrLoadDialect<mlir::func::FuncDialect>();
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+    module {
+      func.func @kernel(%a4x16: tensor<4x16xf32>,
+                        %b4x16: tensor<4x16xf32>,
+                        %a8x8: tensor<8x8xf32>,
+                        %b8x8: tensor<8x8xf32>,
+                        %a16x4: tensor<16x4xf32>,
+                        %b16x4: tensor<16x4xf32>) {
+        %four_by_sixteen = arith.addf %a4x16, %b4x16 : tensor<4x16xf32>
+        %eight_by_eight = arith.addf %a8x8, %b8x8 : tensor<8x8xf32>
+        %sixteen_by_four = arith.addf %a16x4, %b16x4 : tensor<16x4xf32>
+        return
+      }
+    }
+  )mlir",
+                                                        &context);
+  ASSERT_TRUE(module);
+
+  StagePartition partition;
+  partition.operationOwnershipComplete = true;
+  LogicalStage stage =
+      logicalStage("short_axis_geometry", StageCostModelKind::ScalarMath);
+  auto function = module->lookupSymbol<mlir::func::FuncOp>("kernel");
+  ASSERT_TRUE(function);
+  for (mlir::Operation &operation :
+       function.getBody().front().without_terminator())
+    stage.operations.push_back(&operation);
+  partition.stages.push_back(std::move(stage));
+
+  if (llvm::Error error = StageWorkloadAnalysis().analyze(partition))
+    FAIL() << llvm::toString(std::move(error));
+  const auto &workloads =
+      partition.stages.front().workload.tensorOperationWorkloads;
+  ASSERT_EQ(workloads.size(), 3u);
+  auto findRun = [&](int64_t run) -> const TensorOperationWorkload * {
+    auto iterator = llvm::find_if(workloads, [&](const auto &workload) {
+      return workload.contiguousElementsPerSegment == run;
+    });
+    return iterator == workloads.end() ? nullptr : &*iterator;
+  };
+  const TensorOperationWorkload *fourBySixteen = findRun(16);
+  const TensorOperationWorkload *eightByEight = findRun(8);
+  const TensorOperationWorkload *sixteenByFour = findRun(4);
+  ASSERT_NE(fourBySixteen, nullptr);
+  ASSERT_NE(eightByEight, nullptr);
+  ASSERT_NE(sixteenByFour, nullptr);
+  EXPECT_DOUBLE_EQ(fourBySixteen->logicalElements, 64.0);
+  EXPECT_DOUBLE_EQ(fourBySixteen->segmentCount, 4.0);
+  EXPECT_FALSE(fourBySixteen->simdScalarFallback);
+  EXPECT_DOUBLE_EQ(eightByEight->segmentCount, 8.0);
+  EXPECT_FALSE(eightByEight->simdScalarFallback);
+  EXPECT_DOUBLE_EQ(sixteenByFour->segmentCount, 16.0);
+  EXPECT_TRUE(sixteenByFour->simdScalarFallback);
 }
 
 TEST(SimdSimtCostModelTest,

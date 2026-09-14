@@ -187,6 +187,29 @@ llvm::json::Object AtomicWorkload::toJSON() const {
   return result;
 }
 
+bool TensorOperationWorkload::isFiniteAndNonNegative() const {
+  const std::array<double, 3> values = {logicalElements, segmentCount,
+                                        logicalOperationInstances};
+  return !operation.empty() && elementBitWidth > 0 &&
+         contiguousElementsPerSegment > 0 &&
+         std::all_of(values.begin(), values.end(), [](double value) {
+           return std::isfinite(value) && value >= 0.0;
+         });
+}
+
+llvm::json::Object TensorOperationWorkload::toJSON() const {
+  return llvm::json::Object{
+      {"operation", operation},
+      {"element_bit_width", elementBitWidth},
+      {"logical_elements_per_iteration", logicalElements},
+      {"segment_count_per_iteration", segmentCount},
+      {"contiguous_elements_per_segment", contiguousElementsPerSegment},
+      {"logical_operation_instances_per_iteration", logicalOperationInstances},
+      {"simd_lowering", simdScalarFallback
+                            ? "scalar_fallback_unaligned_outer_stride"
+                            : "segmented_vector"}};
+}
+
 bool StageWorkload::isFiniteAndNonNegative() const {
   const std::array<double, 15> values = {scalarOperations,
                                          loadBytes,
@@ -216,6 +239,10 @@ bool StageWorkload::isFiniteAndNonNegative() const {
                         return std::isfinite(entry.second) &&
                                entry.second >= 0.0;
                       }) &&
+         llvm::all_of(tensorOperationWorkloads,
+                      [](const TensorOperationWorkload &tensor) {
+                        return tensor.isFiniteAndNonNegative();
+                      }) &&
          llvm::all_of(atomicWorkloads, [](const AtomicWorkload &atomic) {
            return atomic.isFiniteAndNonNegative();
          });
@@ -227,6 +254,10 @@ llvm::json::Object StageWorkload::toJSON() const {
   for (const auto &[name, elements] : operationElements)
     operations[name] = elements;
   result["operation_elements_per_iteration"] = std::move(operations);
+  llvm::json::Array tensors;
+  for (const TensorOperationWorkload &tensor : tensorOperationWorkloads)
+    tensors.push_back(tensor.toJSON());
+  result["tensor_operation_workloads"] = std::move(tensors);
   result["scalar_operations_per_iteration"] = scalarOperations;
   result["load_bytes_per_iteration"] = loadBytes;
   result["store_bytes_per_iteration"] = storeBytes;

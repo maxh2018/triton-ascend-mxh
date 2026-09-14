@@ -107,10 +107,33 @@ struct AtomicWorkload {
   llvm::json::Object toJSON() const;
 };
 
+/// A compact group of tensor operations with the same route-independent
+/// shape signature.  Keeping the contiguous run and segment count separate
+/// prevents SIMD pricing from incorrectly merging several short rows into
+/// one full-width vector instruction.  Equal signatures are aggregated, so
+/// this is diagnostic/cost state rather than an op-level graph.
+struct TensorOperationWorkload {
+  std::string operation;
+  int64_t elementBitWidth = 0;
+  double logicalElements = 0.0;
+  double segmentCount = 0.0;
+  int64_t contiguousElementsPerSegment = 0;
+  double logicalOperationInstances = 0.0;
+  /// The current NPUIR elementwise template executes a dense multidimensional
+  /// tensor through scalar code when its outer row stride is not 32-byte
+  /// aligned.  This fact is derived from static TTIR shape; it is not a
+  /// route-selection heuristic.
+  bool simdScalarFallback = false;
+
+  bool isFiniteAndNonNegative() const;
+  llvm::json::Object toJSON() const;
+};
+
 /// Mode-independent work owned exactly once by one Stage.  Values are
 /// logical elements/bytes, not mode-specific instructions or cycles.
 struct StageWorkload {
   llvm::StringMap<double> operationElements;
+  std::vector<TensorOperationWorkload> tensorOperationWorkloads;
   double scalarOperations = 0.0;
   double loadBytes = 0.0;
   double storeBytes = 0.0;
