@@ -188,25 +188,24 @@ llvm::json::Object AtomicWorkload::toJSON() const {
 }
 
 bool StageWorkload::isFiniteAndNonNegative() const {
-  const std::array<double, 15> values = {
-      scalarOperations,
-      loadBytes,
-      storeBytes,
-      loadWarpInstructions,
-      storeWarpInstructions,
-      indirectLoadBytes,
-      indirectStoreBytes,
-      indirectLoadTransactions,
-      indirectStoreTransactions,
-      predicateElements,
-      shuffleLaneSteps,
-      scanShuffleLaneSteps,
-      dotFlops,
-      issueElements,
-      estimatedSpillTransactions};
-  if (!std::all_of(values.begin(), values.end(), [](double value) {
-        return std::isfinite(value) && value >= 0.0;
-      }) ||
+  const std::array<double, 15> values = {scalarOperations,
+                                         loadBytes,
+                                         storeBytes,
+                                         loadWarpInstructions,
+                                         storeWarpInstructions,
+                                         indirectLoadBytes,
+                                         indirectStoreBytes,
+                                         indirectLoadTransactions,
+                                         indirectStoreTransactions,
+                                         predicateElements,
+                                         shuffleLaneSteps,
+                                         scanShuffleLaneSteps,
+                                         dotFlops,
+                                         issueElements,
+                                         estimatedSpillTransactions};
+  if (!std::all_of(
+          values.begin(), values.end(),
+          [](double value) { return std::isfinite(value) && value >= 0.0; }) ||
       indirectLoadBytes > loadBytes || indirectStoreBytes > storeBytes ||
       indirectLoadTransactions > loadWarpInstructions ||
       indirectStoreTransactions > storeWarpInstructions ||
@@ -284,12 +283,10 @@ llvm::json::Object StageModelFeatures::toJSON() const {
 
 bool StageResourceCycles::isFiniteAndNonNegative() const {
   const std::array<double, 17> values = {
-      setup,           scalar,        load,
-      store,           atomic,        compute,
-      predicate,       shuffle,       scanShuffle,
-      dot,             loopControl,   branchControl,
-      divergence,      synchronization,
-      spill,           issue,         criticalPath};
+      setup,       scalar,        load,       store,           atomic,
+      compute,     predicate,     shuffle,    scanShuffle,     dot,
+      loopControl, branchControl, divergence, synchronization, spill,
+      issue,       criticalPath};
   return std::all_of(values.begin(), values.end(), [](double value) {
     return std::isfinite(value) && value >= 0.0;
   });
