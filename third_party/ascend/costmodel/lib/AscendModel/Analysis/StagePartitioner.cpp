@@ -354,9 +354,8 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
     return;
   const llvm::StringRef name = operation->getName().getStringRef();
   const double elements = getOperationElements(operation);
-  work.maximumLogicalTensorElements =
-      std::max(work.maximumLogicalTensorElements,
-               getMaximumTensorElements(operation));
+  work.maximumLogicalTensorElements = std::max(
+      work.maximumLogicalTensorElements, getMaximumTensorElements(operation));
 
   if ((name == "tt.load" || name == "tt.gather") &&
       operation->getNumResults() > 0) {
@@ -549,9 +548,8 @@ static void mergeWorkload(StageWorkload &into, StageWorkload from) {
   }
   llvm::append_range(into.reductionWorkloads,
                      std::move(from.reductionWorkloads));
-  into.maximumLogicalTensorElements =
-      std::max(into.maximumLogicalTensorElements,
-               from.maximumLogicalTensorElements);
+  into.maximumLogicalTensorElements = std::max(
+      into.maximumLogicalTensorElements, from.maximumLogicalTensorElements);
   into.predicateElements += from.predicateElements;
   into.shuffleLaneSteps += from.shuffleLaneSteps;
   into.scanShuffleLaneSteps += from.scanShuffleLaneSteps;

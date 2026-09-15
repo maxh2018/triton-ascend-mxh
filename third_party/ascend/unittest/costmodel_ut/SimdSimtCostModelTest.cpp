@@ -168,6 +168,9 @@ TEST(SimdSimtCostModelTest, SimdPricesShortAxesPerSegmentAndElementWidth) {
   EXPECT_DOUBLE_EQ(eightByEight.compute, 8.0);
   EXPECT_DOUBLE_EQ(sixteenByFour.compute, 0.0);
   EXPECT_DOUBLE_EQ(sixteenByFour.scalar, 64.0);
+  EXPECT_DOUBLE_EQ(fourBySixteen.issue, 1.0);
+  EXPECT_DOUBLE_EQ(eightByEight.issue, 2.0);
+  EXPECT_DOUBLE_EQ(sixteenByFour.issue, 16.0);
 
   // FP16 uses twice as many elements per 256-byte instruction; width is not
   // silently inherited from the old FP32-only vectorWidth field.
@@ -609,11 +612,38 @@ TEST(SimdSimtCostModelTest,
 }
 
 TEST(SimdSimtCostModelTest, SimtDotRetainsSerialLogicalTensorSpan) {
-  LogicalStage stage =
-      logicalStage("dot", StageCostModelKind::CubeRoofline);
+  LogicalStage stage = logicalStage("dot", StageCostModelKind::CubeRoofline);
   stage.features.hasDot = true;
   stage.workload.maximumLogicalTensorElements = 512.0;
   stage.workload.dotFlops = 8192.0;
+
+  HardwareProfile profile = hardwareProfile();
+  profile.logicalWarpGroupCount = 32;
+  profile.simtLogicalTensorParallelismCapacity = 4;
+  auto table = evaluateOneStage(std::move(stage), profile);
+  if (!table)
+    FAIL() << llvm::toString(table.takeError());
+
+  const StageImplementationCost &simt =
+      table->stages.front().implementations.back();
+  ASSERT_EQ(simt.implementation.mode, StageMode::SIMT);
+  EXPECT_EQ(simt.logicalTensorParallelismFactor, 1);
+}
+
+TEST(SimdSimtCostModelTest, SimtAtomicRetainsSerialLogicalTensorSpan) {
+  LogicalStage stage = logicalStage("atomic", StageCostModelKind::AtomicMemory);
+  stage.features.hasAtomicMemory = true;
+  stage.workload.maximumLogicalTensorElements = 512.0;
+  mlir::ascend::AtomicWorkload atomic;
+  atomic.kind = "fadd";
+  atomic.dataType = "f32";
+  atomic.memorySemantic = "acq_rel";
+  atomic.memoryScope = "gpu";
+  atomic.logicalElements = 512.0;
+  atomic.logicalOperationInstances = 1.0;
+  atomic.addressDependsOnLoadedIndex = true;
+  atomic.contentionUnknown = true;
+  stage.workload.atomicWorkloads.push_back(std::move(atomic));
 
   HardwareProfile profile = hardwareProfile();
   profile.logicalWarpGroupCount = 32;

@@ -88,26 +88,24 @@ static int64_t logicalTensorParallelismFactor(const LogicalStage &stage,
                                               StageMode mode) {
   if (mode != StageMode::SIMT ||
       stage.workload.maximumLogicalTensorElements <= 0.0 ||
-      stage.features.hasDot)
+      stage.features.hasDot || stage.features.hasAtomicMemory)
     return 1;
-  const int64_t operationWarpGroups = std::max<int64_t>(
-      1, static_cast<int64_t>(std::ceil(
-             stage.workload.maximumLogicalTensorElements /
-             static_cast<double>(profile.simt.issueWidth))));
+  const int64_t operationWarpGroups =
+      std::max<int64_t>(1, static_cast<int64_t>(std::ceil(
+                               stage.workload.maximumLogicalTensorElements /
+                               static_cast<double>(profile.simt.issueWidth))));
   return std::max<int64_t>(
       1, std::min({profile.logicalWarpGroupCount,
                    profile.simtLogicalTensorParallelismCapacity,
                    operationWarpGroups}));
 }
 
-static double applyLogicalTensorParallelism(double stageCycles,
-                                            const StageResourceCycles &resources,
-                                            int64_t factor) {
+static double applyLogicalTensorParallelism(
+    double stageCycles, const StageResourceCycles &resources, int64_t factor) {
   if (factor <= 1)
     return stageCycles;
-  return resources.setup +
-         std::max(0.0, stageCycles - resources.setup) /
-             static_cast<double>(factor);
+  return resources.setup + std::max(0.0, stageCycles - resources.setup) /
+                               static_cast<double>(factor);
 }
 
 static StageResourceCycles
@@ -142,21 +140,27 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
   llvm::StringMap<double> describedElements;
   llvm::StringMap<double> describedVectorInstructions;
   llvm::StringMap<double> describedScalarFallbackElements;
+  double describedIssueElements = 0.0;
+  double describedIssueInstructions = 0.0;
   if (simd) {
     for (const TensorOperationWorkload &tensor :
          work.tensorOperationWorkloads) {
       describedElements[tensor.operation] += tensor.logicalElements;
+      describedIssueElements += tensor.logicalElements;
       if (tensor.simdScalarFallback) {
         describedScalarFallbackElements[tensor.operation] +=
             tensor.logicalElements;
+        describedIssueInstructions += tensor.logicalElements;
         continue;
       }
       const double segmentBits =
           static_cast<double>(tensor.contiguousElementsPerSegment) *
           static_cast<double>(tensor.elementBitWidth);
-      describedVectorInstructions[tensor.operation] +=
+      const double vectorInstructions =
           tensor.segmentCount *
           std::ceil(segmentBits / static_cast<double>(profile.vectorWidthBits));
+      describedVectorInstructions[tensor.operation] += vectorInstructions;
+      describedIssueInstructions += vectorInstructions;
     }
   }
   for (const auto &[name, elements] : work.operationElements) {
@@ -243,9 +247,19 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
     resources.setup += profile.dotSetupCycles;
     resources.dot = work.dotFlops / profile.dotFlopsPerCycle;
   }
-  resources.issue =
-      std::ceil(work.issueElements / static_cast<double>(profile.issueWidth)) /
-      profile.issueOperationsPerCycle;
+  double issueInstructions =
+      std::ceil(work.issueElements / static_cast<double>(profile.issueWidth));
+  if (simd) {
+    // Keep the issue floor consistent with operation pricing.  Aggregating
+    // unrelated short rows before dividing by the vector width makes several
+    // independently issued instructions look like one full-width operation.
+    const double undescribedIssueElements =
+        std::max(0.0, work.issueElements - describedIssueElements);
+    issueInstructions = describedIssueInstructions +
+                        std::ceil(undescribedIssueElements /
+                                  static_cast<double>(profile.issueWidth));
+  }
+  resources.issue = issueInstructions / profile.issueOperationsPerCycle;
   resources.spill =
       work.estimatedSpillTransactions / profile.spillTransactionsPerCycle;
   if (stage.features.hasLoopCarriedDataDependency)
@@ -570,8 +584,9 @@ bool StageModeProfile::isValid(StageMode mode) const {
                                entry.second.factor > 0.0;
                       }) &&
          atomicRates.contains("default") &&
-         llvm::all_of(atomicRates,
-                      [](const auto &entry) { return entry.second.isValid(); }) &&
+         llvm::all_of(
+             atomicRates,
+             [](const auto &entry) { return entry.second.isValid(); }) &&
          llvm::all_of(extentTwoReductionPairStrideRates,
                       [](const ExtentTwoReductionPairStrideRate &rate) {
                         return rate.isValid();
@@ -673,13 +688,13 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       StageImplementationCost cost;
       cost.implementation = implementation;
       cost.resources = resources;
-      cost.logicalTensorParallelismFactor = logicalTensorParallelismFactor(
-          stage, profile, implementation.mode);
+      cost.logicalTensorParallelismFactor =
+          logicalTensorParallelismFactor(stage, profile, implementation.mode);
       const double tensorParallelCycles = applyLogicalTensorParallelism(
           estimateStage(stage, profile, implementation.mode, resources),
           resources, cost.logicalTensorParallelismFactor);
-      cost.totalCycles = applySuperBlock(
-          stage, resources, implementation, profile, tensorParallelCycles);
+      cost.totalCycles = applySuperBlock(stage, resources, implementation,
+                                         profile, tensorParallelCycles);
       if (!cost.isValid())
         return llvm::createStringError(std::errc::invalid_argument,
                                        "Stage '%s' produced an invalid cost",

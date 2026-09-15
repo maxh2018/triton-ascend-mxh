@@ -501,6 +501,7 @@ static std::optional<SimtAnchorDescriptor> analyzeAnchor(Operation *op,
     if (!facts)
       return std::nullopt;
     descriptor.kind = SimtAnchorKind::PlainOneDimensionalCumsum;
+    descriptor.lowerability.allSimd = false;
     if (facts->axisExtent <= 0 || !isSupportedCumsumType(facts->elementType))
       descriptor.lowerability.mixed = false;
   } else if (name == "tt.atomic_rmw" || name == "tt.atomic_cas") {

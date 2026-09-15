@@ -163,24 +163,114 @@
       "extent_two_reduction_pair_stride": {
         "description": "Route-matched SIMD SYS_CNT calibration for one extent-two reduction, keyed by logical row-major pair stride and scalar dtype. Each entry also records the old analytical score for the identical 512-element calibration shape; the measured/reference ratio transfers the stride effect while the analytical model retains logical-width scaling. Unknown combinations retain the analytical reduction model.",
         "rates": [
-          {"pair_stride_elements": 1, "data_type": "f32", "system_cycles": 10.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 1, "data_type": "i32", "system_cycles": 10.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 2, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 2, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 4, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 4, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 8, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 8, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 16, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 16, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 32, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 32, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 64, "data_type": "f32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 64, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 128, "data_type": "f32", "system_cycles": 20.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 128, "data_type": "i32", "system_cycles": 20.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 256, "data_type": "f32", "system_cycles": 11.0, "reference_model_system_cycles": 9.0},
-          {"pair_stride_elements": 256, "data_type": "i32", "system_cycles": 14.0, "reference_model_system_cycles": 9.0}
+          {
+            "pair_stride_elements": 1,
+            "data_type": "f32",
+            "system_cycles": 10.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 1,
+            "data_type": "i32",
+            "system_cycles": 10.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 2,
+            "data_type": "f32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 2,
+            "data_type": "i32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 4,
+            "data_type": "f32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 4,
+            "data_type": "i32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 8,
+            "data_type": "f32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 8,
+            "data_type": "i32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 16,
+            "data_type": "f32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 16,
+            "data_type": "i32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 32,
+            "data_type": "f32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 32,
+            "data_type": "i32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 64,
+            "data_type": "f32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 64,
+            "data_type": "i32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 128,
+            "data_type": "f32",
+            "system_cycles": 20.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 128,
+            "data_type": "i32",
+            "system_cycles": 20.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 256,
+            "data_type": "f32",
+            "system_cycles": 11.0,
+            "reference_model_system_cycles": 9.0
+          },
+          {
+            "pair_stride_elements": 256,
+            "data_type": "i32",
+            "system_cycles": 14.0,
+            "reference_model_system_cycles": 9.0
+          }
         ],
         "source": "topk_validation/kernel5_stage_audit/kernel5_stage_validation.csv; SIMD SYS_CNT special kernels, 20 launches and 1280 counters per calibrated reduction shape",
         "confidence": "medium"
