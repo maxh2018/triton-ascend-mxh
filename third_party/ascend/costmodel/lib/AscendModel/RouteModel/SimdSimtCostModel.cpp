@@ -507,9 +507,9 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     if (const auto *resources = simt->getObject("stage_resources")) {
       if (const auto *parallelism =
               resources->getObject("logical_tensor_parallelism"))
-        hardware.simtLogicalTensorParallelismCapacity = reader.integer(
-            *parallelism, "max_effective_warp_groups",
-            "simt.stage_resources.logical_tensor_parallelism");
+        hardware.simtLogicalTensorParallelismCapacity =
+            reader.integer(*parallelism, "max_effective_warp_groups",
+                           "simt.stage_resources.logical_tensor_parallelism");
       if (const auto *superblock = resources->getObject("superblock")) {
         hardware.superblockUsefulFactorLimit =
             reader.integer(*superblock, "useful_factor_limit", "superblock");
