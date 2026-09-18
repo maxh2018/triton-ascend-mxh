@@ -1633,6 +1633,54 @@ TEST(SimdSimtCostModelTest, GenericSemanticStagesDoNotRequireAWorkloadDomain) {
             StageCostModelKind::ContinuousTileStore);
 }
 
+TEST(SimdSimtCostModelTest, ClippedDynamicLoopUsesStaticTripCountCap) {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<mlir::arith::ArithDialect>();
+  context.getOrLoadDialect<mlir::func::FuncDialect>();
+  context.getOrLoadDialect<mlir::scf::SCFDialect>();
+  for (bool capped : {false, true}) {
+    std::string source = R"mlir(
+      module {
+        func.func @kernel(%limit: i32, %initial: i32) -> i32 {
+          %c1 = arith.constant 1 : i32
+          %c2 = arith.constant 2 : i32
+          %c16 = arith.constant 16 : i32
+          %cap = arith.minsi %limit, %c16 : i32
+          %result = scf.for %i = %c2 to UPPER step %c1
+              iter_args(%state = %initial) -> (i32) : i32 {
+            %next = arith.addi %state, %i : i32
+            scf.yield %next : i32
+          }
+          %second = scf.for %j = %c2 to %cap step %c1
+              iter_args(%state = %result) -> (i32) : i32 {
+            %next = arith.addi %state, %j : i32
+            scf.yield %next : i32
+          }
+          return %second : i32
+        }
+      }
+    )mlir";
+    source.replace(source.find("UPPER"), 5, capped ? "%cap" : "%limit");
+    if (!capped)
+      source.replace(source.find("to %cap"), 7, "to %limit");
+    auto module = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+    ASSERT_TRUE(module);
+    mlir::ascend::SimtAnchorPlan anchors;
+    auto partition = StagePartitioner().partition(*module, anchors,
+                                                  StagePartitionerOptions{});
+    if (!partition)
+      FAIL() << llvm::toString(partition.takeError());
+    if (llvm::Error error = StageFeatureAnalysis().analyze(*partition))
+      FAIL() << llvm::toString(std::move(error));
+    int64_t maximumIterations = 1;
+    for (const auto &stage : partition->stages) {
+      maximumIterations = std::max(maximumIterations, stage.iterationCount);
+      EXPECT_EQ(stage.features.parallelRecurrenceGroupCount, 1);
+    }
+    EXPECT_EQ(maximumIterations, capped ? 14 : 1);
+  }
+}
+
 TEST(SimdSimtCostModelTest, AdjacentStructuredLoopsRemainSerialStages) {
   mlir::MLIRContext context;
   context.getOrLoadDialect<mlir::arith::ArithDialect>();

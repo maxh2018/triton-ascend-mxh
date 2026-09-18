@@ -461,10 +461,24 @@ static int64_t getLoopTripCount(Operation *operation,
   if (name == "scf.for" && operation->getNumOperands() >= 3) {
     const std::optional<int64_t> lower =
         getConstantInteger(operation->getOperand(0));
-    const std::optional<int64_t> upper =
-        getConstantInteger(operation->getOperand(1));
+    std::optional<int64_t> upper = getConstantInteger(operation->getOperand(1));
     const std::optional<int64_t> step =
         getConstantInteger(operation->getOperand(2));
+    // Price a clipped dynamic loop using its static iteration cap instead of
+    // a single iteration. This is an upper-bound cost estimate: a partial
+    // tile may execute fewer iterations at runtime.
+    if (!upper) {
+      Operation *bound = operation->getOperand(1).getDefiningOp();
+      if (bound && bound->getName().getStringRef() == "arith.minsi" &&
+          bound->getNumOperands() == 2) {
+        const auto lhs = getConstantInteger(bound->getOperand(0));
+        const auto rhs = getConstantInteger(bound->getOperand(1));
+        if (lhs && rhs)
+          upper = std::min(*lhs, *rhs);
+        else
+          upper = lhs ? lhs : rhs;
+      }
+    }
     if (lower && upper && step && *step > 0 && *upper > *lower)
       return (*upper - *lower + *step - 1) / *step;
   }
@@ -1505,8 +1519,9 @@ llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
     }
     facts.hasContiguousMemory = hasMemory && hasContiguousMemory;
     if (algorithmLoopCount > 0 && stage.iterationCount > 1) {
-      if (facts.hasLoopCarriedDataDependency)
-        facts.parallelRecurrenceGroupCount = algorithmLoopCount;
+      // Multiple loop operations in one stage do not prove concurrent
+      // execution. In particular, adjacent scf.for loops execute serially;
+      // counting them as parallel groups discounts their dependent work.
       facts.loopBackedgeCount = 1;
       facts.conditionalBranchCount =
           std::max<int64_t>(facts.conditionalBranchCount > 0 ? 1 : 0,
