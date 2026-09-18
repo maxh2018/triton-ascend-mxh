@@ -58,31 +58,6 @@ static bool permitsSimdOverlap(const LogicalStage &stage) {
          stage.features.permitsSimdRoofline();
 }
 
-static int64_t logicalTensorParallelismFactor(const LogicalStage &stage,
-                                              const HardwareProfile &profile,
-                                              StageMode mode) {
-  if (mode != StageMode::SIMT ||
-      stage.workload.maximumLogicalTensorElements <= 0.0 ||
-      stage.features.hasDot || stage.features.hasAtomicMemory)
-    return 1;
-  const int64_t operationWarpGroups =
-      std::max<int64_t>(1, static_cast<int64_t>(std::ceil(
-                               stage.workload.maximumLogicalTensorElements /
-                               static_cast<double>(profile.simt.issueWidth))));
-  return std::max<int64_t>(
-      1, std::min({profile.logicalWarpGroupCount,
-                   profile.simtLogicalTensorParallelismCapacity,
-                   operationWarpGroups}));
-}
-
-static double applyLogicalTensorParallelism(
-    double stageCycles, const StageResourceCycles &resources, int64_t factor) {
-  if (factor <= 1)
-    return stageCycles;
-  return resources.setup + std::max(0.0, stageCycles - resources.setup) /
-                               static_cast<double>(factor);
-}
-
 static StageResourceCycles
 materializeControlFlow(const LogicalStage &stage, StageMode mode,
                        StageResourceCycles resources,
@@ -662,13 +637,13 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       StageImplementationCost cost;
       cost.implementation = implementation;
       cost.resources = resources;
-      cost.logicalTensorParallelismFactor =
-          logicalTensorParallelismFactor(stage, profile, implementation.mode);
-      const double tensorParallelCycles = applyLogicalTensorParallelism(
-          estimateStage(stage, profile, implementation.mode, resources),
-          resources, cost.logicalTensorParallelismFactor);
-      cost.totalCycles = applySuperBlock(stage, resources, implementation,
-                                         profile, tensorParallelCycles);
+      // Resource rates already describe aggregate single-AIV throughput.
+      // Do not discount the stage body again for configured warp groups.
+      // Keep the legacy diagnostic field at its identity value.
+      cost.logicalTensorParallelismFactor = 1;
+      cost.totalCycles = applySuperBlock(
+          stage, resources, implementation, profile,
+          estimateStage(stage, profile, implementation.mode, resources));
       if (!cost.isValid())
         return llvm::createStringError(std::errc::invalid_argument,
                                        "Stage '%s' produced an invalid cost",

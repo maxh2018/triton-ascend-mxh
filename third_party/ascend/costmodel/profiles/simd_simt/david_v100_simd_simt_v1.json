@@ -454,7 +454,7 @@
       },
       "logical_tensor_parallelism": {
         "max_effective_warp_groups": 4,
-        "description": "Maximum useful intra-program warp groups for one non-dot logical tensor operation. Dot/Cube stages retain Q=1 because route-matched prefix measurements show a serial first-Cube activation and pure-SIMT solve_tril dot tails are not executable. The first throughput saturation knee is used; num_warps remains a separate upper bound.",
+        "description": "Legacy capacity retained for profile compatibility and audit. Stage costs use aggregate resource throughput without an additional logical-tensor warp division.",
         "source": "profiles/microbench/data_provider/tput.cce warp sweep; first measured saturation knee",
         "confidence": "medium"
       },

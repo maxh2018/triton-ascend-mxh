@@ -162,9 +162,9 @@ struct StageWorkload {
   double indirectStoreTransactions = 0.0;
   std::vector<AtomicWorkload> atomicWorkloads;
   std::vector<ReductionWorkload> reductionWorkloads;
-  /// Maximum width of one logical tensor operation in this Stage. Unlike
-  /// issueElements this is not additive across operations or loop trips; it
-  /// bounds the number of useful warp groups for one tensor operation.
+  /// Diagnostic maximum width of one logical tensor operation in this Stage.
+  /// Unlike issueElements this is not additive across operations or loop trips.
+  /// It does not imply a stage-wide parallel speedup.
   double maximumLogicalTensorElements = 0.0;
   double predicateElements = 0.0;
   double shuffleLaneSteps = 0.0;
@@ -211,8 +211,8 @@ struct StageResourceCycles {
 struct StageImplementationCost {
   StageImplementation implementation;
   double totalCycles = 0.0;
-  /// Intra-program SIMT warp groups used to price logical tensor work. This is
-  /// distinct from SuperBlock, which groups independent logical programs.
+  /// Legacy diagnostic field, now always one. Aggregate resource throughput
+  /// is not discounted again by an intra-program warp factor.
   int64_t logicalTensorParallelismFactor = 1;
   StageResourceCycles resources;
 

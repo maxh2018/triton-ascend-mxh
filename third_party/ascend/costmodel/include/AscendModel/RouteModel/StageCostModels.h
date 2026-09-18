@@ -172,8 +172,8 @@ struct HardwareProfile {
   /// option, not a hardware constant, and bounds cross-group interleaving in
   /// recurrence Stage models.
   int64_t logicalWarpGroupCount = 1;
-  /// Maximum independently useful warp groups for one logical tensor
-  /// operation. This measured capacity is separate from num_warps.
+  /// Legacy profile field retained for compatibility. Aggregate resource
+  /// throughput is no longer discounted by this capacity.
   int64_t simtLogicalTensorParallelismCapacity = 1;
   /// Long-lived recurrence state consumes finite register/stack bandwidth.
   /// The byte rate is shared by the SIMD recurrence-state term and the extra

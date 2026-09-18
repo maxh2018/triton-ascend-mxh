@@ -596,7 +596,7 @@ TEST(SimdSimtCostModelTest, ReductionCalibrationDoesNotChangeOtherWork) {
 }
 
 TEST(SimdSimtCostModelTest,
-     SimtLogicalTensorWorkUsesMeasuredWarpGroupCapacity) {
+     SimtLogicalTensorWorkDoesNotDiscountAggregateThroughput) {
   LogicalStage stage =
       logicalStage("logical_tensor", StageCostModelKind::ScalarIssue);
   stage.workload.maximumLogicalTensorElements = 512.0;
@@ -611,13 +611,14 @@ TEST(SimdSimtCostModelTest,
   const StageImplementationCost &simt =
       table->stages.front().implementations.back();
   ASSERT_EQ(simt.implementation.mode, StageMode::SIMT);
-  EXPECT_EQ(simt.logicalTensorParallelismFactor, 4);
-  // setup=10 is preserved; the 64-cycle logical tensor body uses four groups.
-  EXPECT_DOUBLE_EQ(simt.totalCycles, 26.0);
+  EXPECT_EQ(simt.logicalTensorParallelismFactor, 1);
+  // setup=10 plus body=64: the aggregate resource rates already include
+  // parallel execution. A legacy capacity must not discount them again.
+  EXPECT_DOUBLE_EQ(simt.totalCycles, 74.0);
 }
 
 TEST(SimdSimtCostModelTest,
-     SimtLogicalTensorParallelismIsLimitedByOperationWidth) {
+     SimtNarrowLogicalTensorDoesNotDiscountAggregateThroughput) {
   LogicalStage stage =
       logicalStage("narrow_logical_tensor", StageCostModelKind::ScalarIssue);
   stage.workload.maximumLogicalTensorElements = 64.0;
@@ -631,8 +632,8 @@ TEST(SimdSimtCostModelTest,
 
   const StageImplementationCost &simt =
       table->stages.front().implementations.back();
-  EXPECT_EQ(simt.logicalTensorParallelismFactor, 2);
-  EXPECT_DOUBLE_EQ(simt.totalCycles, 42.0);
+  EXPECT_EQ(simt.logicalTensorParallelismFactor, 1);
+  EXPECT_DOUBLE_EQ(simt.totalCycles, 74.0);
 }
 
 TEST(SimdSimtCostModelTest, SimtDotRetainsSerialLogicalTensorSpan) {
