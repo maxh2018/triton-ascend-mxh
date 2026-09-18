@@ -11,7 +11,6 @@
 #include <array>
 #include <cmath>
 #include <initializer_list>
-#include <optional>
 #include <system_error>
 
 using namespace mlir;
@@ -57,30 +56,6 @@ static double serialBody(const StageResourceCycles &resources) {
 static bool permitsSimdOverlap(const LogicalStage &stage) {
   return stage.scheduleKind == StageScheduleKind::IndependentPipelined &&
          stage.features.permitsSimdRoofline();
-}
-
-static std::optional<double>
-extentTwoPairStrideMultiplier(const LogicalStage &stage,
-                              const StageModeProfile &profile) {
-  // The calibration is an isolated one-reduction experiment.  Applying its
-  // absolute cycle count to a different logical tensor width overprices tiny
-  // reductions.  Transfer only the measured/reference-model ratio; the
-  // analytical model below continues to scale the amount of work.
-  if (stage.workload.reductionWorkloads.size() != 1)
-    return std::nullopt;
-  const ReductionWorkload &reduction =
-      stage.workload.reductionWorkloads.front();
-  if (reduction.extent != 2 || reduction.logicalOperationInstances != 1.0)
-    return std::nullopt;
-  auto rate = llvm::find_if(
-      profile.extentTwoReductionPairStrideRates,
-      [&](const ExtentTwoReductionPairStrideRate &candidate) {
-        return candidate.pairStrideElements == reduction.pairStrideElements &&
-               candidate.dataType == reduction.dataType;
-      });
-  if (rate == profile.extentTwoReductionPairStrideRates.end())
-    return std::nullopt;
-  return rate->systemCycles / rate->referenceModelSystemCycles;
 }
 
 static int64_t logicalTensorParallelismFactor(const LogicalStage &stage,
@@ -416,11 +391,10 @@ static double estimateStage(const LogicalStage &stage,
         count * std::max(r.scalar + r.load + r.store + r.atomic +
                              r.criticalPath + controlBody(r) + r.spill,
                          r.issue);
-    if (mode != StageMode::SIMD)
-      return base;
-    std::optional<double> multiplier =
-        extentTwoPairStrideMultiplier(stage, profile.simd);
-    return multiplier ? r.setup + (base - r.setup) * *multiplier : base;
+    // Isolated reduction timings do not identify the cost of unrelated memory,
+    // control or issue work owned by this stage. Do not scale the entire body
+    // with a pair-stride calibration ratio.
+    return base;
   }
   case StageCostModelKind::PrefixScan: {
     const double scanCritical =

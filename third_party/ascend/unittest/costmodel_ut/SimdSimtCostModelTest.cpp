@@ -546,7 +546,7 @@ TEST(SimdSimtCostModelTest, LoopCarriedRecurrenceAppliesScanDependencyFactor) {
                    baseline->stages.front().implementations[0].totalCycles);
 }
 
-TEST(SimdSimtCostModelTest, ExtentTwoReductionUsesPairStrideCalibration) {
+TEST(SimdSimtCostModelTest, ExtentTwoReductionDoesNotScaleStageBody) {
   LogicalStage stage =
       logicalStage("pair_stride_reduce", StageCostModelKind::RowwiseReduction);
   stage.features.hasReduction = true;
@@ -566,9 +566,33 @@ TEST(SimdSimtCostModelTest, ExtentTwoReductionUsesPairStrideCalibration) {
   const StageImplementationCost &simd =
       table->stages.front().implementations.front();
   ASSERT_EQ(simd.implementation.mode, StageMode::SIMD);
-  // The analytical body is 8 cycles, so a measured/reference ratio of two
-  // produces 16 cycles while retaining workload-width scaling.
-  EXPECT_DOUBLE_EQ(simd.totalCycles, 16.0);
+  // Legacy calibration data remains readable, but must not multiply the stage
+  // body. Component-level calibration requires independent lowering evidence.
+  EXPECT_DOUBLE_EQ(simd.totalCycles, 8.0);
+}
+
+TEST(SimdSimtCostModelTest, ReductionCalibrationDoesNotChangeOtherWork) {
+  LogicalStage stage =
+      logicalStage("reduce_with_memory", StageCostModelKind::RowwiseReduction);
+  stage.features.hasReduction = true;
+  stage.workload.reductionWorkloads.push_back({2, 128, "f32", 1.0});
+  stage.workload.loadBytes = 4096;
+  stage.workload.storeBytes = 2048;
+  stage.workload.shuffleLaneSteps = 256;
+  HardwareProfile profile = hardwareProfile();
+  auto baseline = evaluateOneStage(stage, profile);
+  if (!baseline)
+    FAIL() << llvm::toString(baseline.takeError());
+  profile.simd.extentTwoReductionPairStrideRates.push_back(
+      {128, "f32", 200.0, 10.0});
+  auto candidate = evaluateOneStage(stage, profile);
+  if (!candidate)
+    FAIL() << llvm::toString(candidate.takeError());
+  ASSERT_EQ(baseline->stages.front().implementations.size(),
+            candidate->stages.front().implementations.size());
+  for (size_t i = 0; i < baseline->stages.front().implementations.size(); ++i)
+    EXPECT_DOUBLE_EQ(baseline->stages.front().implementations[i].totalCycles,
+                     candidate->stages.front().implementations[i].totalCycles);
 }
 
 TEST(SimdSimtCostModelTest,

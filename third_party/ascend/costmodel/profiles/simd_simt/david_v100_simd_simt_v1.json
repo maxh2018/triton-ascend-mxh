@@ -161,7 +161,7 @@
         "description": "Normalize the recorded A5 batch-8, extent-16 identity-subtracted scan ratio by base shuffle rates: factor_SIMD = (143.398 / 8.267) * 64 / (32 * 0.817124) * factor_SIMT. The model charges lane_steps / lane_rate * factor, so the measured time ratio is not itself the factor. This effective calibration includes lowering effects, not intrinsic latency or forward/reverse asymmetry. Recalibrate if base rates or lowering change."
       },
       "extent_two_reduction_pair_stride": {
-        "description": "Route-matched SIMD SYS_CNT calibration for one extent-two reduction, keyed by logical row-major pair stride and scalar dtype. Each entry also records the old analytical score for the identical 512-element calibration shape; the measured/reference ratio transfers the stride effect while the analytical model retains logical-width scaling. Unknown combinations retain the analytical reduction model.",
+        "description": "Legacy isolated SIMD SYS_CNT measurements retained for profile compatibility and audit only. These entries no longer scale RowwiseReduction stage costs: whole-stage ratios do not isolate reduction work from memory, control, or issue costs. Component-level calibration requires separate lowering and held-out-shape validation.",
         "rates": [
           {
             "pair_stride_elements": 1,
