@@ -129,19 +129,6 @@ struct TensorOperationWorkload {
   llvm::json::Object toJSON() const;
 };
 
-/// Route-independent description of one reduction operation. Pair stride is
-/// the row-major logical element distance between adjacent values on the
-/// reduced axis. It is derived from tensor shape, not a workload name.
-struct ReductionWorkload {
-  int64_t extent = 0;
-  int64_t pairStrideElements = 0;
-  std::string dataType;
-  double logicalOperationInstances = 0.0;
-
-  bool isValid() const;
-  llvm::json::Object toJSON() const;
-};
-
 /// Mode-independent work owned exactly once by one Stage.  Values are
 /// logical elements/bytes, not mode-specific instructions or cycles.
 struct StageWorkload {
@@ -161,7 +148,6 @@ struct StageWorkload {
   double indirectLoadTransactions = 0.0;
   double indirectStoreTransactions = 0.0;
   std::vector<AtomicWorkload> atomicWorkloads;
-  std::vector<ReductionWorkload> reductionWorkloads;
   /// Diagnostic maximum width of one logical tensor operation in this Stage.
   /// Unlike issueElements this is not additive across operations or loop trips.
   /// It does not imply a stage-wide parallel speedup.

@@ -110,15 +110,6 @@ struct StageOperationRate {
   double factor = 1.0;
 };
 
-struct ExtentTwoReductionPairStrideRate {
-  int64_t pairStrideElements = 0;
-  std::string dataType;
-  double systemCycles = 0.0;
-  double referenceModelSystemCycles = 0.0;
-
-  bool isValid() const;
-};
-
 struct StageAtomicRate {
   double logicalElementsPerCycle = 0.0;
   double operationStartupCycles = 0.0;
@@ -158,8 +149,6 @@ struct StageModeProfile {
   double indirectStoreTransactionsPerCycle = 0.0;
   double indirectDependencyLatencyCycles = 0.0;
   llvm::StringMap<StageAtomicRate> atomicRates;
-  std::vector<ExtentTwoReductionPairStrideRate>
-      extentTwoReductionPairStrideRates;
   StageControlFlowRates controlFlow;
 
   bool isValid(StageMode mode) const;

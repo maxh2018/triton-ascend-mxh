@@ -248,36 +248,6 @@ static void readStageResources(ProfileJSONReader &reader,
   if (const auto *scan = resources->getObject("prefix_scan"))
     profile.prefixScanDependencyFactor =
         reader.number(*scan, "dependency_factor", prefix + ".prefix_scan");
-  if (const auto *reduction =
-          resources->getObject("extent_two_reduction_pair_stride")) {
-    const auto *rates = reduction->getArray("rates");
-    if (!rates) {
-      reader.setError(prefix +
-                      ".extent_two_reduction_pair_stride.rates must be an "
-                      "array");
-    } else {
-      for (const llvm::json::Value &value : *rates) {
-        const auto *rateObject = value.getAsObject();
-        if (!rateObject) {
-          reader.setError(prefix +
-                          ".extent_two_reduction_pair_stride.rates entries "
-                          "must be objects");
-          break;
-        }
-        ExtentTwoReductionPairStrideRate rate;
-        const std::string ratePath =
-            prefix + ".extent_two_reduction_pair_stride.rates";
-        rate.pairStrideElements =
-            reader.integer(*rateObject, "pair_stride_elements", ratePath);
-        rate.dataType = reader.string(*rateObject, "data_type", ratePath);
-        rate.systemCycles =
-            reader.number(*rateObject, "system_cycles", ratePath);
-        rate.referenceModelSystemCycles = reader.number(
-            *rateObject, "reference_model_system_cycles", ratePath);
-        profile.extentTwoReductionPairStrideRates.push_back(std::move(rate));
-      }
-    }
-  }
   if (const auto *indirect =
           reader.object(*resources, "indirect_memory", prefix)) {
     const std::string path = prefix + ".indirect_memory";

@@ -360,17 +360,11 @@ static double estimateStage(const LogicalStage &stage,
            std::max(std::ceil(count / static_cast<double>(groups)) * critical,
                     count * r.issue);
   }
-  case StageCostModelKind::RowwiseReduction: {
-    const double base =
-        r.setup +
-        count * std::max(r.scalar + r.load + r.store + r.atomic +
-                             r.criticalPath + controlBody(r) + r.spill,
-                         r.issue);
-    // Isolated reduction timings do not identify the cost of unrelated memory,
-    // control or issue work owned by this stage. Do not scale the entire body
-    // with a pair-stride calibration ratio.
-    return base;
-  }
+  case StageCostModelKind::RowwiseReduction:
+    return r.setup +
+           count * std::max(r.scalar + r.load + r.store + r.atomic +
+                                r.criticalPath + controlBody(r) + r.spill,
+                            r.issue);
   case StageCostModelKind::PrefixScan: {
     const double scanCritical =
         r.compute + r.predicate +
@@ -496,13 +490,6 @@ bool StageAtomicRate::isValid() const {
          unknownContentionMultiplier >= 1.0;
 }
 
-bool ExtentTwoReductionPairStrideRate::isValid() const {
-  return pairStrideElements > 0 && !dataType.empty() &&
-         std::isfinite(systemCycles) && systemCycles > 0.0 &&
-         std::isfinite(referenceModelSystemCycles) &&
-         referenceModelSystemCycles > 0.0;
-}
-
 bool StageModeProfile::isValid(StageMode mode) const {
   const std::array<double, 14> common = {setupCycles,
                                          predicateOperationsPerCycle,
@@ -540,13 +527,8 @@ bool StageModeProfile::isValid(StageMode mode) const {
                                entry.second.factor > 0.0;
                       }) &&
          atomicRates.contains("default") &&
-         llvm::all_of(
-             atomicRates,
-             [](const auto &entry) { return entry.second.isValid(); }) &&
-         llvm::all_of(extentTwoReductionPairStrideRates,
-                      [](const ExtentTwoReductionPairStrideRate &rate) {
-                        return rate.isValid();
-                      });
+         llvm::all_of(atomicRates,
+                      [](const auto &entry) { return entry.second.isValid(); });
 }
 
 bool HardwareProfile::isValid() const {

@@ -12,7 +12,6 @@
 using mlir::ascend::HardwareProfile;
 using mlir::ascend::LogicalStage;
 using mlir::ascend::LogicalStageCost;
-using mlir::ascend::ReductionWorkload;
 using mlir::ascend::SimdSimtFeatureSummary;
 using mlir::ascend::solveStageRoutes;
 using mlir::ascend::StageCostEvaluator;
@@ -544,55 +543,6 @@ TEST(SimdSimtCostModelTest, LoopCarriedRecurrenceAppliesScanDependencyFactor) {
                    baseline->stages.front().implementations[0].totalCycles);
 }
 
-TEST(SimdSimtCostModelTest, ExtentTwoReductionDoesNotScaleStageBody) {
-  LogicalStage stage =
-      logicalStage("pair_stride_reduce", StageCostModelKind::RowwiseReduction);
-  stage.features.hasReduction = true;
-  stage.workload.paysKernelSetup = false;
-  stage.workload.operationElements.clear();
-  stage.workload.issueElements = 64.0;
-  stage.workload.shuffleLaneSteps = 256.0;
-  stage.workload.reductionWorkloads.push_back({2, 128, "f32", 1.0});
-
-  HardwareProfile profile = hardwareProfile();
-  profile.simd.extentTwoReductionPairStrideRates.push_back(
-      {128, "f32", 20.0, 10.0});
-  auto table = evaluateOneStage(std::move(stage), profile);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
-
-  const StageImplementationCost &simd =
-      table->stages.front().implementations.front();
-  ASSERT_EQ(simd.implementation.mode, StageMode::SIMD);
-  // Legacy calibration data remains readable, but must not multiply the stage
-  // body. Component-level calibration requires independent lowering evidence.
-  EXPECT_DOUBLE_EQ(simd.totalCycles, 8.0);
-}
-
-TEST(SimdSimtCostModelTest, ReductionCalibrationDoesNotChangeOtherWork) {
-  LogicalStage stage =
-      logicalStage("reduce_with_memory", StageCostModelKind::RowwiseReduction);
-  stage.features.hasReduction = true;
-  stage.workload.reductionWorkloads.push_back({2, 128, "f32", 1.0});
-  stage.workload.loadBytes = 4096;
-  stage.workload.storeBytes = 2048;
-  stage.workload.shuffleLaneSteps = 256;
-  HardwareProfile profile = hardwareProfile();
-  auto baseline = evaluateOneStage(stage, profile);
-  if (!baseline)
-    FAIL() << llvm::toString(baseline.takeError());
-  profile.simd.extentTwoReductionPairStrideRates.push_back(
-      {128, "f32", 200.0, 10.0});
-  auto candidate = evaluateOneStage(stage, profile);
-  if (!candidate)
-    FAIL() << llvm::toString(candidate.takeError());
-  ASSERT_EQ(baseline->stages.front().implementations.size(),
-            candidate->stages.front().implementations.size());
-  for (size_t i = 0; i < baseline->stages.front().implementations.size(); ++i)
-    EXPECT_DOUBLE_EQ(baseline->stages.front().implementations[i].totalCycles,
-                     candidate->stages.front().implementations[i].totalCycles);
-}
-
 TEST(SimdSimtCostModelTest,
      SimtLogicalTensorWorkDoesNotDiscountAggregateThroughput) {
   LogicalStage stage =
@@ -679,44 +629,6 @@ TEST(SimdSimtCostModelTest, SimtAtomicRetainsSerialLogicalTensorSpan) {
       table->stages.front().implementations.back();
   ASSERT_EQ(simt.implementation.mode, StageMode::SIMT);
   EXPECT_EQ(simt.logicalTensorParallelismFactor, 1);
-}
-
-TEST(SimdSimtCostModelTest, WorkloadAnalysisExtractsReductionPairStride) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
-    module {
-      func.func @kernel(%arg0: tensor<2x2x8xf32>) {
-        %0 = "tt.reduce"(%arg0) {axis = 1 : i32}
-             : (tensor<2x2x8xf32>) -> tensor<2x8xf32>
-        return
-      }
-    }
-  )mlir",
-                                                        &context);
-  ASSERT_TRUE(module);
-
-  StagePartition partition;
-  auto function = module->lookupSymbol<mlir::func::FuncOp>("kernel");
-  ASSERT_TRUE(function);
-  LogicalStage stage =
-      logicalStage("reduce_workload", StageCostModelKind::RowwiseReduction);
-  stage.workload = {};
-  stage.operations.push_back(&function.getBody().front().front());
-  partition.stages.push_back(std::move(stage));
-  partition.operationOwnershipComplete = true;
-  if (llvm::Error error = StageWorkloadAnalysis().analyze(partition))
-    FAIL() << llvm::toString(std::move(error));
-
-  const StageWorkload &workload = partition.stages.front().workload;
-  ASSERT_EQ(workload.reductionWorkloads.size(), 1u);
-  const ReductionWorkload &reduction = workload.reductionWorkloads.front();
-  EXPECT_EQ(reduction.extent, 2);
-  EXPECT_EQ(reduction.pairStrideElements, 8);
-  EXPECT_EQ(reduction.dataType, "f32");
-  EXPECT_DOUBLE_EQ(reduction.logicalOperationInstances, 1.0);
-  EXPECT_DOUBLE_EQ(workload.maximumLogicalTensorElements, 32.0);
 }
 
 TEST(SimdSimtCostModelTest, IndependentLoopUsesSimdRooflineAndSerialSimtCost) {

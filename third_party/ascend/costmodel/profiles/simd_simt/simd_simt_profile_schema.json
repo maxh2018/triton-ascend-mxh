@@ -24,7 +24,7 @@
     },
     "schema_version": {
       "const": 12,
-      "description": "Machine-readable Stage Route Model hardware-profile layout. Version 11 adds independent atomic-RMW rates and an explicit unknown-contention policy. Version 12 adds extent-two reduction pair-stride data, retains the legacy SIMT logical-tensor capacity field, and represents local scope fixed overhead as one measured SIMD-to-SIMT-to-SIMD pair instead of two synthetic directional values."
+      "description": "Machine-readable Stage Route Model hardware-profile layout. Version 11 adds independent atomic-RMW rates and an explicit unknown-contention policy. Version 12 retains the legacy SIMT logical-tensor capacity field and represents local scope fixed overhead as one measured SIMD-to-SIMT-to-SIMD pair instead of two synthetic directional values."
     },
     "profile_version": {
       "type": "string",
@@ -522,61 +522,6 @@
             "description": {
               "type": "string",
               "minLength": 1
-            }
-          },
-          "additionalProperties": false
-        },
-        "extent_two_reduction_pair_stride": {
-          "type": "object",
-          "required": [
-            "description",
-            "rates",
-            "source",
-            "confidence"
-          ],
-          "properties": {
-            "description": {
-              "type": "string",
-              "minLength": 1
-            },
-            "rates": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "required": [
-                  "pair_stride_elements",
-                  "data_type",
-                  "system_cycles",
-                  "reference_model_system_cycles"
-                ],
-                "properties": {
-                  "pair_stride_elements": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "data_type": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "system_cycles": {
-                    "type": "number",
-                    "exclusiveMinimum": 0
-                  },
-                  "reference_model_system_cycles": {
-                    "type": "number",
-                    "exclusiveMinimum": 0
-                  }
-                },
-                "additionalProperties": false
-              }
-            },
-            "source": {
-              "type": "string",
-              "minLength": 1
-            },
-            "confidence": {
-              "$ref": "#/definitions/confidence"
             }
           },
           "additionalProperties": false

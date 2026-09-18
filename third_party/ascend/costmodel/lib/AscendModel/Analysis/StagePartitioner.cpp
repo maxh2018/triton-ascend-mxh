@@ -305,16 +305,6 @@ static void accumulateReductionWorkload(Operation *operation,
   work.shuffleLaneSteps += steps;
   if (isScan)
     work.scanShuffleLaneSteps += steps;
-  int64_t pairStrideElements = 1;
-  for (int64_t index = dimension + 1; index < input.getRank(); ++index) {
-    int64_t product = 0;
-    if (__builtin_mul_overflow(pairStrideElements, input.getShape()[index],
-                               &product))
-      return;
-    pairStrideElements = product;
-  }
-  work.reductionWorkloads.push_back(
-      {extent, pairStrideElements, typeToString(input.getElementType()), 1.0});
 }
 
 static std::string getAtomicEnumName(Operation *operation,
@@ -445,8 +435,6 @@ static void scaleWorkload(StageWorkload &work, double scale) {
     tensor.segmentCount *= scale;
     tensor.logicalOperationInstances *= scale;
   }
-  for (ReductionWorkload &reduction : work.reductionWorkloads)
-    reduction.logicalOperationInstances *= scale;
   work.predicateElements *= scale;
   work.shuffleLaneSteps *= scale;
   work.scanShuffleLaneSteps *= scale;
@@ -563,8 +551,6 @@ static void mergeWorkload(StageWorkload &into, StageWorkload from) {
     destination->segmentCount += source.segmentCount;
     destination->logicalOperationInstances += source.logicalOperationInstances;
   }
-  llvm::append_range(into.reductionWorkloads,
-                     std::move(from.reductionWorkloads));
   into.maximumLogicalTensorElements = std::max(
       into.maximumLogicalTensorElements, from.maximumLogicalTensorElements);
   into.predicateElements += from.predicateElements;
