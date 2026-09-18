@@ -1151,6 +1151,55 @@ TEST(SimdSimtCostModelTest, AllSimdDoesNotPayRouteConditionalAutoBlockify) {
   EXPECT_DOUBLE_EQ(routes->allSimt.totalCycles, 110.0);
 }
 
+TEST(SimdSimtCostModelTest, AllSimdPreservesSetupOnConditionalSchedule) {
+  for (const auto *model : {"auto_blockify_dispatch", "auto_blockify_loop"}) {
+    for (int64_t programs : {1, 5}) {
+      StageCostTable table;
+      table.profileVersion = "unit-test-profile-v1";
+      table.logicalProgramCountHint = programs;
+      table.physicalCoreCountHint = 2;
+      auto makeCost = [](StageMode mode, double total, double setup) {
+        mlir::ascend::StageImplementationCost cost;
+        cost.implementation = {mode, 1, false};
+        cost.totalCycles = total;
+        cost.resources.setup = setup;
+        return cost;
+      };
+      mlir::ascend::LogicalStageCost dispatch;
+      dispatch.id = "dispatch";
+      dispatch.model = model;
+      dispatch.implementations = {makeCost(StageMode::SIMD, 40.0, 20.0),
+                                  makeCost(StageMode::SIMT, 30.0, 25.0)};
+      mlir::ascend::LogicalStageCost payload;
+      payload.id = "payload";
+      payload.model = "scalar_issue";
+      payload.implementations = {makeCost(StageMode::SIMD, 100.0, 0.0),
+                                 makeCost(StageMode::SIMT, 80.0, 0.0)};
+      table.stages = {dispatch, payload};
+      auto routes = solveStageRoutes(table, StageTransitionCost{});
+      if (!routes)
+        FAIL() << llvm::toString(routes.takeError());
+      const double waves = (programs + 1) / 2;
+      ASSERT_TRUE(routes->allSimd.legal);
+      EXPECT_DOUBLE_EQ(routes->allSimd.logicalStageCycles[0], 20.0 * waves);
+      EXPECT_DOUBLE_EQ(routes->allSimd.logicalStageCycles[1], 100.0 * waves);
+      EXPECT_DOUBLE_EQ(routes->allSimd.totalCycles, 120.0 * waves);
+      ASSERT_TRUE(routes->allSimt.legal);
+      EXPECT_DOUBLE_EQ(routes->allSimt.totalCycles, 110.0 * waves);
+
+      // Moving setup to the payload must not change the all-SIMD total.
+      table.stages[0].implementations[0].resources.setup = 0.0;
+      table.stages[0].implementations[0].totalCycles -= 20.0;
+      table.stages[1].implementations[0].resources.setup = 20.0;
+      table.stages[1].implementations[0].totalCycles += 20.0;
+      auto moved = solveStageRoutes(table, StageTransitionCost{});
+      if (!moved)
+        FAIL() << llvm::toString(moved.takeError());
+      EXPECT_DOUBLE_EQ(moved->allSimd.totalCycles, routes->allSimd.totalCycles);
+    }
+  }
+}
+
 TEST(SimdSimtCostModelTest, MixedRouteChargesEveryMaterializedScope) {
   StageCostTable table;
   table.profileVersion = "unit-test-profile-v1";

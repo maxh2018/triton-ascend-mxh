@@ -79,9 +79,11 @@ static double mixedBaseStageCost(const LogicalStageCost &stage,
 
 /// AutoBlockify V1 is a route-conditional execution schedule.  The analysis
 /// view contains its real dispatch/loop operations so pure-SIMT and Mixed can
-/// pay them, but an all-SIMD executable restores the original logical grid.
-/// Keep the Stage positions for report alignment and remove only their cost
-/// from the all-SIMD candidate.
+/// pay them, but an all-SIMD executable does not materialize this TA schedule.
+/// Keep stage positions for report alignment. Kernel setup may be attached to
+/// the first dispatch stage: it is not conditional on materializing that stage.
+/// This removes only the TA schedule body; an independently lowered NPU-IR
+/// AutoBlockify schedule is not priced by these TA operation counts.
 static void removeAutoBlockifyCostFromAllSIMD(StageRoutePlan &plan,
                                               const StageCostTable &costTable) {
   if (!plan.legal || plan.logicalStageCycles.size() != costTable.stages.size())
@@ -90,8 +92,18 @@ static void removeAutoBlockifyCostFromAllSIMD(StageRoutePlan &plan,
     const llvm::StringRef model = costTable.stages[index].model;
     if (model != "auto_blockify_dispatch" && model != "auto_blockify_loop")
       continue;
-    plan.totalCycles -= plan.logicalStageCycles[index];
-    plan.logicalStageCycles[index] = 0.0;
+    double setup = 0.0;
+    for (const auto &cost : costTable.stages[index].implementations) {
+      if (cost.implementation.mode == StageMode::SIMD &&
+          cost.implementation.superblockFactor == 1 &&
+          !cost.implementation.localScope) {
+        setup =
+            cost.resources.setup * static_cast<double>(plan.runtimeWaveCount);
+        break;
+      }
+    }
+    plan.totalCycles -= plan.logicalStageCycles[index] - setup;
+    plan.logicalStageCycles[index] = setup;
     plan.entryTransitionCycles[index] = 0.0;
   }
   plan.totalCycles = std::max(0.0, plan.totalCycles);
