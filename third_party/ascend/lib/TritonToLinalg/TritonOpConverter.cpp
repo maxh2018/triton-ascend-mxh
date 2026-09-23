@@ -52,6 +52,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Interfaces/CallInterfaces.h"
@@ -187,14 +188,19 @@ LogicalResult MakeTensorPtrConverter::matchAndRewrite(
 LogicalResult PreciseDivConverter::matchAndRewrite(
     triton::PreciseDivFOp op, OpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const {
-  Value opa = op.getX();
-  Value opb = op.getY();
+  Value opa = adaptor.getX();
+  Value opb = adaptor.getY();
   auto loc = op.getLoc();
 
-  auto resType = dyn_cast<RankedTensorType>(op.getResult().getType());
-  auto divOp = rewriter.create<arith::DivFOp>(loc, resType, opa, opb);
+  if (opa.getType() != opb.getType())
+    return rewriter.notifyMatchFailure(op, "operands must have the same type");
 
-  rewriter.replaceOp(op, divOp);
+  // Let DivFOp infer its result type from converted operands.  PreciseDivFOp
+  // is valid for both scalar and tensor floating-point values; casting the
+  // original result to RankedTensorType made scalar divisions produce a null
+  // result type during partial conversion.
+  auto divOp = rewriter.create<arith::DivFOp>(loc, opa, opb);
+  rewriter.replaceOp(op, divOp.getResult());
   return success();
 }
 
@@ -484,11 +490,10 @@ FpToFpCanonicalizer::matchAndRewrite(triton::FpToFpOp op,
     return failure();
   }
 
-  // Handle RTNE (default) rounding mode with arith.truncf/extf
-  auto srcType = cast<RankedTensorType>(input.getType());
-  auto dstType = cast<RankedTensorType>(resultType);
-  auto srcElemType = srcType.getElementType();
-  auto dstElemType = dstType.getElementType();
+  // Handle RTNE (default) rounding mode with arith.truncf/extf. This can be
+  // either a scalar conversion or a ranked tensor conversion.
+  auto srcElemType = getElementTypeOrSelf(input.getType());
+  auto dstElemType = getElementTypeOrSelf(resultType);
   if (!isa<FloatType>(srcElemType) || !isa<FloatType>(dstElemType)) {
     return op.emitError("FpToFp expects floating point types");
   }
@@ -500,19 +505,51 @@ FpToFpCanonicalizer::matchAndRewrite(triton::FpToFpOp op,
   auto roundModeAttr = hfusion::RoundModeAttr::get(rewriter.getContext(),
                                                    hfusion::RoundMode::RINT);
 
-  if (srcBitwidth > dstBitwidth) {
-    // Downcast: use arith.truncf with round_mode=rint
-    auto truncOp = rewriter.create<arith::TruncFOp>(loc, dstType, input);
+  // A no-op conversion is valid only when the complete MLIR type is identical.
+  // Equal element bitwidth alone is insufficient: FP8 formats such as
+  // f8E4M3FN and f8E5M2 have different numerical semantics.
+  if (input.getType() == resultType) {
+    rewriter.replaceOp(op, input);
+    return success();
+  }
+
+  if (srcBitwidth == dstBitwidth) {
+    if (srcElemType == dstElemType) {
+      return op.emitError(
+          "fp_to_fp with identical element types has incompatible "
+          "container or layout types");
+    }
+
+    // arith.extf/truncf require a strict bitwidth change. Materialize an f32
+    // intermediate so the conversion remains a numerical cast in TTAdapter
+    // IR and can follow the normal Bisheng lowering path.
+    Type f32Type;
+    if (auto tensorType = dyn_cast<RankedTensorType>(input.getType())) {
+      f32Type =
+          RankedTensorType::get(tensorType.getShape(), rewriter.getF32Type(),
+                                tensorType.getEncoding());
+    } else if (isa<FloatType>(input.getType())) {
+      f32Type = rewriter.getF32Type();
+    } else {
+      return op.emitError("FpToFp expects a scalar or ranked tensor type");
+    }
+
+    auto extOp = rewriter.create<arith::ExtFOp>(loc, f32Type, input);
+    extOp->setAttr("round_mode", roundModeAttr);
+    auto truncOp =
+        rewriter.create<arith::TruncFOp>(loc, resultType, extOp.getResult());
     truncOp->setAttr("round_mode", roundModeAttr);
     rewriter.replaceOp(op, truncOp.getResult());
-  } else if (srcBitwidth < dstBitwidth) {
+  } else if (srcBitwidth > dstBitwidth) {
+    // Downcast: use arith.truncf with round_mode=rint
+    auto truncOp = rewriter.create<arith::TruncFOp>(loc, resultType, input);
+    truncOp->setAttr("round_mode", roundModeAttr);
+    rewriter.replaceOp(op, truncOp.getResult());
+  } else {
     // Upcast: use arith.extf with round_mode=rint
-    auto extOp = rewriter.create<arith::ExtFOp>(loc, dstType, input);
+    auto extOp = rewriter.create<arith::ExtFOp>(loc, resultType, input);
     extOp->setAttr("round_mode", roundModeAttr);
     rewriter.replaceOp(op, extOp.getResult());
-  } else {
-    // Same bitwidth, should not happen but handle gracefully
-    rewriter.replaceOp(op, input);
   }
 
   return success();
@@ -710,8 +747,13 @@ MakeTensorPtrCanonicalizer::matchAndRewrite(triton::MakeTensorPtrOp op,
 LogicalResult
 ReduceSingleCanonicalizer::matchAndRewrite(triton::ReduceOp reduceOp,
                                            PatternRewriter &rewriter) const {
-  assert(reduceOp.getSrcs().size() <= 2 &&
-         "Only reduce or reduce with index are supported");
+  // This canonicalization only handles value reductions and value/index
+  // reductions.  Multi-input reductions, such as Welford's
+  // (mean, count, m2) reduction, must fall through to ReduceConverter's
+  // extended lowering instead of terminating the compiler here.
+  if (reduceOp.getSrcs().size() > 2)
+    return rewriter.notifyMatchFailure(
+        reduceOp, "only canonicalizes value and value/index reductions");
   auto src = reduceOp.getSrcs()[0];
   auto srcType = cast<RankedTensorType>(src.getType());
   auto srcShape = srcType.getShape();
@@ -1192,6 +1234,79 @@ LogicalResult ReduceConverter::convertToTargetOpExtended(
     triton::ReduceOp op, typename triton::ReduceOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const {
   auto loc = op.getLoc();
+  auto operands = adaptor.getOperands();
+
+  // BiShengIR's VReduce lowering only supports a single value input (or a
+  // value/index pair).  A multi-input `tt.reduce`, such as Welford's
+  // (mean, count, m2) reduction, cannot be represented by that VReduceOp.
+  // Keep the current reduction body, but lower the static rank-1 scalar case
+  // to an explicit scalar loop so it never reaches the variadic VReduce path.
+  if (operands.size() > 2) {
+    auto inputType = dyn_cast<RankedTensorType>(operands.front().getType());
+    if (!inputType || inputType.getRank() != 1 || adaptor.getAxis() != 0 ||
+        ShapedType::isDynamic(inputType.getShape()[0]) ||
+        inputType.getShape()[0] < 1) {
+      return rewriter.notifyMatchFailure(
+          op, "multi-input reduce fallback requires static rank-1 axis-0 "
+              "inputs");
+    }
+    if (op.getResult().size() != operands.size()) {
+      return rewriter.notifyMatchFailure(
+          op, "multi-input reduce results do not match input count");
+    }
+
+    for (auto [i, operand] : llvm::enumerate(operands)) {
+      auto operandType = dyn_cast<RankedTensorType>(operand.getType());
+      if (!operandType || operandType.getShape() != inputType.getShape() ||
+          op.getResult()[i].getType() != operandType.getElementType()) {
+        return rewriter.notifyMatchFailure(
+            op, "multi-input reduce fallback requires matching scalar "
+                "results");
+      }
+    }
+
+    auto reduceBlock = op.getBody();
+    if (reduceBlock->getNumArguments() != 2 * operands.size() ||
+        reduceBlock->getTerminator()->getNumOperands() != operands.size()) {
+      return rewriter.notifyMatchFailure(
+          op, "unexpected multi-input reduce combine region");
+    }
+
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value upper =
+        rewriter.create<arith::ConstantIndexOp>(loc, inputType.getShape()[0]);
+    SmallVector<Value> initialValues;
+    initialValues.reserve(operands.size());
+    for (Value operand : operands)
+      initialValues.push_back(
+          rewriter.create<tensor::ExtractOp>(loc, operand, zero));
+
+    auto loop = rewriter.create<scf::ForOp>(
+        loc, one, upper, one, initialValues,
+        [&](OpBuilder &builder, Location loopLoc, Value inductionVar,
+            ValueRange iterArgs) {
+          IRMapping mapping;
+          for (auto [i, operand] : llvm::enumerate(operands)) {
+            Value current = builder.create<tensor::ExtractOp>(loopLoc, operand,
+                                                              inductionVar);
+            mapping.map(reduceBlock->getArgument(i), current);
+            mapping.map(reduceBlock->getArgument(i + operands.size()),
+                        iterArgs[i]);
+          }
+          for (Operation &innerOp : reduceBlock->without_terminator())
+            builder.clone(innerOp, mapping);
+
+          SmallVector<Value> yielded;
+          yielded.reserve(operands.size());
+          for (Value value : reduceBlock->getTerminator()->getOperands())
+            yielded.push_back(mapping.lookup(value));
+          builder.create<scf::YieldOp>(loopLoc, yielded);
+        });
+    rewriter.replaceOp(op, loop.getResults());
+    return success();
+  }
+
   auto elemTypes = op.getElementTypes();
 
   auto valueResultType = dyn_cast<RankedTensorType>(op.getType(0));
