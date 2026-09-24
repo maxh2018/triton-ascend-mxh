@@ -1,9 +1,14 @@
 //===- StagePartitioner.cpp - Build semantic Stage IR -------------------===//
 
 #include "AscendModel/Analysis/StagePartitioner.h"
+#include "ascend/include/TritonToUnstructure/OffsetAnalysis.h"
 #include "ascend/include/Utils/SuperBlockFactor.h"
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -21,6 +26,30 @@
 
 using namespace mlir;
 using namespace mlir::ascend;
+
+namespace mlir::ascend {
+
+struct PartialContinuousTile {
+  double rows = 0.0;
+  double elementsPerRow = 0.0;
+};
+
+// OffsetAnalysis creates helper IR while parsing pointers.  Keep one cloned
+// module and retain only its per-axis classifications for the original ops.
+class StageMemoryPatternAnalysis {
+public:
+  explicit StageMemoryPatternAnalysis(ModuleOp module);
+
+  std::optional<PartialContinuousTile> lookup(Operation *operation) const {
+    auto found = tiles.find(operation);
+    return found == tiles.end() ? std::nullopt : found->second;
+  }
+
+private:
+  llvm::DenseMap<Operation *, std::optional<PartialContinuousTile>> tiles;
+};
+
+} // namespace mlir::ascend
 
 namespace {
 
@@ -152,6 +181,323 @@ static double getMaximumTensorElements(Operation *operation) {
     if (isa<ShapedType>(value.getType()))
       elements = std::max(elements, getTypeElementCount(value.getType()));
   return elements;
+}
+
+// PtrOffsetInfo decides which axes UnstructureConversion would preserve as
+// structured and which axes it would lower through loops.  These steps add a
+// separate unit-stride check: PtrOffsetInfo can mark stride-2 as structured,
+// but stride-2 is not a contiguous row.
+struct AddressAxisStep {
+  enum class Kind { Known, LoadedIndex, Unknown } kind = Kind::Unknown;
+  int64_t stride = 0;
+};
+
+struct AddressSteps {
+  SmallVector<AddressAxisStep> axes;
+  bool dependsOnLoadedValue = false;
+};
+
+static AddressAxisStep knownStep(int64_t stride = 0) {
+  return {AddressAxisStep::Kind::Known, stride};
+}
+
+static AddressSteps unknownSteps(Value value, bool fromLoadedValue = false) {
+  AddressSteps result;
+  result.dependsOnLoadedValue = fromLoadedValue;
+  if (auto type = dyn_cast<RankedTensorType>(value.getType()))
+    for (int64_t extent : type.getShape())
+      result.axes.push_back(
+          extent == 1
+              ? knownStep()
+              : AddressAxisStep{fromLoadedValue
+                                    ? AddressAxisStep::Kind::LoadedIndex
+                                    : AddressAxisStep::Kind::Unknown,
+                                0});
+  return result;
+}
+
+static std::optional<int64_t> getSplatInteger(Value value,
+                                               unsigned depth = 0) {
+  if (depth > 32)
+    return std::nullopt;
+  Operation *producer = value.getDefiningOp();
+  if (!producer)
+    return std::nullopt;
+  const llvm::StringRef name = producer->getName().getStringRef();
+  if (name == "tt.splat" && producer->getNumOperands() == 1)
+    return getSplatInteger(producer->getOperand(0), depth + 1);
+  if (name != "arith.constant")
+    return std::nullopt;
+  Attribute attribute = producer->getAttr("value");
+  if (auto integer = dyn_cast_or_null<IntegerAttr>(attribute))
+    return integer.getInt();
+  if (auto dense = dyn_cast_or_null<DenseIntElementsAttr>(attribute))
+    if (dense.isSplat())
+      return dense.getSplatValue<APInt>().getSExtValue();
+  return std::nullopt;
+}
+
+static AddressAxisStep combineSteps(AddressAxisStep left,
+                                    AddressAxisStep right, int64_t sign = 1) {
+  if (left.kind == AddressAxisStep::Kind::Unknown ||
+      right.kind == AddressAxisStep::Kind::Unknown)
+    return {AddressAxisStep::Kind::Unknown, 0};
+  if (left.kind == AddressAxisStep::Kind::LoadedIndex ||
+      right.kind == AddressAxisStep::Kind::LoadedIndex)
+    return {AddressAxisStep::Kind::LoadedIndex, 0};
+  int64_t signedRight;
+  int64_t sum;
+  if (__builtin_mul_overflow(right.stride, sign, &signedRight) ||
+      __builtin_add_overflow(left.stride, signedRight, &sum))
+    return {AddressAxisStep::Kind::Unknown, 0};
+  return knownStep(sum);
+}
+
+static AddressSteps getAddressSteps(Value value, unsigned depth = 0) {
+  AddressSteps unknown = unknownSteps(value);
+  if (depth > 64)
+    return unknown;
+  Operation *producer = value.getDefiningOp();
+  if (!producer)
+    return unknown;
+  const llvm::StringRef name = producer->getName().getStringRef();
+  const auto output = dyn_cast<RankedTensorType>(value.getType());
+  const size_t rank = output ? output.getRank() : 0;
+  if (name == "arith.constant" || name == "tt.get_program_id") {
+    for (AddressAxisStep &axis : unknown.axes)
+      axis = knownStep();
+    return unknown;
+  }
+  if (name == "tt.load" || name == "tt.gather")
+    return unknownSteps(value, /*fromLoadedValue=*/true);
+  if (name == "tt.make_range" && rank == 1) {
+    unknown.axes[0] = knownStep(1);
+    return unknown;
+  }
+  if (producer->getNumOperands() == 0)
+    return unknown;
+  if (name == "tt.splat") {
+    AddressSteps source = getAddressSteps(producer->getOperand(0), depth + 1);
+    unknown.dependsOnLoadedValue = source.dependsOnLoadedValue;
+    for (AddressAxisStep &axis : unknown.axes)
+      axis = knownStep();
+    return unknown;
+  }
+  if (name == "tt.expand_dims" && rank > 0) {
+    auto axis = producer->getAttrOfType<IntegerAttr>("axis");
+    AddressSteps source = getAddressSteps(producer->getOperand(0), depth + 1);
+    if (!axis || axis.getInt() < 0 ||
+        axis.getInt() >= static_cast<int64_t>(rank) ||
+        source.axes.size() + 1 != rank)
+      return unknown;
+    unknown.dependsOnLoadedValue = source.dependsOnLoadedValue;
+    for (size_t i = 0, sourceAxis = 0; i < rank; ++i)
+      unknown.axes[i] =
+          i == static_cast<size_t>(axis.getInt())
+              ? knownStep()
+              : source.axes[sourceAxis++];
+    return unknown;
+  }
+  if (name == "tt.broadcast" && rank > 0) {
+    Value operand = producer->getOperand(0);
+    auto input = dyn_cast<RankedTensorType>(operand.getType());
+    AddressSteps source = getAddressSteps(operand, depth + 1);
+    if (!input || input.getRank() != static_cast<int64_t>(rank) ||
+        source.axes.size() != rank)
+      return unknown;
+    unknown.dependsOnLoadedValue = source.dependsOnLoadedValue;
+    for (size_t i = 0; i < rank; ++i)
+      unknown.axes[i] = input.getDimSize(i) == 1
+                            ? knownStep()
+                            : source.axes[i];
+    return unknown;
+  }
+  if (name == "arith.extsi" || name == "arith.extui" ||
+      name == "arith.index_cast") {
+    AddressSteps source = getAddressSteps(producer->getOperand(0), depth + 1);
+    return source.axes.size() == rank ? source : unknown;
+  }
+  if ((name == "arith.addi" || name == "arith.subi" ||
+       name == "arith.muli" || name == "tt.addptr") &&
+      producer->getNumOperands() == 2) {
+    AddressSteps left = getAddressSteps(producer->getOperand(0), depth + 1);
+    AddressSteps right = getAddressSteps(producer->getOperand(1), depth + 1);
+    if (left.axes.size() != rank || right.axes.size() != rank)
+      return unknown;
+    unknown.dependsOnLoadedValue =
+        left.dependsOnLoadedValue || right.dependsOnLoadedValue;
+    if (name == "arith.muli") {
+      const auto leftConstant = getSplatInteger(producer->getOperand(0));
+      const auto rightConstant = getSplatInteger(producer->getOperand(1));
+      for (size_t i = 0; i < rank; ++i) {
+        const auto constant = leftConstant ? leftConstant : rightConstant;
+        AddressAxisStep other =
+            leftConstant ? right.axes[i] : left.axes[i];
+        if (constant && *constant == 0) {
+          unknown.axes[i] = knownStep();
+        } else if (constant && other.kind == AddressAxisStep::Kind::Known) {
+          int64_t stride;
+          unknown.axes[i] =
+              __builtin_mul_overflow(other.stride, *constant, &stride)
+                  ? AddressAxisStep{AddressAxisStep::Kind::Unknown, 0}
+                  : knownStep(stride);
+        } else if (constant) {
+          unknown.axes[i] = other;
+        } else if (left.axes[i].kind == AddressAxisStep::Kind::Known &&
+                   left.axes[i].stride == 0 &&
+                   right.axes[i].kind == AddressAxisStep::Kind::Known &&
+                   right.axes[i].stride == 0) {
+          unknown.axes[i] = knownStep();
+        } else {
+          unknown.axes[i] =
+              {unknown.dependsOnLoadedValue
+                   ? AddressAxisStep::Kind::LoadedIndex
+                   : AddressAxisStep::Kind::Unknown,
+               0};
+        }
+      }
+    } else {
+      const int64_t sign = name == "arith.subi" ? -1 : 1;
+      for (size_t i = 0; i < rank; ++i)
+        unknown.axes[i] = combineSteps(left.axes[i], right.axes[i], sign);
+    }
+    return unknown;
+  }
+  return unknown;
+}
+
+using PointerAxisInfo = triton::PtrOffsetInfo::AxisInfo;
+
+// Avoid invoking OffsetAnalysis for pointers that cannot have an indirect
+// outer axis and a unit-stride trailing axis.  It expects parsed Triton
+// pointer roots, which arbitrary TTIR pointer tensors need not provide.
+static bool hasPotentialPartialContinuousAddress(Operation *operation) {
+  if (!operation || operation->getNumOperands() == 0)
+    return false;
+  auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
+  if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2)
+    return false;
+  AddressSteps address = getAddressSteps(operation->getOperand(0));
+  if (address.axes.size() != static_cast<size_t>(pointer.getRank()) ||
+      !llvm::any_of(address.axes, [](const AddressAxisStep &axis) {
+        return axis.kind == AddressAxisStep::Kind::LoadedIndex;
+      }))
+    return false;
+  const int64_t last = pointer.getRank() - 1;
+  return pointer.getDimSize(last) == 1 ||
+         (address.axes[last].kind == AddressAxisStep::Kind::Known &&
+          address.axes[last].stride == 1);
+}
+
+// OffsetAnalysis assumes tensor pointers originate from supported Triton
+// expressions and that tt.broadcast expands at least one dimension.
+static bool hasUnsupportedPointerInput(Value value,
+                                       llvm::DenseSet<Value> &visited) {
+  if (!visited.insert(value).second)
+    return false;
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    auto type = dyn_cast<RankedTensorType>(argument.getType());
+    return type && isa<triton::PointerType>(type.getElementType());
+  }
+  Operation *producer = value.getDefiningOp();
+  if (!producer)
+    return false;
+  if (isa<triton::BroadcastOp>(producer)) {
+    auto input = dyn_cast<RankedTensorType>(producer->getOperand(0).getType());
+    auto output = dyn_cast<RankedTensorType>(value.getType());
+    if (input && output && input.getShape() == output.getShape())
+      return true;
+  }
+  return llvm::any_of(producer->getOperands(), [&](Value operand) {
+    return hasUnsupportedPointerInput(operand, visited);
+  });
+}
+
+// Run the same pointer analysis as TritonToUnstructure on a detached clone.
+// Only the axis labels escape: PtrOffsetInfo also holds Values in the clone.
+static std::optional<SmallVector<PointerAxisInfo>>
+analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
+                   llvm::DenseMap<Value, triton::PtrOffsetInfo> &offsetMap) {
+  if (!clonedOperation || clonedOperation->getNumOperands() == 0)
+    return std::nullopt;
+  Value pointer = clonedOperation->getOperand(0);
+  // A loaded-index tile is formed through addptr.  Unsupported pointer
+  // producers stay in the original indirect class.
+  if (!isa_and_nonnull<triton::AddPtrOp>(pointer.getDefiningOp()))
+    return std::nullopt;
+  llvm::DenseSet<Value> visited;
+  if (hasUnsupportedPointerInput(pointer, visited))
+    return std::nullopt;
+  triton::parse(pointer, clonedOperation->getLoc(), rewriter, offsetMap);
+  auto found = offsetMap.find(pointer);
+  if (found == offsetMap.end())
+    return std::nullopt;
+  const auto &axes = found->second.getStructured();
+  auto pointerType = dyn_cast<RankedTensorType>(pointer.getType());
+  if (!pointerType || axes.size() != static_cast<size_t>(pointerType.getRank()))
+    return std::nullopt;
+  return SmallVector<PointerAxisInfo>(axes.begin(), axes.end());
+}
+
+static std::optional<PartialContinuousTile>
+classifyPartialContinuousTile(Operation *operation,
+                              ArrayRef<PointerAxisInfo> pointerAxes) {
+  auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
+  if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2 ||
+      pointerAxes.size() != static_cast<size_t>(pointer.getRank()))
+    return std::nullopt;
+  const AddressSteps address = getAddressSteps(operation->getOperand(0));
+  if (address.axes.size() != pointerAxes.size())
+    return std::nullopt;
+
+  int64_t elementsPerRow = 1;
+  int64_t suffixBegin = pointer.getRank();
+  for (int64_t axis = pointer.getRank(); axis-- > 0;) {
+    const int64_t extent = pointer.getDimSize(axis);
+    if (extent <= 0 ||
+        (extent > 1 &&
+         (pointerAxes[axis] != PointerAxisInfo::structured ||
+          address.axes[axis].kind != AddressAxisStep::Kind::Known ||
+          address.axes[axis].stride != elementsPerRow)))
+      break;
+    if (elementsPerRow > std::numeric_limits<int64_t>::max() / extent)
+      return std::nullopt;
+    elementsPerRow *= extent;
+    suffixBegin = axis;
+  }
+  if (suffixBegin == 0 || suffixBegin == pointer.getRank())
+    return std::nullopt;
+
+  bool hasDiscreteLoadedAxis = false;
+  double rows = 1.0;
+  for (int64_t axis = 0; axis < suffixBegin; ++axis) {
+    const int64_t extent = pointer.getDimSize(axis);
+    if (extent <= 0)
+      return std::nullopt;
+    if (extent > 1 && pointerAxes[axis] != PointerAxisInfo::unstructured)
+      return std::nullopt;
+    rows *= static_cast<double>(extent);
+    hasDiscreteLoadedAxis |=
+        extent > 1 &&
+        address.axes[axis].kind == AddressAxisStep::Kind::LoadedIndex;
+  }
+  if (!hasDiscreteLoadedAxis)
+    return std::nullopt;
+  return PartialContinuousTile{rows, static_cast<double>(elementsPerRow)};
+}
+
+static std::optional<PartialContinuousTile>
+getPartialContinuousTile(Operation *operation,
+                         const StageMemoryPatternAnalysis *memoryPatterns) {
+  if (!operation || !isLoadedIndexDependentMemoryOp(operation) ||
+      operation->getNumOperands() == 0)
+    return std::nullopt;
+  if (memoryPatterns)
+    return memoryPatterns->lookup(operation);
+  ModuleOp module = operation->getParentOfType<ModuleOp>();
+  if (!module)
+    return std::nullopt;
+  return StageMemoryPatternAnalysis(module).lookup(operation);
 }
 
 static bool hasTensorResult(Operation *operation) {
@@ -393,7 +739,9 @@ static AtomicWorkload getAtomicWorkload(Operation *operation) {
 static bool isScalarLoadOperation(Operation *op);
 static bool isScalarStoreOperation(Operation *op);
 
-static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
+static void accumulateOneOperation(
+    Operation *operation, StageWorkload &work,
+    const StageMemoryPatternAnalysis *memoryPatterns) {
   if (!operation || operation->hasTrait<OpTrait::IsTerminator>())
     return;
   const llvm::StringRef name = operation->getName().getStringRef();
@@ -409,10 +757,18 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
       return;
     }
     const double bytes = getValueBytes(result);
-    const double logicalMemoryGroups = std::ceil(elements / 32.0);
+    const auto partial = getPartialContinuousTile(operation, memoryPatterns);
+    const double logicalMemoryGroups =
+        partial ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
+                : std::ceil(elements / 32.0);
     work.loadBytes += bytes;
     work.loadWarpInstructions += logicalMemoryGroups;
-    if (name == "tt.gather" || isLoadedIndexDependentMemoryOp(operation)) {
+    if (partial) {
+      work.partialContinuousLoadRows += partial->rows;
+      work.partialContinuousLoadBytes += bytes;
+      work.partialContinuousLoadWarpInstructions += logicalMemoryGroups;
+    } else if (name == "tt.gather" ||
+               isLoadedIndexDependentMemoryOp(operation)) {
       work.indirectLoadBytes += bytes;
       work.indirectLoadTransactions += logicalMemoryGroups;
     }
@@ -425,11 +781,18 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
       return;
     }
     const double bytes = getValueBytes(value);
+    const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
-        std::ceil(getTypeElementCount(value.getType()) / 32.0);
+        partial
+            ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
+            : std::ceil(getTypeElementCount(value.getType()) / 32.0);
     work.storeBytes += bytes;
     work.storeWarpInstructions += logicalMemoryGroups;
-    if (isLoadedIndexDependentMemoryOp(operation)) {
+    if (partial) {
+      work.partialContinuousStoreRows += partial->rows;
+      work.partialContinuousStoreBytes += bytes;
+      work.partialContinuousStoreWarpInstructions += logicalMemoryGroups;
+    } else if (isLoadedIndexDependentMemoryOp(operation)) {
       work.indirectStoreBytes += bytes;
       work.indirectStoreTransactions += logicalMemoryGroups;
     }
@@ -475,6 +838,12 @@ static void scaleWorkload(StageWorkload &work, double scale) {
   work.indirectStoreBytes *= scale;
   work.indirectLoadTransactions *= scale;
   work.indirectStoreTransactions *= scale;
+  work.partialContinuousLoadRows *= scale;
+  work.partialContinuousStoreRows *= scale;
+  work.partialContinuousLoadBytes *= scale;
+  work.partialContinuousStoreBytes *= scale;
+  work.partialContinuousLoadWarpInstructions *= scale;
+  work.partialContinuousStoreWarpInstructions *= scale;
   for (AtomicWorkload &atomic : work.atomicWorkloads) {
     atomic.logicalElements *= scale;
     atomic.logicalOperationInstances *= scale;
@@ -546,14 +915,14 @@ static int64_t getLoopTripCount(Operation *operation,
 /// loop iteration instead of accidentally counting the body once.
 /// AutoBlockify V1 is the exception: its loop is a scheduling shell and its
 /// direct body operations are already separate semantic roots.
-static void accumulateDynamicOperationTree(Operation *operation,
-                                           StageWorkload &work,
-                                           double multiplicity,
-                                           int64_t fallbackLoopTripCount) {
+static void accumulateDynamicOperationTree(
+    Operation *operation, StageWorkload &work, double multiplicity,
+    int64_t fallbackLoopTripCount,
+    const StageMemoryPatternAnalysis *memoryPatterns) {
   if (!operation)
     return;
   StageWorkload local;
-  accumulateOneOperation(operation, local);
+  accumulateOneOperation(operation, local, memoryPatterns);
   scaleWorkload(local, multiplicity);
   mergeWorkload(work, std::move(local));
 
@@ -570,7 +939,7 @@ static void accumulateDynamicOperationTree(Operation *operation,
     for (Block &block : region)
       for (Operation &nested : block.getOperations())
         accumulateDynamicOperationTree(&nested, work, childMultiplicity,
-                                       fallbackLoopTripCount);
+                                       fallbackLoopTripCount, memoryPatterns);
 }
 
 static int64_t countAlgorithmLoops(const LogicalStage &stage) {
@@ -598,6 +967,14 @@ static void mergeWorkload(StageWorkload &into, StageWorkload from) {
   into.indirectStoreBytes += from.indirectStoreBytes;
   into.indirectLoadTransactions += from.indirectLoadTransactions;
   into.indirectStoreTransactions += from.indirectStoreTransactions;
+  into.partialContinuousLoadRows += from.partialContinuousLoadRows;
+  into.partialContinuousStoreRows += from.partialContinuousStoreRows;
+  into.partialContinuousLoadBytes += from.partialContinuousLoadBytes;
+  into.partialContinuousStoreBytes += from.partialContinuousStoreBytes;
+  into.partialContinuousLoadWarpInstructions +=
+      from.partialContinuousLoadWarpInstructions;
+  into.partialContinuousStoreWarpInstructions +=
+      from.partialContinuousStoreWarpInstructions;
   llvm::append_range(into.atomicWorkloads, std::move(from.atomicWorkloads));
   for (TensorOperationWorkload &source : from.tensorOperationWorkloads) {
     auto destination =
@@ -788,6 +1165,28 @@ static bool operationTreeContainsLoadedIndexMemory(Operation *root) {
       found = isLoadedIndexDependentMemoryOp(nested);
   });
   return found;
+}
+
+static bool operationTreeHasOnlyPartialContinuousMemory(
+    Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
+  if (!root)
+    return false;
+  bool hasPartial = false;
+  bool hasOtherIndirect = false;
+  root->walk([&](Operation *operation) {
+    const llvm::StringRef name = operation->getName().getStringRef();
+    if (name == "tt.gather") {
+      hasOtherIndirect = true;
+      return;
+    }
+    if (!isLoadedIndexDependentMemoryOp(operation))
+      return;
+    if (getPartialContinuousTile(operation, memoryPatterns))
+      hasPartial = true;
+    else
+      hasOtherIndirect = true;
+  });
+  return hasPartial && !hasOtherIndirect;
 }
 
 static bool operationTreeHasTrueLoopCarriedDependency(Operation *root) {
@@ -992,7 +1391,8 @@ static double semanticRootEntryMultiplicity(Operation *root) {
 /// Classify one transitive semantic ownership unit.  This function consumes
 /// only TTIR structure; it does not inspect a kernel name, workload name,
 /// measured performance, or route score.
-static StageCostModelKind classifySemanticRoot(Operation *root) {
+static StageCostModelKind classifySemanticRoot(
+    Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
   if (root->hasAttr("ta.auto_blockify_v1.loop"))
     return StageCostModelKind::AutoBlockifyLoop;
   if (root->hasAttr("ta.auto_blockify_v1.schedule"))
@@ -1007,6 +1407,8 @@ static StageCostModelKind classifySemanticRoot(Operation *root) {
     return StageCostModelKind::CubeRoofline;
   if (operationTreeHasAnyName(root, {"tt.atomic_rmw", "tt.atomic_cas"}))
     return StageCostModelKind::AtomicMemory;
+  if (operationTreeHasOnlyPartialContinuousMemory(root, memoryPatterns))
+    return StageCostModelKind::PartialContinuousTileMemory;
   if (operationTreeContainsLoadedIndexMemory(root) ||
       operationTreeHasAnyName(root, {"tt.gather"}))
     return StageCostModelKind::IndirectGatherMemory;
@@ -1042,7 +1444,8 @@ static StageScheduleKind scheduleForSemanticRoot(Operation *root,
                                                  StageCostModelKind kind) {
   if (kind == StageCostModelKind::LoopCarriedRecurrence)
     return StageScheduleKind::LoopCarriedSerial;
-  if (kind == StageCostModelKind::IndirectGatherMemory)
+  if (kind == StageCostModelKind::IndirectGatherMemory ||
+      kind == StageCostModelKind::PartialContinuousTileMemory)
     return StageScheduleKind::PartiallyDependent;
   if (kind == StageCostModelKind::AtomicMemory)
     return StageScheduleKind::PartiallyDependent;
@@ -1242,6 +1645,38 @@ static void deriveLocalSimtScopeTraffic(StagePartition &partition,
 
 } // namespace
 
+namespace mlir::ascend {
+
+StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
+  if (!module ||
+      !module.getContext()->getLoadedDialect<triton::TritonDialect>())
+    return;
+
+  SmallVector<Operation *> candidates;
+  module.walk([&](Operation *operation) {
+    const llvm::StringRef name = operation->getName().getStringRef();
+    if ((name == "tt.load" || name == "tt.store") &&
+        isLoadedIndexDependentMemoryOp(operation) &&
+        hasPotentialPartialContinuousAddress(operation))
+      candidates.push_back(operation);
+  });
+  if (candidates.empty())
+    return;
+
+  IRMapping mapping;
+  OwningOpRef<ModuleOp> analysisModule(cast<ModuleOp>(module->clone(mapping)));
+  IRRewriter rewriter(module.getContext());
+  llvm::DenseMap<Value, triton::PtrOffsetInfo> offsetMap;
+  for (Operation *operation : candidates) {
+    Operation *copy = mapping.lookupOrNull(operation);
+    auto axes = analyzePointerAxes(copy, rewriter, offsetMap);
+    tiles[operation] =
+        axes ? classifyPartialContinuousTile(operation, *axes) : std::nullopt;
+  }
+}
+
+} // namespace mlir::ascend
+
 llvm::Expected<ProgramStructure>
 ProgramStructureAnalysis::analyze(ModuleOp module,
                                   const SimtAnchorPlan &anchorPlan) const {
@@ -1320,6 +1755,7 @@ static int semanticKindPriority(StageCostModelKind kind) {
     return 65;
   case StageCostModelKind::IndirectScalarMemory:
   case StageCostModelKind::IndirectGatherMemory:
+  case StageCostModelKind::PartialContinuousTileMemory:
     return 60;
   case StageCostModelKind::IndependentPipelinedLoop:
     return 50;
@@ -1449,8 +1885,9 @@ buildAnchorGroups(const ProgramStructure &structure,
 }
 
 llvm::Expected<StagePartition>
-StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
-                               const SimtAnchorPlan &anchorPlan) const {
+StageBoundaryAnalysis::analyze(
+    const ProgramStructure &structure, const SimtAnchorPlan &anchorPlan,
+    const StageMemoryPatternAnalysis *memoryPatterns) const {
   if (structure.rootOperations.empty())
     return llvm::createStringError(
         std::errc::invalid_argument,
@@ -1469,10 +1906,8 @@ StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
           "StageBoundaryAnalysis received duplicate or null semantic root");
 
     const int64_t anchorGroup = (*anchorGroups)[index];
-    StageCostModelKind kind = classifySemanticRoot(root);
-    // A split loop's shell owns only control overhead; classification must
-    // not reach into the body it no longer owns (e.g. a scan inside the body
-    // must not relabel the backedge Stage as a reduction).
+    StageCostModelKind kind = classifySemanticRoot(root, memoryPatterns);
+    // A split loop's shell owns only control overhead.
     if (shouldSplitLoopBodyIntoStages(root))
       kind = StageCostModelKind::IndependentPipelinedLoop;
     StageScheduleKind schedule = scheduleForSemanticRoot(root, kind);
@@ -1487,7 +1922,7 @@ StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
     while (next < structure.rootOperations.size()) {
       Operation *candidate = structure.rootOperations[next];
       const int64_t candidateAnchorGroup = (*anchorGroups)[next];
-      const StageCostModelKind candidateKind = classifySemanticRoot(candidate);
+      const StageCostModelKind candidateKind = classifySemanticRoot(candidate, memoryPatterns);
       const StageScheduleKind candidateSchedule =
           scheduleForSemanticRoot(candidate, candidateKind);
       const bool sameCompoundAnchor =
@@ -1533,7 +1968,9 @@ StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
   return partition;
 }
 
-llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
+llvm::Error StageFeatureAnalysis::analyze(
+    StagePartition &partition,
+    const StageMemoryPatternAnalysis *memoryPatterns) const {
   for (LogicalStage &stage : partition.stages) {
     StageModelFeatures &facts = stage.features;
     const double activeLaneRatio = facts.activeLaneRatio;
@@ -1544,6 +1981,8 @@ llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
       collectOwnedOperationTree(root, owned);
     bool hasMemory = false;
     bool hasContiguousMemory = false;
+    bool hasPartialContinuousMemory = false;
+    bool hasOtherIndirectMemory = false;
     int64_t algorithmLoopCount = 0;
     if (stage.costModelKind != StageCostModelKind::AutoBlockifyDispatch &&
         stage.costModelKind != StageCostModelKind::AutoBlockifyLoop)
@@ -1592,12 +2031,19 @@ llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
               isLoadedIndexDependentMemoryOp(operation) || name == "tt.gather";
           facts.hasIndirectMemory |= indirect;
           hasContiguousMemory |= !indirect;
+          if (indirect) {
+            if (getPartialContinuousTile(operation, memoryPatterns))
+              hasPartialContinuousMemory = true;
+            else
+              hasOtherIndirectMemory = true;
+          }
         }
       }
       if (name.starts_with("tt.atomic")) {
         hasMemory = true;
         facts.hasAtomicMemory = true;
         facts.hasIndirectMemory |= isLoadedIndexDependentMemoryOp(operation);
+        hasOtherIndirectMemory |= isLoadedIndexDependentMemoryOp(operation);
       }
       facts.hasReduction |=
           name == "tt.reduce" || name == "tt.scan" || name == "linalg.reduce";
@@ -1612,6 +2058,8 @@ llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
           name.contains("pack") || name.contains("unpack");
     }
     facts.hasContiguousMemory = hasMemory && hasContiguousMemory;
+    facts.hasPartialContinuousMemory =
+        hasPartialContinuousMemory && !hasOtherIndirectMemory;
     if (algorithmLoopCount > 0 && stage.iterationCount > 1) {
       // Multiple loop operations in one stage do not prove concurrent
       // execution. In particular, adjacent scf.for loops execute serially;
@@ -1653,6 +2101,8 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
     case StageCostModelKind::IndirectScalarMemory:
     case StageCostModelKind::IndirectGatherMemory:
       return facts.hasIndirectMemory;
+    case StageCostModelKind::PartialContinuousTileMemory:
+      return facts.hasPartialContinuousMemory;
     case StageCostModelKind::AtomicMemory:
       return facts.hasAtomicMemory;
     case StageCostModelKind::ContinuousTileMemory:
@@ -1700,6 +2150,8 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
         return StageCostModelKind::IndependentPipelinedLoop;
       if (facts.hasAtomicMemory)
         return StageCostModelKind::AtomicMemory;
+      if (facts.hasPartialContinuousMemory)
+        return StageCostModelKind::PartialContinuousTileMemory;
       if (facts.hasIndirectMemory)
         return StageCostModelKind::IndirectGatherMemory;
       if (facts.hasConversionPack)
@@ -1741,7 +2193,9 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
   return llvm::Error::success();
 }
 
-llvm::Error StageWorkloadAnalysis::analyze(StagePartition &partition) const {
+llvm::Error StageWorkloadAnalysis::analyze(
+    StagePartition &partition,
+    const StageMemoryPatternAnalysis *memoryPatterns) const {
   if (!partition.operationOwnershipComplete)
     return llvm::createStringError(
         std::errc::invalid_argument,
@@ -1756,7 +2210,7 @@ llvm::Error StageWorkloadAnalysis::analyze(StagePartition &partition) const {
     for (Operation *root : stage.operations)
       accumulateDynamicOperationTree(root, work,
                                      semanticRootEntryMultiplicity(root),
-                                     fallbackLoopTripCount);
+                                     fallbackLoopTripCount, memoryPatterns);
     recomputeIssueElements(work);
     stage.workload = std::move(work);
     makePerIteration(stage);
@@ -1876,14 +2330,16 @@ StagePartitioner::partition(ModuleOp module, const SimtAnchorPlan &anchorPlan,
   auto structure = ProgramStructureAnalysis().analyze(module, anchorPlan);
   if (!structure)
     return structure.takeError();
-  auto result = StageBoundaryAnalysis().analyze(*structure, anchorPlan);
+  StageMemoryPatternAnalysis memoryPatterns(module);
+  auto result =
+      StageBoundaryAnalysis().analyze(*structure, anchorPlan, &memoryPatterns);
   if (!result)
     return result.takeError();
   StageWorkloadAnalysis workloadAnalysis;
-  if (llvm::Error error = workloadAnalysis.analyze(*result))
+  if (llvm::Error error = workloadAnalysis.analyze(*result, &memoryPatterns))
     return std::move(error);
   StageFeatureAnalysis featureAnalysis;
-  if (llvm::Error error = featureAnalysis.analyze(*result))
+  if (llvm::Error error = featureAnalysis.analyze(*result, &memoryPatterns))
     return std::move(error);
   if (llvm::Error error =
           StageKindClassifier().analyze(*result, options.tinyDotFlopsMax))

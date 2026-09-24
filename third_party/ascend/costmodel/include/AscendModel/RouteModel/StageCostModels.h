@@ -34,6 +34,7 @@ enum class StageCostModelKind {
   PredicateMask,
   LoopPredicate,
   ContinuousTileMemory,
+  PartialContinuousTileMemory,
   ContinuousTileStore,
   ContinuousShortLoad,
   CachePolicyStore,

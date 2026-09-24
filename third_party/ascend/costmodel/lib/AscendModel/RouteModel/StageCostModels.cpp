@@ -88,6 +88,7 @@ static int64_t logicalTensorParallelismFactor(const LogicalStage &stage,
                                               StageMode mode) {
   if (mode != StageMode::SIMT ||
       stage.workload.maximumLogicalTensorElements <= 0.0 ||
+      stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory ||
       stage.features.hasDot || stage.features.hasAtomicMemory)
     return 1;
   const int64_t operationWarpGroups =
@@ -372,6 +373,10 @@ static double estimateStage(const LogicalStage &stage,
     return r.setup +
            dispatchCount * std::max(r.scalar + controlBody(r), r.issue);
   }
+  case StageCostModelKind::PartialContinuousTileMemory:
+    // Discrete rows are billed as a sum of direct-memory accesses.  Do not
+    // apply the independent SIMD load/store overlap path to this Stage.
+    return serial;
   case StageCostModelKind::ContinuousTileMemory:
   case StageCostModelKind::ContinuousTileStore:
   case StageCostModelKind::ContinuousShortLoad:
@@ -525,6 +530,8 @@ llvm::StringRef mlir::ascend::stringifyStageCostModel(StageCostModelKind kind) {
     return "loop_predicate";
   case StageCostModelKind::ContinuousTileMemory:
     return "continuous_tile_memory";
+  case StageCostModelKind::PartialContinuousTileMemory:
+    return "partial_continuous_tile_memory";
   case StageCostModelKind::ContinuousTileStore:
     return "continuous_tile_store";
   case StageCostModelKind::ContinuousShortLoad:
