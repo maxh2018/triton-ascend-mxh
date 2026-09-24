@@ -35,9 +35,7 @@ static double mixedEquivalentStageCost(const LogicalStageCost &stage,
   const double factor = static_cast<double>(
       std::max<int64_t>(1, selected.implementation.superblockFactor));
   const double fixedScopeTransitions =
-      static_cast<double>(scopeCount) / factor *
-      (transition.get(StageMode::SIMD, StageMode::SIMT) +
-       transition.get(StageMode::SIMT, StageMode::SIMD));
+      static_cast<double>(scopeCount) / factor * transition.fixedPairCycles;
   const double activeThreads =
       std::max(1.0, static_cast<double>(transition.simtWarpSize) *
                         std::clamp(stage.features.activeLaneRatio, 0.0, 1.0));
@@ -79,9 +77,11 @@ static double mixedBaseStageCost(const LogicalStageCost &stage,
 
 /// AutoBlockify V1 is a route-conditional execution schedule.  The analysis
 /// view contains its real dispatch/loop operations so pure-SIMT and Mixed can
-/// pay them, but an all-SIMD executable restores the original logical grid.
-/// Keep the Stage positions for report alignment and remove only their cost
-/// from the all-SIMD candidate.
+/// pay them, but an all-SIMD executable does not materialize this TA schedule.
+/// Keep stage positions for report alignment. Kernel setup may be attached to
+/// the first dispatch stage: it is not conditional on materializing that stage.
+/// This removes only the TA schedule body; an independently lowered NPU-IR
+/// AutoBlockify schedule is not priced by these TA operation counts.
 static void removeAutoBlockifyCostFromAllSIMD(StageRoutePlan &plan,
                                               const StageCostTable &costTable) {
   if (!plan.legal || plan.logicalStageCycles.size() != costTable.stages.size())
@@ -90,8 +90,18 @@ static void removeAutoBlockifyCostFromAllSIMD(StageRoutePlan &plan,
     const llvm::StringRef model = costTable.stages[index].model;
     if (model != "auto_blockify_dispatch" && model != "auto_blockify_loop")
       continue;
-    plan.totalCycles -= plan.logicalStageCycles[index];
-    plan.logicalStageCycles[index] = 0.0;
+    double setup = 0.0;
+    for (const auto &cost : costTable.stages[index].implementations) {
+      if (cost.implementation.mode == StageMode::SIMD &&
+          cost.implementation.superblockFactor == 1 &&
+          !cost.implementation.localScope) {
+        setup =
+            cost.resources.setup * static_cast<double>(plan.runtimeWaveCount);
+        break;
+      }
+    }
+    plan.totalCycles -= plan.logicalStageCycles[index] - setup;
+    plan.logicalStageCycles[index] = setup;
     plan.entryTransitionCycles[index] = 0.0;
   }
   plan.totalCycles = std::max(0.0, plan.totalCycles);
@@ -189,8 +199,7 @@ llvm::json::Object AtomicWorkload::toJSON() const {
 }
 
 bool TensorOperationWorkload::isFiniteAndNonNegative() const {
-  const std::array<double, 3> values = {logicalElements, segmentCount,
-                                        logicalOperationInstances};
+  const std::array<double, 2> values = {logicalElements, segmentCount};
   return !operation.empty() && elementBitWidth > 0 &&
          contiguousElementsPerSegment > 0 &&
          std::all_of(values.begin(), values.end(), [](double value) {
@@ -205,10 +214,7 @@ llvm::json::Object TensorOperationWorkload::toJSON() const {
       {"logical_elements_per_iteration", logicalElements},
       {"segment_count_per_iteration", segmentCount},
       {"contiguous_elements_per_segment", contiguousElementsPerSegment},
-      {"logical_operation_instances_per_iteration", logicalOperationInstances},
-      {"simd_lowering", simdScalarFallback
-                            ? "scalar_fallback_unaligned_outer_stride"
-                            : "segmented_vector"}};
+      {"simd_lowering", "segmented_vector"}};
 }
 
 bool ReductionWorkload::isValid() const {
@@ -226,7 +232,7 @@ llvm::json::Object ReductionWorkload::toJSON() const {
 }
 
 bool StageWorkload::isFiniteAndNonNegative() const {
-  const std::array<double, 16> values = {scalarOperations,
+  const std::array<double, 17> values = {scalarOperations,
                                          loadBytes,
                                          storeBytes,
                                          loadWarpInstructions,
@@ -241,7 +247,9 @@ bool StageWorkload::isFiniteAndNonNegative() const {
                                          scanShuffleLaneSteps,
                                          dotFlops,
                                          issueElements,
-                                         estimatedSpillTransactions};
+                                         estimatedSpillTransactions,
+                                         scalarLoadCount,
+                                         scalarStoreCount};
   if (!std::all_of(
           values.begin(), values.end(),
           [](double value) { return std::isfinite(value) && value >= 0.0; }) ||
@@ -259,10 +267,9 @@ bool StageWorkload::isFiniteAndNonNegative() const {
                       [](const TensorOperationWorkload &tensor) {
                         return tensor.isFiniteAndNonNegative();
                       }) &&
-         llvm::all_of(atomicWorkloads,
-                      [](const AtomicWorkload &atomic) {
-                        return atomic.isFiniteAndNonNegative();
-                      }) &&
+         llvm::all_of(atomicWorkloads, [](const AtomicWorkload &atomic) {
+           return atomic.isFiniteAndNonNegative();
+         }) &&
          llvm::all_of(reductionWorkloads,
                       [](const ReductionWorkload &reduction) {
                         return reduction.isValid();
@@ -311,6 +318,8 @@ llvm::json::Object StageWorkload::toJSON() const {
   result["issue_elements_per_iteration"] = issueElements;
   result["estimated_spill_transactions_per_iteration"] =
       estimatedSpillTransactions;
+  result["scalar_load_count_per_iteration"] = scalarLoadCount;
+  result["scalar_store_count_per_iteration"] = scalarStoreCount;
   result["pays_kernel_setup"] = paysKernelSetup;
   return result;
 }
@@ -427,8 +436,7 @@ llvm::json::Object LogicalStageCost::toJSON() const {
 }
 
 bool StageTransitionCost::isValid() const {
-  return std::isfinite(simdToSimtCycles) && std::isfinite(simtToSimdCycles) &&
-         simdToSimtCycles >= 0.0 && simtToSimdCycles >= 0.0 &&
+  return std::isfinite(fixedPairCycles) && fixedPairCycles >= 0.0 &&
          std::isfinite(simdUbLoadBytesPerCycle) &&
          simdUbLoadBytesPerCycle > 0.0 &&
          std::isfinite(simdUbStoreBytesPerCycle) &&
@@ -439,16 +447,9 @@ bool StageTransitionCost::isValid() const {
          simtUbStoreBytesPerThreadPerCycle > 0.0 && simtWarpSize > 0;
 }
 
-double StageTransitionCost::get(StageMode from, StageMode to) const {
-  if (from == to)
-    return 0.0;
-  return from == StageMode::SIMD ? simdToSimtCycles : simtToSimdCycles;
-}
-
 llvm::json::Object StageTransitionCost::toJSON() const {
   llvm::json::Object result;
-  result["simd_to_simt_system_cycles"] = simdToSimtCycles;
-  result["simt_to_simd_system_cycles"] = simtToSimdCycles;
+  result["fixed_pair_system_cycles"] = fixedPairCycles;
   result["simd_ub_load_bytes_per_system_cycle"] = simdUbLoadBytesPerCycle;
   result["simd_ub_store_bytes_per_system_cycle"] = simdUbStoreBytesPerCycle;
   result["simt_ub_load_bytes_per_thread_per_system_cycle"] =
