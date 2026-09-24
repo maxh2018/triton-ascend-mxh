@@ -1455,6 +1455,173 @@ TEST(SimdSimtCostModelTest,
   EXPECT_EQ(result->stages.back().operations.front(), roots.back());
 }
 
+static std::string partialContinuousTileIR(int64_t rows, int64_t columns,
+                                           int64_t columnStep,
+                                           bool storePayload = false) {
+  std::string source = R"mlir(
+    module {
+      func.func @kernel(%indices: tensor<@ROWS@x!tt.ptr<i32>>,
+                        %base: !tt.ptr<f32>,
+                        %data: tensor<@ROWS@x@COLS@xf32>) {
+        %index = "tt.load"(%indices)
+          : (tensor<@ROWS@x!tt.ptr<i32>>) -> tensor<@ROWS@xi32>
+        %index2d = "tt.expand_dims"(%index) {axis = 1 : i32}
+          : (tensor<@ROWS@xi32>) -> tensor<@ROWS@x1xi32>
+        %rowStride = arith.constant dense<@ROWSTRIDE@>
+          : tensor<@ROWS@x1xi32>
+        %rowOffset = arith.muli %index2d, %rowStride
+          : tensor<@ROWS@x1xi32>
+        %rowBroadcast = "tt.broadcast"(%rowOffset)
+          : (tensor<@ROWS@x1xi32>) -> tensor<@ROWS@x@COLS@xi32>
+        %columns = "tt.make_range"() {start = 0 : i32, end = @COLS@ : i32}
+          : () -> tensor<@COLS@xi32>
+        %column2d = "tt.expand_dims"(%columns) {axis = 0 : i32}
+          : (tensor<@COLS@xi32>) -> tensor<1x@COLS@xi32>
+        %columnBroadcast = "tt.broadcast"(%column2d)
+          : (tensor<1x@COLS@xi32>) -> tensor<@ROWS@x@COLS@xi32>
+        %columnStride = arith.constant dense<@STEP@>
+          : tensor<@ROWS@x@COLS@xi32>
+        %columnOffset = arith.muli %columnBroadcast, %columnStride
+          : tensor<@ROWS@x@COLS@xi32>
+        %offset = arith.addi %rowBroadcast, %columnOffset
+          : tensor<@ROWS@x@COLS@xi32>
+        %baseBroadcast = "tt.splat"(%base)
+          : (!tt.ptr<f32>) -> tensor<@ROWS@x@COLS@x!tt.ptr<f32>>
+        %pointer = "tt.addptr"(%baseBroadcast, %offset)
+          : (tensor<@ROWS@x@COLS@x!tt.ptr<f32>>,
+             tensor<@ROWS@x@COLS@xi32>)
+            -> tensor<@ROWS@x@COLS@x!tt.ptr<f32>>
+        @PAYLOAD@
+        return
+      }
+    }
+  )mlir";
+  auto replace = [&](llvm::StringRef from, llvm::StringRef to) {
+    size_t position = 0;
+    while ((position = source.find(from.str(), position)) !=
+           std::string::npos) {
+      source.replace(position, from.size(), to.str());
+      position += to.size();
+    }
+  };
+  replace("@ROWS@", std::to_string(rows));
+  replace("@COLS@", std::to_string(columns));
+  replace("@ROWSTRIDE@", std::to_string(columns * columnStep));
+  replace("@STEP@", std::to_string(columnStep));
+  replace("@PAYLOAD@",
+          storePayload
+              ? "\"tt.store\"(%pointer, %data) : "
+                "(tensor<" + std::to_string(rows) + "x" +
+                    std::to_string(columns) + "x!tt.ptr<f32>>, tensor<" +
+                    std::to_string(rows) + "x" + std::to_string(columns) +
+                    "xf32>) -> ()"
+              : "%payload = \"tt.load\"(%pointer) : "
+                "(tensor<" + std::to_string(rows) + "x" +
+                    std::to_string(columns) + "x!tt.ptr<f32>>) -> tensor<" +
+                    std::to_string(rows) + "x" + std::to_string(columns) +
+                    "xf32>");
+  return source;
+}
+
+TEST(SimdSimtCostModelTest, PartialContinuousRowsUseDirectMemoryPerRow) {
+  for (int64_t columns : {32, 8, 1}) {
+    mlir::MLIRContext context;
+    context.getOrLoadDialect<mlir::arith::ArithDialect>();
+    context.getOrLoadDialect<mlir::func::FuncDialect>();
+    context.allowUnregisteredDialects();
+    auto module = mlir::parseSourceString<mlir::ModuleOp>(
+        partialContinuousTileIR(8, columns, 1), &context);
+    ASSERT_TRUE(module);
+    auto partition = StagePartitioner().partition(
+        *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
+    if (!partition)
+      FAIL() << llvm::toString(partition.takeError());
+    const LogicalStage *payload = nullptr;
+    for (const LogicalStage &stage : partition->stages)
+      if (stage.costModelKind ==
+          StageCostModelKind::PartialContinuousTileMemory)
+        payload = &stage;
+    ASSERT_NE(payload, nullptr) << "columns=" << columns;
+    EXPECT_TRUE(payload->features.hasPartialContinuousMemory);
+    EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 8.0);
+    EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadBytes,
+                     8.0 * columns * 4.0);
+    EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadWarpInstructions,
+                     8.0 * std::ceil(columns / 32.0));
+    EXPECT_DOUBLE_EQ(payload->workload.indirectLoadTransactions, 0.0);
+    auto table = evaluateOneStage(*payload);
+    if (!table)
+      FAIL() << llvm::toString(table.takeError());
+    ASSERT_GE(table->stages.front().implementations.size(), 2u);
+    EXPECT_DOUBLE_EQ(table->stages.front().implementations[0].resources.load,
+                     8.0 * columns * 4.0 / 32.0);
+  }
+}
+
+TEST(SimdSimtCostModelTest, PartialContinuousStoreAndStrideCounterexample) {
+  for (bool store : {false, true}) {
+    mlir::MLIRContext context;
+    context.getOrLoadDialect<mlir::arith::ArithDialect>();
+    context.getOrLoadDialect<mlir::func::FuncDialect>();
+    context.allowUnregisteredDialects();
+    auto module = mlir::parseSourceString<mlir::ModuleOp>(
+        partialContinuousTileIR(8, 8, store ? 1 : 2, store), &context);
+    ASSERT_TRUE(module);
+    auto partition = StagePartitioner().partition(
+        *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
+    if (!partition)
+      FAIL() << llvm::toString(partition.takeError());
+    bool sawExpectedKind = false;
+    for (const LogicalStage &stage : partition->stages) {
+      if (store && stage.costModelKind ==
+                       StageCostModelKind::PartialContinuousTileMemory) {
+        sawExpectedKind = true;
+        EXPECT_DOUBLE_EQ(stage.workload.partialContinuousStoreRows, 8.0);
+        EXPECT_DOUBLE_EQ(stage.workload.partialContinuousStoreWarpInstructions,
+                         8.0);
+        EXPECT_DOUBLE_EQ(stage.workload.indirectStoreTransactions, 0.0);
+      }
+      if (!store &&
+          stage.costModelKind == StageCostModelKind::IndirectGatherMemory) {
+        sawExpectedKind = true;
+        EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 0.0);
+      }
+    }
+    EXPECT_TRUE(sawExpectedKind);
+  }
+}
+
+TEST(SimdSimtCostModelTest, PartialContinuousStageAlwaysUsesSerialCost) {
+  LogicalStage stage = logicalStage(
+      "partial", StageCostModelKind::PartialContinuousTileMemory,
+      StageScheduleKind::IndependentPipelined);
+  stage.features.hasPartialContinuousMemory = true;
+  stage.features.hasIndirectMemory = true;
+  stage.workload.operationElements.clear();
+  stage.workload.loadBytes = 320.0;
+  stage.workload.storeBytes = 160.0;
+  stage.workload.loadWarpInstructions = 10.0;
+  stage.workload.storeWarpInstructions = 10.0;
+  stage.workload.partialContinuousLoadRows = 10.0;
+  stage.workload.partialContinuousStoreRows = 10.0;
+  stage.workload.partialContinuousLoadBytes = 320.0;
+  stage.workload.partialContinuousStoreBytes = 160.0;
+  stage.workload.partialContinuousLoadWarpInstructions = 10.0;
+  stage.workload.partialContinuousStoreWarpInstructions = 10.0;
+  stage.workload.maximumLogicalTensorElements = 64.0;
+  auto table = evaluateOneStage(stage);
+  if (!table)
+    FAIL() << llvm::toString(table.takeError());
+  ASSERT_EQ(table->stages.front().implementations.size(), 2u);
+  for (const StageImplementationCost &implementation :
+       table->stages.front().implementations) {
+    const auto &resource = implementation.resources;
+    EXPECT_EQ(implementation.logicalTensorParallelismFactor, 1);
+    EXPECT_DOUBLE_EQ(implementation.totalCycles,
+                     resource.setup + resource.load + resource.store);
+  }
+}
+
 TEST(SimdSimtCostModelTest,
      CompoundScopeOrderIsNormalizedBeforeStagePartitioning) {
   mlir::MLIRContext context;
