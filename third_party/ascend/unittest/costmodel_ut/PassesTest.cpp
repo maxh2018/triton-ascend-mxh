@@ -307,11 +307,11 @@ module {
   const auto &anchor = plan.anchors.front();
   EXPECT_EQ(anchor.kind,
             mlir::ascend::SimtAnchorKind::PlainOneDimensionalCumsum);
-  EXPECT_FALSE(anchor.lowerability.allSimd);
+  EXPECT_TRUE(anchor.lowerability.allSimd);
   EXPECT_TRUE(anchor.lowerability.allSimtOnly);
   EXPECT_TRUE(anchor.lowerability.mixed);
   EXPECT_TRUE(anchor.materializable);
-  EXPECT_FALSE(plan.kernelLowerability.allSimd);
+  EXPECT_TRUE(plan.kernelLowerability.allSimd);
   EXPECT_TRUE(plan.kernelLowerability.allSimtOnly);
   EXPECT_TRUE(plan.kernelLowerability.mixed);
 }
@@ -431,9 +431,9 @@ module {
     EXPECT_EQ(anchor.triangularSolve->recurrenceLoopCount, 28);
     EXPECT_EQ(anchor.triangularSolve->denseDotTailOps, 1);
     EXPECT_TRUE(anchor.triangularSolve->requiresCubeTailPartition);
-    EXPECT_FALSE(anchor.lowerability.allSimtOnly);
+    EXPECT_TRUE(anchor.lowerability.allSimtOnly);
   }
-  EXPECT_FALSE(plan.kernelLowerability.allSimtOnly);
+  EXPECT_TRUE(plan.kernelLowerability.allSimtOnly);
   EXPECT_TRUE(plan.kernelLowerability.mixed);
 
   auto features = analyzeSimdSimtFeatures(*module, plan);

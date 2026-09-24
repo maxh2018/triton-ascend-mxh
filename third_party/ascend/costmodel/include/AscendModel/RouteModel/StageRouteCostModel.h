@@ -110,9 +110,9 @@ struct AtomicWorkload {
 };
 
 /// A compact group of tensor operations with the same route-independent
-/// shape signature.  Keeping the contiguous run and segment count separate
-/// prevents SIMD pricing from incorrectly merging several short rows into
-/// one full-width vector instruction.  Equal signatures are aggregated, so
+/// projected lowering signature. Contiguous pointwise axes are merged before
+/// counting vector instructions; broadcast boundaries retain separate segments.
+/// Equal signatures are aggregated, so
 /// this is diagnostic/cost state rather than an op-level graph.
 struct TensorOperationWorkload {
   std::string operation;
@@ -120,12 +120,6 @@ struct TensorOperationWorkload {
   double logicalElements = 0.0;
   double segmentCount = 0.0;
   int64_t contiguousElementsPerSegment = 0;
-  double logicalOperationInstances = 0.0;
-  /// The current NPUIR elementwise template executes a dense multidimensional
-  /// tensor through scalar code when its outer row stride is not 32-byte
-  /// aligned.  This fact is derived from static TTIR shape; it is not a
-  /// route-selection heuristic.
-  bool simdScalarFallback = false;
 
   bool isFiniteAndNonNegative() const;
   llvm::json::Object toJSON() const;
@@ -185,6 +179,9 @@ struct StageWorkload {
   double dotFlops = 0.0;
   double issueElements = 0.0;
   double estimatedSpillTransactions = 0.0;
+  /// Scalar GM operations owned by this Stage per iteration.
+  double scalarLoadCount = 0.0;
+  double scalarStoreCount = 0.0;
   bool paysKernelSetup = false;
 
   bool isFiniteAndNonNegative() const;
@@ -278,8 +275,9 @@ struct StageCostTable {
 };
 
 struct StageTransitionCost {
-  double simdToSimtCycles = 0.0;
-  double simtToSimdCycles = 0.0;
+  /// Fixed cost of one complete local SIMD -> SIMT -> SIMD scope pair.
+  /// This is an operational pair measurement, not a directional latency.
+  double fixedPairCycles = 0.0;
   /// Local scope values cross the SIMD/SIMT register-file boundary through
   /// UB.  SIMD rates are aggregate vector-pipeline rates; SIMT rates are
   /// explicitly per active thread and are aggregated over one logical warp.
@@ -290,7 +288,6 @@ struct StageTransitionCost {
   int64_t simtWarpSize = 1;
 
   bool isValid() const;
-  double get(StageMode from, StageMode to) const;
   llvm::json::Object toJSON() const;
 };
 

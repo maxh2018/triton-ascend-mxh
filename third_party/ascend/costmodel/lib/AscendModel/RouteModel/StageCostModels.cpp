@@ -109,6 +109,33 @@ static double applyLogicalTensorParallelism(
                                static_cast<double>(factor);
 }
 
+// Scalar white-box terms, already in the profile's SYS_CNT cycle domain.
+static double mainScalarLoadCycles(double count,
+                                   const StageModeProfile &profile) {
+  const double k = std::max(1.0, count);
+  const double perLine = k <= profile.mainScalarLoadExtraLineHighThreshold
+                             ? profile.mainScalarLoadExtraLineLowCycles
+                             : profile.mainScalarLoadExtraLineHighCycles;
+  return profile.mainScalarLoadPrepCycles + profile.mainScalarLoadFillCycles +
+         std::max(0.0, k - profile.mainScalarLoadOutstandingLines) * perLine +
+         (k - 1.0) * profile.mainScalarLoadIssueCycles;
+}
+
+static double simtUniformLoadCycles(double count,
+                                    const StageModeProfile &profile) {
+  return profile.simtUniformLoadPrepCycles + profile.simtUniformLoadFillCycles +
+         (std::max(1.0, count) - 1.0) *
+             profile.simtUniformLoadDiffLineIssueCycles;
+}
+
+static double mte3StoreCycles(const StageModeProfile &profile) {
+  return profile.mte3StorePrepCycles + profile.mte3StoreFillCycles;
+}
+
+static double simtUniformStoreCycles(const StageModeProfile &profile) {
+  return profile.simtUniformStoreBaseCycles;
+}
+
 static StageResourceCycles
 materializeControlFlow(const LogicalStage &stage, StageMode mode,
                        StageResourceCycles resources,
@@ -140,7 +167,6 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
   resources.setup = work.paysKernelSetup ? profile.setupCycles : 0.0;
   llvm::StringMap<double> describedElements;
   llvm::StringMap<double> describedVectorInstructions;
-  llvm::StringMap<double> describedScalarFallbackElements;
   double describedIssueElements = 0.0;
   double describedIssueInstructions = 0.0;
   if (simd) {
@@ -148,12 +174,6 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
          work.tensorOperationWorkloads) {
       describedElements[tensor.operation] += tensor.logicalElements;
       describedIssueElements += tensor.logicalElements;
-      if (tensor.simdScalarFallback) {
-        describedScalarFallbackElements[tensor.operation] +=
-            tensor.logicalElements;
-        describedIssueInstructions += tensor.logicalElements;
-        continue;
-      }
       const double segmentBits =
           static_cast<double>(tensor.contiguousElementsPerSegment) *
           static_cast<double>(tensor.elementBitWidth);
@@ -176,8 +196,6 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
           std::abs(described - elements) <= tolerance
               ? describedVectorInstructions.lookup(name)
               : std::ceil(elements / static_cast<double>(profile.vectorWidth));
-      resources.scalar += describedScalarFallbackElements.lookup(name) /
-                          profile.scalarOperationsPerCycle;
     }
     resources.compute +=
         instructions / rate->second.throughput * rate->second.factor;
@@ -226,6 +244,15 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
       resources.atomic +=
           atomic.logicalOperationInstances * atomicRate.resultDependencyCycles;
   }
+  if (work.scalarLoadCount > 0.0) {
+    resources.load +=
+        simd ? mainScalarLoadCycles(work.scalarLoadCount, profile)
+             : simtUniformLoadCycles(work.scalarLoadCount, profile);
+  }
+  if (work.scalarStoreCount > 0.0) {
+    resources.store +=
+        simd ? mte3StoreCycles(profile) : simtUniformStoreCycles(profile);
+  }
   double predicateInstructions = work.predicateElements;
   if (simd) {
     const double described = describedElements.lookup("predicate.cmp");
@@ -235,9 +262,6 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
             ? describedVectorInstructions.lookup("predicate.cmp")
             : std::ceil(work.predicateElements /
                         static_cast<double>(profile.vectorWidth));
-    resources.scalar +=
-        describedScalarFallbackElements.lookup("predicate.cmp") /
-        profile.scalarOperationsPerCycle;
   }
   resources.predicate =
       predicateInstructions / profile.predicateOperationsPerCycle;
@@ -453,6 +477,13 @@ static double estimateStage(const LogicalStage &stage,
                                           r.atomic, r.issue}));
     return serial;
   default:
+    if (mode == StageMode::SIMD)
+      return r.setup +
+             count *
+                 (std::max({r.load, r.store, r.atomic,
+                            r.compute + r.dot + r.shuffle,
+                            r.scalar + r.predicate + controlBody(r), r.issue}) +
+                  r.spill);
     return serial;
   }
 }
@@ -487,6 +518,10 @@ llvm::StringRef mlir::ascend::stringifyStageCostModel(StageCostModelKind kind) {
     return "scalar_control";
   case StageCostModelKind::ScalarMath:
     return "scalar_math";
+  case StageCostModelKind::ScalarLoad:
+    return "scalar_load";
+  case StageCostModelKind::ScalarStore:
+    return "scalar_store";
   case StageCostModelKind::IndexGeneration:
     return "index_generation";
   case StageCostModelKind::PredicateMask:

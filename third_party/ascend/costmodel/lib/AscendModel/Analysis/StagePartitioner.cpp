@@ -54,7 +54,8 @@ private:
 namespace {
 
 static void recomputeIssueElements(StageWorkload &work) {
-  double elements = work.scalarOperations + work.predicateElements;
+  double elements = work.scalarOperations + work.predicateElements +
+                    work.scalarLoadCount + work.scalarStoreCount;
   for (const auto &entry : work.operationElements)
     elements += entry.second;
   elements += 32.0 * (work.loadWarpInstructions + work.storeWarpInstructions);
@@ -92,10 +93,15 @@ static bool isPointerLikeType(Type type) {
   return llvm::StringRef(typeToString(type)).contains("!tt.ptr");
 }
 
-/// True when a loop argument only participates in address induction.  Such a
-/// value is an implementation recurrence that later pointer canonicalization
-/// can eliminate; it is not an algorithmic loop-carried dependency and must
-/// not disable the SIMD independent-loop roofline model.
+static std::optional<unsigned> getMemoryMaskOperandIndex(Operation *operation);
+static bool isMemoryMaskOnlyValue(Value value);
+static bool shouldSplitLoopBodyIntoStages(Operation *operation);
+
+/// True when a loop argument only participates in address induction or in
+/// masking the accesses that addressing guards.  Such a value is an
+/// implementation recurrence that later pointer canonicalization can
+/// eliminate; it is not an algorithmic loop-carried dependency and must not
+/// disable the SIMD independent-loop roofline model.
 static bool isAddressOnlyLoopValue(Value root) {
   llvm::SmallVector<Value, 8> worklist{root};
   llvm::DenseSet<Value> visited;
@@ -112,6 +118,14 @@ static bool isAddressOnlyLoopValue(Value root) {
       if ((name == "tt.load" || name == "tt.store" ||
            name.starts_with("tt.atomic")) &&
           use.getOperandNumber() == 0) {
+        reachesAddressUse = true;
+        continue;
+      }
+      if (name == "arith.cmpi" || name == "arith.cmpf") {
+        // A comparison feeding only memory masks is addressing boundary
+        // logic (e.g. a per-iteration bound), not a data recurrence.
+        if (!llvm::all_of(user->getResults(), isMemoryMaskOnlyValue))
+          return false;
         reachesAddressUse = true;
         continue;
       }
@@ -532,26 +546,48 @@ static RankedTensorType getRepresentativeTensorType(Operation *operation) {
   return representative;
 }
 
-static bool hasTensorBroadcast(Operation *operation,
-                               RankedTensorType outputType) {
-  if (!outputType || !outputType.hasStaticShape())
-    return false;
+// Project the dense, static pointwise subset of HIVM's uniform reassociation.
+// Flatten first drops unit dimensions, then merges adjacent dimensions only
+// when all operands agree on their broadcast role. The returned width is the
+// final collapse group's extent, not the original TTIR last dimension.
+// Physical UB strides, inline transposes and inter-op layout constraints are
+// not present in TTIR: this is a projection, not an invocation of lowering.
+static int64_t getPostFlattenPointwiseRun(Operation *operation,
+                                          RankedTensorType outputType) {
+  SmallVector<int64_t> activeAxes;
+  for (int64_t axis = 0; axis < outputType.getRank(); ++axis)
+    if (outputType.getDimSize(axis) > 1)
+      activeAxes.push_back(axis);
+  if (activeAxes.empty())
+    return 1;
+  SmallVector<bool> mergeWithPrevious(activeAxes.size(), true);
   for (Value operand : operation->getOperands()) {
     if (Operation *producer = operand.getDefiningOp()) {
       const llvm::StringRef producerName = producer->getName().getStringRef();
-      if (producerName == "tt.broadcast" || producerName == "tt.expand_dims")
-        return true;
+      if (producerName == "tt.broadcast" && producer->getNumOperands() == 1)
+        operand = producer->getOperand(0);
     }
     auto input = dyn_cast<RankedTensorType>(operand.getType());
     if (!input || !input.hasStaticShape() ||
         input.getRank() != outputType.getRank())
       continue;
-    for (int64_t dimension = 0; dimension < input.getRank(); ++dimension)
-      if (input.getShape()[dimension] == 1 &&
-          outputType.getShape()[dimension] > 1)
-        return true;
+    // A scalar splat does not introduce a row boundary.
+    if (input.getNumElements() == 1)
+      continue;
+    for (size_t i = 1; i < activeAxes.size(); ++i) {
+      const int64_t left = activeAxes[i - 1];
+      const int64_t right = activeAxes[i];
+      // HIVM's broadcast path checks input consistency as well as target
+      // dimensions; do not merge across either side of a broadcast axis.
+      if (input.getDimSize(left) != outputType.getDimSize(left) ||
+          input.getDimSize(right) != outputType.getDimSize(right))
+        mergeWithPrevious[i] = false;
+    }
   }
-  return false;
+  int64_t run = outputType.getDimSize(activeAxes.back());
+  for (size_t i = activeAxes.size() - 1; i > 0 && mergeWithPrevious[i]; --i)
+    run *= outputType.getDimSize(activeAxes[i - 1]);
+  return run;
 }
 
 static void accumulateTensorOperationWorkload(Operation *operation,
@@ -561,32 +597,39 @@ static void accumulateTensorOperationWorkload(Operation *operation,
   RankedTensorType tensor = getRepresentativeTensorType(operation);
   if (!tensor || tensor.getRank() == 0 || !tensor.hasStaticShape())
     return;
-  const int64_t elementBits = getScalarBitWidth(tensor.getElementType());
-  const int64_t contiguousElements = tensor.getShape().back();
+  int64_t elementBits = getScalarBitWidth(tensor.getElementType());
+  // Comparison results are i1 masks, not the width of the compared data.
+  if (profileName == "predicate.cmp")
+    for (Value operand : operation->getOperands())
+      elementBits = std::max(elementBits, getScalarBitWidth(operand.getType()));
+  // TTIR rank is not physical vector geometry: Auto Flatten can collapse
+  // dense pointwise operations, including rows shorter than a data block.
+  // Geometry follows operation semantics, not the profile's lookup key.
+  // Integer arithmetic/select may use generic.issue but are still pointwise.
+  // Non-pointwise operations retain their original segment estimate.
+  const bool knownPointwise = operation->hasTrait<OpTrait::Elementwise>();
+  const int64_t contiguousElements =
+      knownPointwise ? getPostFlattenPointwiseRun(operation, tensor)
+                     : tensor.getShape().back();
   if (elementBits <= 0 || contiguousElements <= 0)
     return;
   const double segments = elements / static_cast<double>(contiguousElements);
-  // Dense TTIR tensors lower to row-major memrefs for this template.  For a
-  // non-broadcast multidimensional operation, a row shorter than one 32-byte
-  // block makes the outer stride illegal and NPUIR selects scalar_eltwise_*.
-  constexpr int64_t npuVectorDataBlockBits = 32 * 8;
-  // The scalar fallback rule belongs to NPU-IR elementwise templates.  Shape
-  // construction and pointer bookkeeping currently share generic.issue in the
-  // profile, but they do not lower through scalar_eltwise_* and must not
-  // inherit this rule.
-  const bool scalarFallback =
-      profileName != "generic.issue" && tensor.getRank() > 1 &&
-      !hasTensorBroadcast(operation, tensor) &&
-      (contiguousElements * elementBits) % npuVectorDataBlockBits != 0;
+  // An empty or unknown-geometry tensor clamps its element count to one,
+  // which can yield a fractional segment count. Fractional geometry does
+  // not describe a real tensor; skip the group so mapWorkload falls back
+  // to the legacy per-operation estimate instead of underpricing it.
+  if (segments <= 0.0 || segments != std::floor(segments))
+    return;
+  // Shape alone does not prove scalar lowering, especially on the register
+  // vector backend. Do not infer it from the pre-flatten row stride.
+  // TODO: Model scalar fallback only from proven lowered layout information.
 
   for (TensorOperationWorkload &group : work.tensorOperationWorkloads) {
     if (group.operation == profileName &&
         group.elementBitWidth == elementBits &&
-        group.contiguousElementsPerSegment == contiguousElements &&
-        group.simdScalarFallback == scalarFallback) {
+        group.contiguousElementsPerSegment == contiguousElements) {
       group.logicalElements += elements;
       group.segmentCount += segments;
-      group.logicalOperationInstances += 1.0;
       return;
     }
   }
@@ -596,8 +639,6 @@ static void accumulateTensorOperationWorkload(Operation *operation,
   group.logicalElements = elements;
   group.segmentCount = segments;
   group.contiguousElementsPerSegment = contiguousElements;
-  group.logicalOperationInstances = 1.0;
-  group.simdScalarFallback = scalarFallback;
   work.tensorOperationWorkloads.push_back(std::move(group));
 }
 
@@ -695,6 +736,9 @@ static AtomicWorkload getAtomicWorkload(Operation *operation) {
   return atomic;
 }
 
+static bool isScalarLoadOperation(Operation *op);
+static bool isScalarStoreOperation(Operation *op);
+
 static void accumulateOneOperation(
     Operation *operation, StageWorkload &work,
     const StageMemoryPatternAnalysis *memoryPatterns) {
@@ -708,6 +752,10 @@ static void accumulateOneOperation(
   if ((name == "tt.load" || name == "tt.gather") &&
       operation->getNumResults() > 0) {
     Value result = operation->getResult(0);
+    if (isScalarLoadOperation(operation)) {
+      work.scalarLoadCount += 1.0;
+      return;
+    }
     const double bytes = getValueBytes(result);
     const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
@@ -728,6 +776,10 @@ static void accumulateOneOperation(
   }
   if (name == "tt.store" && operation->getNumOperands() > 1) {
     Value value = operation->getOperand(1);
+    if (isScalarStoreOperation(operation)) {
+      work.scalarStoreCount += 1.0;
+      return;
+    }
     const double bytes = getValueBytes(value);
     const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
@@ -799,7 +851,6 @@ static void scaleWorkload(StageWorkload &work, double scale) {
   for (TensorOperationWorkload &tensor : work.tensorOperationWorkloads) {
     tensor.logicalElements *= scale;
     tensor.segmentCount *= scale;
-    tensor.logicalOperationInstances *= scale;
   }
   for (ReductionWorkload &reduction : work.reductionWorkloads)
     reduction.logicalOperationInstances *= scale;
@@ -808,6 +859,8 @@ static void scaleWorkload(StageWorkload &work, double scale) {
   work.scanShuffleLaneSteps *= scale;
   work.dotFlops *= scale;
   work.estimatedSpillTransactions *= scale;
+  work.scalarLoadCount *= scale;
+  work.scalarStoreCount *= scale;
   for (auto &entry : work.operationElements)
     entry.second *= scale;
   recomputeIssueElements(work);
@@ -829,10 +882,24 @@ static int64_t getLoopTripCount(Operation *operation,
   if (name == "scf.for" && operation->getNumOperands() >= 3) {
     const std::optional<int64_t> lower =
         getConstantInteger(operation->getOperand(0));
-    const std::optional<int64_t> upper =
-        getConstantInteger(operation->getOperand(1));
+    std::optional<int64_t> upper = getConstantInteger(operation->getOperand(1));
     const std::optional<int64_t> step =
         getConstantInteger(operation->getOperand(2));
+    // Price a clipped dynamic loop using its static iteration cap instead of
+    // a single iteration. This is an upper-bound cost estimate: a partial
+    // tile may execute fewer iterations at runtime.
+    if (!upper) {
+      Operation *bound = operation->getOperand(1).getDefiningOp();
+      if (bound && bound->getName().getStringRef() == "arith.minsi" &&
+          bound->getNumOperands() == 2) {
+        const auto lhs = getConstantInteger(bound->getOperand(0));
+        const auto rhs = getConstantInteger(bound->getOperand(1));
+        if (lhs && rhs)
+          upper = std::min(*lhs, *rhs);
+        else
+          upper = lhs ? lhs : rhs;
+      }
+    }
     if (lower && upper && step && *step > 0 && *upper > *lower)
       return (*upper - *lower + *step - 1) / *step;
   }
@@ -860,6 +927,10 @@ static void accumulateDynamicOperationTree(
   mergeWorkload(work, std::move(local));
 
   if (operation->hasAttr("ta.auto_blockify_v1.loop"))
+    return;
+  // An independent loop shell owns only control overhead; its body operations
+  // are separate roots and must not be double-counted.
+  if (shouldSplitLoopBodyIntoStages(operation))
     return;
   const double childMultiplicity =
       multiplicity *
@@ -906,22 +977,20 @@ static void mergeWorkload(StageWorkload &into, StageWorkload from) {
       from.partialContinuousStoreWarpInstructions;
   llvm::append_range(into.atomicWorkloads, std::move(from.atomicWorkloads));
   for (TensorOperationWorkload &source : from.tensorOperationWorkloads) {
-    auto destination = llvm::find_if(
-        into.tensorOperationWorkloads,
-        [&](const TensorOperationWorkload &item) {
-          return item.operation == source.operation &&
-                 item.elementBitWidth == source.elementBitWidth &&
-                 item.contiguousElementsPerSegment ==
-                     source.contiguousElementsPerSegment &&
-                 item.simdScalarFallback == source.simdScalarFallback;
-        });
+    auto destination =
+        llvm::find_if(into.tensorOperationWorkloads,
+                      [&](const TensorOperationWorkload &item) {
+                        return item.operation == source.operation &&
+                               item.elementBitWidth == source.elementBitWidth &&
+                               item.contiguousElementsPerSegment ==
+                                   source.contiguousElementsPerSegment;
+                      });
     if (destination == into.tensorOperationWorkloads.end()) {
       into.tensorOperationWorkloads.push_back(std::move(source));
       continue;
     }
     destination->logicalElements += source.logicalElements;
     destination->segmentCount += source.segmentCount;
-    destination->logicalOperationInstances += source.logicalOperationInstances;
   }
   llvm::append_range(into.reductionWorkloads,
                      std::move(from.reductionWorkloads));
@@ -932,6 +1001,8 @@ static void mergeWorkload(StageWorkload &into, StageWorkload from) {
   into.scanShuffleLaneSteps += from.scanShuffleLaneSteps;
   into.dotFlops += from.dotFlops;
   into.estimatedSpillTransactions += from.estimatedSpillTransactions;
+  into.scalarLoadCount += from.scalarLoadCount;
+  into.scalarStoreCount += from.scalarStoreCount;
   for (const auto &[name, elements] : from.operationElements)
     into.operationElements[name] += elements;
   recomputeIssueElements(into);
@@ -944,13 +1015,14 @@ static void makePerIteration(LogicalStage &stage) {
 }
 
 static Operation *getTopLevelSemanticRoot(Operation *operation);
+static Operation *getPartitionSemanticRoot(Operation *operation);
 
 static bool stageOwnsAnchor(const LogicalStage &stage,
                             const SimtAnchorDescriptor &anchor) {
   if (!anchor.materializable || !stage.localSimtMaterializable)
     return false;
   auto owns = [&](Operation *operation) {
-    Operation *root = getTopLevelSemanticRoot(operation);
+    Operation *root = getPartitionSemanticRoot(operation);
     return root && llvm::is_contained(stage.operations, root);
   };
   if (anchor.scopeOperations.empty())
@@ -1150,6 +1222,172 @@ static bool operationTreeHasAnyName(Operation *root,
   });
 }
 
+/// A scalar GM access has a non-shaped value/result; tile accesses are shaped.
+static bool isScalarLoadOperation(Operation *op) {
+  return op && op->getName().getStringRef() == "tt.load" &&
+         op->getNumResults() > 0 &&
+         !isa<ShapedType>(op->getResult(0).getType());
+}
+
+static bool isScalarStoreOperation(Operation *op) {
+  return op && op->getName().getStringRef() == "tt.store" &&
+         op->getNumOperands() > 1 &&
+         !isa<ShapedType>(op->getOperand(1).getType());
+}
+
+static bool operationTreeHasScalarMemory(Operation *root, bool wantStore) {
+  auto matches = [&](Operation *op) {
+    return wantStore ? isScalarStoreOperation(op) : isScalarLoadOperation(op);
+  };
+  bool found = matches(root);
+  if (found || !root)
+    return found;
+  root->walk([&](Operation *nested) {
+    if (!found)
+      found = matches(nested);
+  });
+  return found;
+}
+
+/// Operand index of the (optional) mask predicate of a memory operation.
+static std::optional<unsigned> getMemoryMaskOperandIndex(Operation *operation) {
+  const llvm::StringRef name = operation->getName().getStringRef();
+  if (name == "tt.load")
+    return 1u;
+  if (name == "tt.store" || name.starts_with("tt.atomic"))
+    return 2u;
+  return std::nullopt;
+}
+
+/// True when every use of `value` is the mask predicate of a memory
+/// operation, allowing forwarding through shape helpers and predicate
+/// boolean algebra.  A comparison that only guards masked accesses
+/// implements addressing boundary logic; it does not couple loop
+/// iterations algorithmically.
+static bool isMemoryMaskOnlyValue(Value value) {
+  llvm::SmallVector<Value, 8> worklist{value};
+  llvm::DenseSet<Value> visited;
+  while (!worklist.empty()) {
+    Value current = worklist.pop_back_val();
+    if (!visited.insert(current).second)
+      continue;
+    for (OpOperand &use : current.getUses()) {
+      Operation *user = use.getOwner();
+      const std::optional<unsigned> maskOperand =
+          getMemoryMaskOperandIndex(user);
+      if (maskOperand && use.getOperandNumber() == *maskOperand)
+        continue;
+      const llvm::StringRef name = user->getName().getStringRef();
+      const bool maskForwarding =
+          name == "tt.splat" || name == "tt.broadcast" ||
+          name == "tt.expand_dims" || name == "arith.andi" ||
+          name == "arith.ori" || name == "arith.xori";
+      if (!maskForwarding)
+        return false;
+      llvm::append_range(worklist, user->getResults());
+    }
+  }
+  return true;
+}
+
+/// A structured algorithmic loop with no true loop-carried dependency.
+/// Address-only induction is an implementation recurrence and stays legal;
+/// AutoBlockify V1 scheduling shells are not algorithmic loops.
+static bool isIndependentStructuredLoop(Operation *operation) {
+  if (!operation || operation->hasAttr("ta.auto_blockify_v1.loop"))
+    return false;
+  const llvm::StringRef name = operation->getName().getStringRef();
+  if ((name != "scf.for" && name != "scf.while") ||
+      operation->getNumRegions() == 0 || operation->getRegion(0).empty())
+    return false;
+  return !operationTreeHasTrueLoopCarriedDependency(operation);
+}
+
+/// Keep the optional anchor requirement in the stage-splitting policy.
+/// Removing the second condition enables splitting all independent loop bodies.
+static bool shouldSplitLoopBodyIntoStages(Operation *operation) {
+  return isIndependentStructuredLoop(operation) &&
+         hasSimtAnchorInBody(operation);
+}
+
+static Operation *getPartitionSemanticRoot(Operation *operation) {
+  Operation *topLevelRoot = getTopLevelSemanticRoot(operation);
+  if (!topLevelRoot)
+    return topLevelRoot;
+
+  Operation *root = operation;
+  while (root != topLevelRoot) {
+    Operation *parent = root->getParentOp();
+    if (shouldSplitLoopBodyIntoStages(parent))
+      return root;
+    root = parent;
+  }
+  return topLevelRoot;
+}
+
+static void appendIndependentLoopBodyRoots(Operation *operation,
+                                           std::vector<Operation *> &roots) {
+  if (!shouldSplitLoopBodyIntoStages(operation) ||
+      operation->hasAttr("ta.auto_blockify_v1.loop"))
+    return;
+
+  for (Region &region : operation->getRegions()) {
+    for (Block &block : region) {
+      for (Operation &nested : block.getOperations()) {
+        if (nested.hasTrait<OpTrait::IsTerminator>())
+          continue;
+        roots.push_back(&nested);
+        appendIndependentLoopBodyRoots(&nested, roots);
+      }
+    }
+  }
+}
+
+static std::vector<Operation *> collectPartitionSemanticRoots(ModuleOp module) {
+  std::vector<Operation *> roots = collectTopLevelSemanticRoots(module);
+  std::vector<Operation *> expandedRoots;
+  for (Operation *root : roots) {
+    expandedRoots.push_back(root);
+    appendIndependentLoopBodyRoots(root, expandedRoots);
+  }
+  return expandedRoots;
+}
+
+/// Trip count of the independent structured loops enclosing `root` when
+/// loop-body splitting is active.  Nested loop bodies execute by the product
+/// of their enclosing trip counts, not the maximum.
+static int64_t enclosingSplitLoopTripCount(Operation *root) {
+  int64_t trips = 1;
+  if (!root)
+    return trips;
+  for (Operation *parent = root->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (!shouldSplitLoopBodyIntoStages(parent))
+      continue;
+    const int64_t factor = std::max<int64_t>(1, getLoopTripCount(parent, 1));
+    if (trips > std::numeric_limits<int64_t>::max() / factor)
+      return std::numeric_limits<int64_t>::max();
+    trips *= factor;
+  }
+  return trips;
+}
+
+/// Entry multiplicity for one semantic root when accumulating a Stage's
+/// dynamic workload.  A split loop's shell Stage and body-root Stages each
+/// see one textual appearance of their roots per loop iteration, while
+/// StageWorkloadAnalysis charges them through iterationCount (inherited
+/// from the enclosing split loop).  The accumulation must therefore
+/// pre-multiply by that trip count so makePerIteration's division restores
+/// the true per-iteration workload; otherwise N_iter * C_body undercounts
+/// the Stage's dynamic work by the trip count.
+static double semanticRootEntryMultiplicity(Operation *root) {
+  if (!root)
+    return 1.0;
+  if (shouldSplitLoopBodyIntoStages(root))
+    return static_cast<double>(getLoopTripCount(root, 1));
+  return static_cast<double>(enclosingSplitLoopTripCount(root));
+}
+
 /// Classify one transitive semantic ownership unit.  This function consumes
 /// only TTIR structure; it does not inspect a kernel name, workload name,
 /// measured performance, or route score.
@@ -1180,6 +1418,12 @@ static StageCostModelKind classifySemanticRoot(
           root, {"tt.fp_to_fp", "arith.extf", "arith.truncf", "arith.fptosi",
                  "arith.fptoui", "arith.sitofp", "arith.uitofp"}))
     return StageCostModelKind::ConversionPack;
+  const bool hasScalarLoad = operationTreeHasScalarMemory(root, false);
+  const bool hasScalarStore = operationTreeHasScalarMemory(root, true);
+  if (hasScalarStore && !hasScalarLoad)
+    return StageCostModelKind::ScalarStore;
+  if (hasScalarLoad || hasScalarStore)
+    return StageCostModelKind::ScalarLoad;
   const bool hasLoad = operationTreeHasAnyName(root, {"tt.load"});
   const bool hasStore = operationTreeHasAnyName(root, {"tt.store"});
   if (hasStore && !hasLoad)
@@ -1220,6 +1464,9 @@ static int64_t semanticRootIterationCount(Operation *root) {
     if (!operation->hasAttr("ta.auto_blockify_v1.loop"))
       iterations = std::max(iterations, getLoopTripCount(operation, 1));
   });
+  // Loop-body body roots execute once per enclosing iteration: inherit the
+  // enclosing independent loop's trip count so per-Stage cost stays exact.
+  iterations = std::max(iterations, enclosingSplitLoopTripCount(root));
   return iterations;
 }
 
@@ -1248,8 +1495,10 @@ static void collectOwnedOperationTree(Operation *root,
   owned.insert(root);
   // The AutoBlockify loop is intentionally split into a scheduling shell and
   // direct semantic body roots.  Treating the shell as the owner of its body
-  // would double-own every algorithm operation.
-  if (root->hasAttr("ta.auto_blockify_v1.loop"))
+  // would double-own every algorithm operation.  Independent algorithmic
+  // loops follow the same rule.
+  if (root->hasAttr("ta.auto_blockify_v1.loop") ||
+      shouldSplitLoopBodyIntoStages(root))
     return;
   root->walk([&](Operation *nested) {
     if (nested != root)
@@ -1436,7 +1685,7 @@ ProgramStructureAnalysis::analyze(ModuleOp module,
         std::errc::invalid_argument,
         "ProgramStructureAnalysis requires ModuleOp");
   ProgramStructure structure;
-  structure.rootOperations = collectTopLevelSemanticRoots(module);
+  structure.rootOperations = collectPartitionSemanticRoots(module);
   if (structure.rootOperations.empty())
     return llvm::createStringError(
         std::errc::invalid_argument,
@@ -1456,13 +1705,13 @@ ProgramStructureAnalysis::analyze(ModuleOp module,
 
     llvm::SmallVector<Operation *, 8> scopeRoots;
     for (Operation *operation : anchor.scopeOperations) {
-      Operation *root = getTopLevelSemanticRoot(operation);
+      Operation *root = getPartitionSemanticRoot(operation);
       if (root && llvm::is_contained(structure.rootOperations, root) &&
           !llvm::is_contained(scopeRoots, root))
         scopeRoots.push_back(root);
     }
     Operation *insertionRoot =
-        getTopLevelSemanticRoot(anchor.scopeInsertionPoint);
+        getPartitionSemanticRoot(anchor.scopeInsertionPoint);
     auto insertionIt = llvm::find(structure.rootOperations, insertionRoot);
     if (scopeRoots.empty() || insertionIt == structure.rootOperations.end())
       return llvm::createStringError(
@@ -1520,6 +1769,9 @@ static int semanticKindPriority(StageCostModelKind kind) {
   case StageCostModelKind::PredicateMask:
   case StageCostModelKind::LoopPredicate:
     return 20;
+  case StageCostModelKind::ScalarLoad:
+  case StageCostModelKind::ScalarStore:
+    return 35;
   case StageCostModelKind::IndexGeneration:
     return 10;
   default:
@@ -1589,7 +1841,7 @@ buildAnchorGroups(const ProgramStructure &structure,
       continue;
     llvm::SmallVector<size_t, 8> positions;
     auto addPosition = [&](Operation *operation) {
-      Operation *root = getTopLevelSemanticRoot(operation);
+      Operation *root = getPartitionSemanticRoot(operation);
       auto iterator = llvm::find(structure.rootOperations, root);
       if (iterator == structure.rootOperations.end())
         return;
@@ -1655,6 +1907,9 @@ StageBoundaryAnalysis::analyze(
 
     const int64_t anchorGroup = (*anchorGroups)[index];
     StageCostModelKind kind = classifySemanticRoot(root, memoryPatterns);
+    // A split loop's shell owns only control overhead.
+    if (shouldSplitLoopBodyIntoStages(root))
+      kind = StageCostModelKind::IndependentPipelinedLoop;
     StageScheduleKind schedule = scheduleForSemanticRoot(root, kind);
     LogicalStage stage;
     stage.operations.push_back(root);
@@ -1768,16 +2023,20 @@ llvm::Error StageFeatureAnalysis::analyze(
       if (name.contains("barrier") || name.contains("sync"))
         ++facts.synchronizationCount;
       if (name == "tt.load" || name == "tt.store" || name == "tt.gather") {
-        hasMemory = true;
-        const bool indirect =
-            isLoadedIndexDependentMemoryOp(operation) || name == "tt.gather";
-        facts.hasIndirectMemory |= indirect;
-        hasContiguousMemory |= !indirect;
-        if (indirect) {
-          if (getPartialContinuousTile(operation, memoryPatterns))
-            hasPartialContinuousMemory = true;
-          else
-            hasOtherIndirectMemory = true;
+        const bool scalarLoad = isScalarLoadOperation(operation);
+        const bool scalarStore = isScalarStoreOperation(operation);
+        if (!scalarLoad && !scalarStore) {
+          hasMemory = true;
+          const bool indirect =
+              isLoadedIndexDependentMemoryOp(operation) || name == "tt.gather";
+          facts.hasIndirectMemory |= indirect;
+          hasContiguousMemory |= !indirect;
+          if (indirect) {
+            if (getPartialContinuousTile(operation, memoryPatterns))
+              hasPartialContinuousMemory = true;
+            else
+              hasOtherIndirectMemory = true;
+          }
         }
       }
       if (name.starts_with("tt.atomic")) {
@@ -1802,8 +2061,9 @@ llvm::Error StageFeatureAnalysis::analyze(
     facts.hasPartialContinuousMemory =
         hasPartialContinuousMemory && !hasOtherIndirectMemory;
     if (algorithmLoopCount > 0 && stage.iterationCount > 1) {
-      if (facts.hasLoopCarriedDataDependency)
-        facts.parallelRecurrenceGroupCount = algorithmLoopCount;
+      // Multiple loop operations in one stage do not prove concurrent
+      // execution. In particular, adjacent scf.for loops execute serially;
+      // counting them as parallel groups discounts their dependent work.
       facts.loopBackedgeCount = 1;
       facts.conditionalBranchCount =
           std::max<int64_t>(facts.conditionalBranchCount > 0 ? 1 : 0,
@@ -1824,8 +2084,8 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
                                          int64_t tinyDotFlopsMax) const {
   if (!partition.operationOwnershipComplete)
     return llvm::Error::success();
-  auto compatible = [](StageCostModelKind kind,
-                       const StageModelFeatures &facts) {
+  auto compatible = [](StageCostModelKind kind, const StageModelFeatures &facts,
+                       const StageWorkload &workload) {
     switch (kind) {
     case StageCostModelKind::LoopCarriedRecurrence:
       return facts.hasLoopCarriedDataDependency;
@@ -1852,6 +2112,10 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
       return facts.hasContiguousMemory;
     case StageCostModelKind::ConversionPack:
       return facts.hasConversionPack;
+    case StageCostModelKind::ScalarLoad:
+      return workload.scalarLoadCount > 0.0 && !facts.hasContiguousMemory;
+    case StageCostModelKind::ScalarStore:
+      return workload.scalarStoreCount > 0.0 && !facts.hasContiguousMemory;
     default:
       return true;
     }
@@ -1892,6 +2156,10 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
         return StageCostModelKind::IndirectGatherMemory;
       if (facts.hasConversionPack)
         return StageCostModelKind::ConversionPack;
+      if (stage.workload.scalarLoadCount > 0.0 && !facts.hasContiguousMemory)
+        return StageCostModelKind::ScalarLoad;
+      if (stage.workload.scalarStoreCount > 0.0 && !facts.hasContiguousMemory)
+        return StageCostModelKind::ScalarStore;
       if (facts.hasContiguousMemory)
         return stage.workload.storeBytes > 0.0 &&
                        stage.workload.loadBytes == 0.0
@@ -1903,9 +2171,9 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
     // Strong operation-graph semantics are authoritative.  Scalar
     // sub-kinds remain useful only when no dominant structure is present.
     if (semanticKindPriority(derived) > 0 ||
-        !compatible(stage.costModelKind, facts))
+        !compatible(stage.costModelKind, facts, stage.workload))
       stage.costModelKind = derived;
-    if (!compatible(stage.costModelKind, facts) ||
+    if (!compatible(stage.costModelKind, facts, stage.workload) ||
         (stage.costModelKind == StageCostModelKind::TinyCubeRoofline &&
          stage.workload.dotFlops * stage.iterationCount >
              static_cast<double>(std::max<int64_t>(1, tinyDotFlopsMax))))
@@ -1940,8 +2208,9 @@ llvm::Error StageWorkloadAnalysis::analyze(
         loopCount > 0 ? std::max<int64_t>(1, stage.iterationCount / loopCount)
                       : 1;
     for (Operation *root : stage.operations)
-      accumulateDynamicOperationTree(root, work, 1.0, fallbackLoopTripCount,
-                                     memoryPatterns);
+      accumulateDynamicOperationTree(root, work,
+                                     semanticRootEntryMultiplicity(root),
+                                     fallbackLoopTripCount, memoryPatterns);
     recomputeIssueElements(work);
     stage.workload = std::move(work);
     makePerIteration(stage);
