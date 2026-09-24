@@ -1,10 +1,14 @@
 //===- StagePartitioner.cpp - Build semantic Stage IR -------------------===//
 
 #include "AscendModel/Analysis/StagePartitioner.h"
+#include "ascend/include/TritonToUnstructure/OffsetAnalysis.h"
 #include "ascend/include/Utils/SuperBlockFactor.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -22,6 +26,30 @@
 
 using namespace mlir;
 using namespace mlir::ascend;
+
+namespace mlir::ascend {
+
+struct PartialContinuousTile {
+  double rows = 0.0;
+  double elementsPerRow = 0.0;
+};
+
+// OffsetAnalysis creates helper IR while parsing pointers.  Keep one cloned
+// module and retain only its per-axis classifications for the original ops.
+class StageMemoryPatternAnalysis {
+public:
+  explicit StageMemoryPatternAnalysis(ModuleOp module);
+
+  std::optional<PartialContinuousTile> lookup(Operation *operation) const {
+    auto found = tiles.find(operation);
+    return found == tiles.end() ? std::nullopt : found->second;
+  }
+
+private:
+  llvm::DenseMap<Operation *, std::optional<PartialContinuousTile>> tiles;
+};
+
+} // namespace mlir::ascend
 
 namespace {
 
@@ -141,11 +169,10 @@ static double getMaximumTensorElements(Operation *operation) {
   return elements;
 }
 
-// A read-only projection of the per-axis offset information used by
-// TritonToUnstructure.  "Structured" alone is insufficient here: multiplying
-// a column range by two remains structured but is not a direct contiguous
-// row.  Unknown loaded-index values are allowed only outside the proven
-// unit-stride suffix.  The analysis never rewrites the TTIR being scored.
+// PtrOffsetInfo decides which axes UnstructureConversion would preserve as
+// structured and which axes it would lower through loops.  These steps add a
+// separate unit-stride check: PtrOffsetInfo can mark stride-2 as structured,
+// but stride-2 is not a contiguous row.
 struct AddressAxisStep {
   enum class Kind { Known, LoadedIndex, Unknown } kind = Kind::Unknown;
   int64_t stride = 0;
@@ -325,21 +352,88 @@ static AddressSteps getAddressSteps(Value value, unsigned depth = 0) {
   return unknown;
 }
 
-struct PartialContinuousTile {
-  double rows = 0.0;
-  double elementsPerRow = 0.0;
-};
+using PointerAxisInfo = triton::PtrOffsetInfo::AxisInfo;
 
-static std::optional<PartialContinuousTile>
-getPartialContinuousTile(Operation *operation) {
-  if (!operation || !isLoadedIndexDependentMemoryOp(operation) ||
-      operation->getNumOperands() == 0)
-    return std::nullopt;
+// Avoid invoking OffsetAnalysis for pointers that cannot have an indirect
+// outer axis and a unit-stride trailing axis.  It expects parsed Triton
+// pointer roots, which arbitrary TTIR pointer tensors need not provide.
+static bool hasPotentialPartialContinuousAddress(Operation *operation) {
+  if (!operation || operation->getNumOperands() == 0)
+    return false;
   auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
   if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2)
+    return false;
+  AddressSteps address = getAddressSteps(operation->getOperand(0));
+  if (address.axes.size() != static_cast<size_t>(pointer.getRank()) ||
+      !llvm::any_of(address.axes, [](const AddressAxisStep &axis) {
+        return axis.kind == AddressAxisStep::Kind::LoadedIndex;
+      }))
+    return false;
+  const int64_t last = pointer.getRank() - 1;
+  return pointer.getDimSize(last) == 1 ||
+         (address.axes[last].kind == AddressAxisStep::Kind::Known &&
+          address.axes[last].stride == 1);
+}
+
+// OffsetAnalysis assumes tensor pointers originate from supported Triton
+// expressions and that tt.broadcast expands at least one dimension.
+static bool hasUnsupportedPointerInput(Value value,
+                                       llvm::DenseSet<Value> &visited) {
+  if (!visited.insert(value).second)
+    return false;
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    auto type = dyn_cast<RankedTensorType>(argument.getType());
+    return type && isa<triton::PointerType>(type.getElementType());
+  }
+  Operation *producer = value.getDefiningOp();
+  if (!producer)
+    return false;
+  if (isa<triton::BroadcastOp>(producer)) {
+    auto input = dyn_cast<RankedTensorType>(producer->getOperand(0).getType());
+    auto output = dyn_cast<RankedTensorType>(value.getType());
+    if (input && output && input.getShape() == output.getShape())
+      return true;
+  }
+  return llvm::any_of(producer->getOperands(), [&](Value operand) {
+    return hasUnsupportedPointerInput(operand, visited);
+  });
+}
+
+// Run the same pointer analysis as TritonToUnstructure on a detached clone.
+// Only the axis labels escape: PtrOffsetInfo also holds Values in the clone.
+static std::optional<SmallVector<PointerAxisInfo>>
+analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
+                   llvm::DenseMap<Value, triton::PtrOffsetInfo> &offsetMap) {
+  if (!clonedOperation || clonedOperation->getNumOperands() == 0)
+    return std::nullopt;
+  Value pointer = clonedOperation->getOperand(0);
+  // A loaded-index tile is formed through addptr.  Unsupported pointer
+  // producers stay in the original indirect class.
+  if (!isa_and_nonnull<triton::AddPtrOp>(pointer.getDefiningOp()))
+    return std::nullopt;
+  llvm::DenseSet<Value> visited;
+  if (hasUnsupportedPointerInput(pointer, visited))
+    return std::nullopt;
+  triton::parse(pointer, clonedOperation->getLoc(), rewriter, offsetMap);
+  auto found = offsetMap.find(pointer);
+  if (found == offsetMap.end())
+    return std::nullopt;
+  const auto &axes = found->second.getStructured();
+  auto pointerType = dyn_cast<RankedTensorType>(pointer.getType());
+  if (!pointerType || axes.size() != static_cast<size_t>(pointerType.getRank()))
+    return std::nullopt;
+  return SmallVector<PointerAxisInfo>(axes.begin(), axes.end());
+}
+
+static std::optional<PartialContinuousTile>
+classifyPartialContinuousTile(Operation *operation,
+                              ArrayRef<PointerAxisInfo> pointerAxes) {
+  auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
+  if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2 ||
+      pointerAxes.size() != static_cast<size_t>(pointer.getRank()))
     return std::nullopt;
   const AddressSteps address = getAddressSteps(operation->getOperand(0));
-  if (address.axes.size() != static_cast<size_t>(pointer.getRank()))
+  if (address.axes.size() != pointerAxes.size())
     return std::nullopt;
 
   int64_t elementsPerRow = 1;
@@ -348,7 +442,8 @@ getPartialContinuousTile(Operation *operation) {
     const int64_t extent = pointer.getDimSize(axis);
     if (extent <= 0 ||
         (extent > 1 &&
-         (address.axes[axis].kind != AddressAxisStep::Kind::Known ||
+         (pointerAxes[axis] != PointerAxisInfo::structured ||
+          address.axes[axis].kind != AddressAxisStep::Kind::Known ||
           address.axes[axis].stride != elementsPerRow)))
       break;
     if (elementsPerRow > std::numeric_limits<int64_t>::max() / extent)
@@ -358,17 +453,37 @@ getPartialContinuousTile(Operation *operation) {
   }
   if (suffixBegin == 0 || suffixBegin == pointer.getRank())
     return std::nullopt;
+
   bool hasDiscreteLoadedAxis = false;
   double rows = 1.0;
   for (int64_t axis = 0; axis < suffixBegin; ++axis) {
-    rows *= static_cast<double>(pointer.getDimSize(axis));
-    hasDiscreteLoadedAxis |= pointer.getDimSize(axis) > 1 &&
-                             address.axes[axis].kind ==
-                                 AddressAxisStep::Kind::LoadedIndex;
+    const int64_t extent = pointer.getDimSize(axis);
+    if (extent <= 0)
+      return std::nullopt;
+    if (extent > 1 && pointerAxes[axis] != PointerAxisInfo::unstructured)
+      return std::nullopt;
+    rows *= static_cast<double>(extent);
+    hasDiscreteLoadedAxis |=
+        extent > 1 &&
+        address.axes[axis].kind == AddressAxisStep::Kind::LoadedIndex;
   }
   if (!hasDiscreteLoadedAxis)
     return std::nullopt;
   return PartialContinuousTile{rows, static_cast<double>(elementsPerRow)};
+}
+
+static std::optional<PartialContinuousTile>
+getPartialContinuousTile(Operation *operation,
+                         const StageMemoryPatternAnalysis *memoryPatterns) {
+  if (!operation || !isLoadedIndexDependentMemoryOp(operation) ||
+      operation->getNumOperands() == 0)
+    return std::nullopt;
+  if (memoryPatterns)
+    return memoryPatterns->lookup(operation);
+  ModuleOp module = operation->getParentOfType<ModuleOp>();
+  if (!module)
+    return std::nullopt;
+  return StageMemoryPatternAnalysis(module).lookup(operation);
 }
 
 static bool hasTensorResult(Operation *operation) {
@@ -580,7 +695,9 @@ static AtomicWorkload getAtomicWorkload(Operation *operation) {
   return atomic;
 }
 
-static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
+static void accumulateOneOperation(
+    Operation *operation, StageWorkload &work,
+    const StageMemoryPatternAnalysis *memoryPatterns) {
   if (!operation || operation->hasTrait<OpTrait::IsTerminator>())
     return;
   const llvm::StringRef name = operation->getName().getStringRef();
@@ -592,7 +709,7 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
       operation->getNumResults() > 0) {
     Value result = operation->getResult(0);
     const double bytes = getValueBytes(result);
-    const auto partial = getPartialContinuousTile(operation);
+    const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
         partial ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
                 : std::ceil(elements / 32.0);
@@ -612,7 +729,7 @@ static void accumulateOneOperation(Operation *operation, StageWorkload &work) {
   if (name == "tt.store" && operation->getNumOperands() > 1) {
     Value value = operation->getOperand(1);
     const double bytes = getValueBytes(value);
-    const auto partial = getPartialContinuousTile(operation);
+    const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
         partial
             ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
@@ -731,14 +848,14 @@ static int64_t getLoopTripCount(Operation *operation,
 /// loop iteration instead of accidentally counting the body once.
 /// AutoBlockify V1 is the exception: its loop is a scheduling shell and its
 /// direct body operations are already separate semantic roots.
-static void accumulateDynamicOperationTree(Operation *operation,
-                                           StageWorkload &work,
-                                           double multiplicity,
-                                           int64_t fallbackLoopTripCount) {
+static void accumulateDynamicOperationTree(
+    Operation *operation, StageWorkload &work, double multiplicity,
+    int64_t fallbackLoopTripCount,
+    const StageMemoryPatternAnalysis *memoryPatterns) {
   if (!operation)
     return;
   StageWorkload local;
-  accumulateOneOperation(operation, local);
+  accumulateOneOperation(operation, local, memoryPatterns);
   scaleWorkload(local, multiplicity);
   mergeWorkload(work, std::move(local));
 
@@ -751,7 +868,7 @@ static void accumulateDynamicOperationTree(Operation *operation,
     for (Block &block : region)
       for (Operation &nested : block.getOperations())
         accumulateDynamicOperationTree(&nested, work, childMultiplicity,
-                                       fallbackLoopTripCount);
+                                       fallbackLoopTripCount, memoryPatterns);
 }
 
 static int64_t countAlgorithmLoops(const LogicalStage &stage) {
@@ -978,7 +1095,8 @@ static bool operationTreeContainsLoadedIndexMemory(Operation *root) {
   return found;
 }
 
-static bool operationTreeHasOnlyPartialContinuousMemory(Operation *root) {
+static bool operationTreeHasOnlyPartialContinuousMemory(
+    Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
   if (!root)
     return false;
   bool hasPartial = false;
@@ -991,7 +1109,7 @@ static bool operationTreeHasOnlyPartialContinuousMemory(Operation *root) {
     }
     if (!isLoadedIndexDependentMemoryOp(operation))
       return;
-    if (getPartialContinuousTile(operation))
+    if (getPartialContinuousTile(operation, memoryPatterns))
       hasPartial = true;
     else
       hasOtherIndirect = true;
@@ -1035,7 +1153,8 @@ static bool operationTreeHasAnyName(Operation *root,
 /// Classify one transitive semantic ownership unit.  This function consumes
 /// only TTIR structure; it does not inspect a kernel name, workload name,
 /// measured performance, or route score.
-static StageCostModelKind classifySemanticRoot(Operation *root) {
+static StageCostModelKind classifySemanticRoot(
+    Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
   if (root->hasAttr("ta.auto_blockify_v1.loop"))
     return StageCostModelKind::AutoBlockifyLoop;
   if (root->hasAttr("ta.auto_blockify_v1.schedule"))
@@ -1050,7 +1169,7 @@ static StageCostModelKind classifySemanticRoot(Operation *root) {
     return StageCostModelKind::CubeRoofline;
   if (operationTreeHasAnyName(root, {"tt.atomic_rmw", "tt.atomic_cas"}))
     return StageCostModelKind::AtomicMemory;
-  if (operationTreeHasOnlyPartialContinuousMemory(root))
+  if (operationTreeHasOnlyPartialContinuousMemory(root, memoryPatterns))
     return StageCostModelKind::PartialContinuousTileMemory;
   if (operationTreeContainsLoadedIndexMemory(root) ||
       operationTreeHasAnyName(root, {"tt.gather"}))
@@ -1277,6 +1396,38 @@ static void deriveLocalSimtScopeTraffic(StagePartition &partition,
 
 } // namespace
 
+namespace mlir::ascend {
+
+StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
+  if (!module ||
+      !module.getContext()->getLoadedDialect<triton::TritonDialect>())
+    return;
+
+  SmallVector<Operation *> candidates;
+  module.walk([&](Operation *operation) {
+    const llvm::StringRef name = operation->getName().getStringRef();
+    if ((name == "tt.load" || name == "tt.store") &&
+        isLoadedIndexDependentMemoryOp(operation) &&
+        hasPotentialPartialContinuousAddress(operation))
+      candidates.push_back(operation);
+  });
+  if (candidates.empty())
+    return;
+
+  IRMapping mapping;
+  OwningOpRef<ModuleOp> analysisModule(cast<ModuleOp>(module->clone(mapping)));
+  IRRewriter rewriter(module.getContext());
+  llvm::DenseMap<Value, triton::PtrOffsetInfo> offsetMap;
+  for (Operation *operation : candidates) {
+    Operation *copy = mapping.lookupOrNull(operation);
+    auto axes = analyzePointerAxes(copy, rewriter, offsetMap);
+    tiles[operation] =
+        axes ? classifyPartialContinuousTile(operation, *axes) : std::nullopt;
+  }
+}
+
+} // namespace mlir::ascend
+
 llvm::Expected<ProgramStructure>
 ProgramStructureAnalysis::analyze(ModuleOp module,
                                   const SimtAnchorPlan &anchorPlan) const {
@@ -1482,8 +1633,9 @@ buildAnchorGroups(const ProgramStructure &structure,
 }
 
 llvm::Expected<StagePartition>
-StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
-                               const SimtAnchorPlan &anchorPlan) const {
+StageBoundaryAnalysis::analyze(
+    const ProgramStructure &structure, const SimtAnchorPlan &anchorPlan,
+    const StageMemoryPatternAnalysis *memoryPatterns) const {
   if (structure.rootOperations.empty())
     return llvm::createStringError(
         std::errc::invalid_argument,
@@ -1502,7 +1654,7 @@ StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
           "StageBoundaryAnalysis received duplicate or null semantic root");
 
     const int64_t anchorGroup = (*anchorGroups)[index];
-    StageCostModelKind kind = classifySemanticRoot(root);
+    StageCostModelKind kind = classifySemanticRoot(root, memoryPatterns);
     StageScheduleKind schedule = scheduleForSemanticRoot(root, kind);
     LogicalStage stage;
     stage.operations.push_back(root);
@@ -1515,7 +1667,7 @@ StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
     while (next < structure.rootOperations.size()) {
       Operation *candidate = structure.rootOperations[next];
       const int64_t candidateAnchorGroup = (*anchorGroups)[next];
-      const StageCostModelKind candidateKind = classifySemanticRoot(candidate);
+      const StageCostModelKind candidateKind = classifySemanticRoot(candidate, memoryPatterns);
       const StageScheduleKind candidateSchedule =
           scheduleForSemanticRoot(candidate, candidateKind);
       const bool sameCompoundAnchor =
@@ -1561,7 +1713,9 @@ StageBoundaryAnalysis::analyze(const ProgramStructure &structure,
   return partition;
 }
 
-llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
+llvm::Error StageFeatureAnalysis::analyze(
+    StagePartition &partition,
+    const StageMemoryPatternAnalysis *memoryPatterns) const {
   for (LogicalStage &stage : partition.stages) {
     StageModelFeatures &facts = stage.features;
     const double activeLaneRatio = facts.activeLaneRatio;
@@ -1620,7 +1774,7 @@ llvm::Error StageFeatureAnalysis::analyze(StagePartition &partition) const {
         facts.hasIndirectMemory |= indirect;
         hasContiguousMemory |= !indirect;
         if (indirect) {
-          if (getPartialContinuousTile(operation))
+          if (getPartialContinuousTile(operation, memoryPatterns))
             hasPartialContinuousMemory = true;
           else
             hasOtherIndirectMemory = true;
@@ -1771,7 +1925,9 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
   return llvm::Error::success();
 }
 
-llvm::Error StageWorkloadAnalysis::analyze(StagePartition &partition) const {
+llvm::Error StageWorkloadAnalysis::analyze(
+    StagePartition &partition,
+    const StageMemoryPatternAnalysis *memoryPatterns) const {
   if (!partition.operationOwnershipComplete)
     return llvm::createStringError(
         std::errc::invalid_argument,
@@ -1784,7 +1940,8 @@ llvm::Error StageWorkloadAnalysis::analyze(StagePartition &partition) const {
         loopCount > 0 ? std::max<int64_t>(1, stage.iterationCount / loopCount)
                       : 1;
     for (Operation *root : stage.operations)
-      accumulateDynamicOperationTree(root, work, 1.0, fallbackLoopTripCount);
+      accumulateDynamicOperationTree(root, work, 1.0, fallbackLoopTripCount,
+                                     memoryPatterns);
     recomputeIssueElements(work);
     stage.workload = std::move(work);
     makePerIteration(stage);
@@ -1904,14 +2061,16 @@ StagePartitioner::partition(ModuleOp module, const SimtAnchorPlan &anchorPlan,
   auto structure = ProgramStructureAnalysis().analyze(module, anchorPlan);
   if (!structure)
     return structure.takeError();
-  auto result = StageBoundaryAnalysis().analyze(*structure, anchorPlan);
+  StageMemoryPatternAnalysis memoryPatterns(module);
+  auto result =
+      StageBoundaryAnalysis().analyze(*structure, anchorPlan, &memoryPatterns);
   if (!result)
     return result.takeError();
   StageWorkloadAnalysis workloadAnalysis;
-  if (llvm::Error error = workloadAnalysis.analyze(*result))
+  if (llvm::Error error = workloadAnalysis.analyze(*result, &memoryPatterns))
     return std::move(error);
   StageFeatureAnalysis featureAnalysis;
-  if (llvm::Error error = featureAnalysis.analyze(*result))
+  if (llvm::Error error = featureAnalysis.analyze(*result, &memoryPatterns))
     return std::move(error);
   if (llvm::Error error =
           StageKindClassifier().analyze(*result, options.tinyDotFlopsMax))

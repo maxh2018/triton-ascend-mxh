@@ -22,6 +22,7 @@ add_mlir_library(AscendModelRouteModel
 
   LINK_LIBS PUBLIC
   AscendModelProfile
+  TritonOffsetAnalysis
   MLIRIR
   MLIRPass
   MLIRSupport
