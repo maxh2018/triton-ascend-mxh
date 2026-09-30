@@ -292,8 +292,13 @@ static bool hasPotentialPartialContinuousAddress(Operation *operation) {
       !isa_and_nonnull<triton::AddPtrOp>(pointer.getDefiningOp()))
     return false;
   const int64_t last = type.getRank() - 1;
-  return type.getDimSize(last) == 1 ||
-         getAddressAxisEvidence(pointer, last).step == 1;
+  if (type.getDimSize(last) != 1 &&
+      getAddressAxisEvidence(pointer, last).step != 1)
+    return false;
+  for (int64_t axis = 0; axis < type.getRank(); ++axis)
+    if (getAddressAxisEvidence(pointer, axis).loaded)
+      return true;
+  return false;
 }
 
 // OffsetAnalysis assumes tensor pointers originate from supported Triton
