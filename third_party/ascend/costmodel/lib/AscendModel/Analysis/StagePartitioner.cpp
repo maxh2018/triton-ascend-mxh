@@ -183,210 +183,117 @@ static double getMaximumTensorElements(Operation *operation) {
   return elements;
 }
 
-// PtrOffsetInfo decides which axes UnstructureConversion would preserve as
-// structured and which axes it would lower through loops.  These steps add a
-// separate unit-stride check: PtrOffsetInfo can mark stride-2 as structured,
-// but stride-2 is not a contiguous row.
-struct AddressAxisStep {
-  enum class Kind { Known, LoadedIndex, Unknown } kind = Kind::Unknown;
-  int64_t stride = 0;
+// PtrOffsetInfo owns the structured/unstructured decision.  This narrow
+// query supplies only the facts it does not expose: a static address step on
+// one axis and whether a loaded tensor index varies on that axis.
+struct AddressAxisEvidence {
+  std::optional<int64_t> step;
+  bool loaded = false;
 };
 
-struct AddressSteps {
-  SmallVector<AddressAxisStep> axes;
-  bool dependsOnLoadedValue = false;
-};
-
-static AddressAxisStep knownStep(int64_t stride = 0) {
-  return {AddressAxisStep::Kind::Known, stride};
-}
-
-static AddressSteps unknownSteps(Value value, bool fromLoadedValue = false) {
-  AddressSteps result;
-  result.dependsOnLoadedValue = fromLoadedValue;
-  if (auto type = dyn_cast<RankedTensorType>(value.getType()))
-    for (int64_t extent : type.getShape())
-      result.axes.push_back(
-          extent == 1
-              ? knownStep()
-              : AddressAxisStep{fromLoadedValue
-                                    ? AddressAxisStep::Kind::LoadedIndex
-                                    : AddressAxisStep::Kind::Unknown,
-                                0});
-  return result;
-}
-
-static std::optional<int64_t> getSplatInteger(Value value,
-                                               unsigned depth = 0) {
-  if (depth > 32)
-    return std::nullopt;
-  Operation *producer = value.getDefiningOp();
-  if (!producer)
-    return std::nullopt;
-  const llvm::StringRef name = producer->getName().getStringRef();
-  if (name == "tt.splat" && producer->getNumOperands() == 1)
-    return getSplatInteger(producer->getOperand(0), depth + 1);
-  if (name != "arith.constant")
-    return std::nullopt;
-  Attribute attribute = producer->getAttr("value");
-  if (auto integer = dyn_cast_or_null<IntegerAttr>(attribute))
-    return integer.getInt();
-  if (auto dense = dyn_cast_or_null<DenseIntElementsAttr>(attribute))
-    if (dense.isSplat())
-      return dense.getSplatValue<APInt>().getSExtValue();
+static std::optional<int64_t> getSplatInteger(Value value) {
+  if (auto splat = value.getDefiningOp<triton::SplatOp>())
+    value = splat.getSrc();
+  if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
+    if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
+      return integer.getInt();
+    if (auto dense = dyn_cast<DenseIntElementsAttr>(constant.getValue()))
+      if (dense.isSplat())
+        return dense.getSplatValue<APInt>().getSExtValue();
+  }
   return std::nullopt;
 }
 
-static AddressAxisStep combineSteps(AddressAxisStep left,
-                                    AddressAxisStep right, int64_t sign = 1) {
-  if (left.kind == AddressAxisStep::Kind::Unknown ||
-      right.kind == AddressAxisStep::Kind::Unknown)
-    return {AddressAxisStep::Kind::Unknown, 0};
-  if (left.kind == AddressAxisStep::Kind::LoadedIndex ||
-      right.kind == AddressAxisStep::Kind::LoadedIndex)
-    return {AddressAxisStep::Kind::LoadedIndex, 0};
-  int64_t signedRight;
-  int64_t sum;
-  if (__builtin_mul_overflow(right.stride, sign, &signedRight) ||
-      __builtin_add_overflow(left.stride, signedRight, &sum))
-    return {AddressAxisStep::Kind::Unknown, 0};
-  return knownStep(sum);
-}
-
-static AddressSteps getAddressSteps(Value value, unsigned depth = 0) {
-  AddressSteps unknown = unknownSteps(value);
+static AddressAxisEvidence getAddressAxisEvidence(Value value, int64_t axis,
+                                                  unsigned depth = 0) {
   if (depth > 64)
-    return unknown;
+    return {};
+  auto tensor = dyn_cast<RankedTensorType>(value.getType());
+  if (!tensor)
+    return {0, false};
+  if (axis < 0 || axis >= tensor.getRank())
+    return {};
+  if (tensor.getDimSize(axis) == 1)
+    return {0, false};
   Operation *producer = value.getDefiningOp();
   if (!producer)
-    return unknown;
-  const llvm::StringRef name = producer->getName().getStringRef();
-  const auto output = dyn_cast<RankedTensorType>(value.getType());
-  const size_t rank = output ? output.getRank() : 0;
-  if (name == "arith.constant" || name == "tt.get_program_id") {
-    for (AddressAxisStep &axis : unknown.axes)
-      axis = knownStep();
-    return unknown;
+    return {};
+  if (isa<triton::LoadOp, triton::GatherOp>(producer))
+    return {std::nullopt, true};
+  if (isa<triton::MakeRangeOp>(producer))
+    return tensor.getRank() == 1 ? AddressAxisEvidence{1, false}
+                                 : AddressAxisEvidence{};
+  if (isa<triton::SplatOp>(producer) || getSplatInteger(value) ||
+      isa<triton::GetProgramIdOp>(producer))
+    return {0, false};
+  if (auto expand = dyn_cast<triton::ExpandDimsOp>(producer)) {
+    const int64_t inserted = expand.getAxis();
+    return axis == inserted
+               ? AddressAxisEvidence{0, false}
+               : getAddressAxisEvidence(expand.getSrc(),
+                                        axis > inserted ? axis - 1 : axis,
+                                        depth + 1);
   }
-  if (name == "tt.load" || name == "tt.gather")
-    return unknownSteps(value, /*fromLoadedValue=*/true);
-  if (name == "tt.make_range" && rank == 1) {
-    unknown.axes[0] = knownStep(1);
-    return unknown;
+  if (auto broadcast = dyn_cast<triton::BroadcastOp>(producer)) {
+    auto input = dyn_cast<RankedTensorType>(broadcast.getSrc().getType());
+    if (!input || input.getRank() != tensor.getRank())
+      return {};
+    return input.getDimSize(axis) == 1
+               ? AddressAxisEvidence{0, false}
+               : getAddressAxisEvidence(broadcast.getSrc(), axis, depth + 1);
   }
-  if (producer->getNumOperands() == 0)
-    return unknown;
-  if (name == "tt.splat") {
-    AddressSteps source = getAddressSteps(producer->getOperand(0), depth + 1);
-    unknown.dependsOnLoadedValue = source.dependsOnLoadedValue;
-    for (AddressAxisStep &axis : unknown.axes)
-      axis = knownStep();
-    return unknown;
-  }
-  if (name == "tt.expand_dims" && rank > 0) {
-    auto axis = producer->getAttrOfType<IntegerAttr>("axis");
-    AddressSteps source = getAddressSteps(producer->getOperand(0), depth + 1);
-    if (!axis || axis.getInt() < 0 ||
-        axis.getInt() >= static_cast<int64_t>(rank) ||
-        source.axes.size() + 1 != rank)
-      return unknown;
-    unknown.dependsOnLoadedValue = source.dependsOnLoadedValue;
-    for (size_t i = 0, sourceAxis = 0; i < rank; ++i)
-      unknown.axes[i] =
-          i == static_cast<size_t>(axis.getInt())
-              ? knownStep()
-              : source.axes[sourceAxis++];
-    return unknown;
-  }
-  if (name == "tt.broadcast" && rank > 0) {
-    Value operand = producer->getOperand(0);
-    auto input = dyn_cast<RankedTensorType>(operand.getType());
-    AddressSteps source = getAddressSteps(operand, depth + 1);
-    if (!input || input.getRank() != static_cast<int64_t>(rank) ||
-        source.axes.size() != rank)
-      return unknown;
-    unknown.dependsOnLoadedValue = source.dependsOnLoadedValue;
-    for (size_t i = 0; i < rank; ++i)
-      unknown.axes[i] = input.getDimSize(i) == 1
-                            ? knownStep()
-                            : source.axes[i];
-    return unknown;
-  }
-  if (name == "arith.extsi" || name == "arith.extui" ||
-      name == "arith.index_cast") {
-    AddressSteps source = getAddressSteps(producer->getOperand(0), depth + 1);
-    return source.axes.size() == rank ? source : unknown;
-  }
-  if ((name == "arith.addi" || name == "arith.subi" ||
-       name == "arith.muli" || name == "tt.addptr") &&
-      producer->getNumOperands() == 2) {
-    AddressSteps left = getAddressSteps(producer->getOperand(0), depth + 1);
-    AddressSteps right = getAddressSteps(producer->getOperand(1), depth + 1);
-    if (left.axes.size() != rank || right.axes.size() != rank)
-      return unknown;
-    unknown.dependsOnLoadedValue =
-        left.dependsOnLoadedValue || right.dependsOnLoadedValue;
-    if (name == "arith.muli") {
-      const auto leftConstant = getSplatInteger(producer->getOperand(0));
-      const auto rightConstant = getSplatInteger(producer->getOperand(1));
-      for (size_t i = 0; i < rank; ++i) {
-        const auto constant = leftConstant ? leftConstant : rightConstant;
-        AddressAxisStep other =
-            leftConstant ? right.axes[i] : left.axes[i];
-        if (constant && *constant == 0) {
-          unknown.axes[i] = knownStep();
-        } else if (constant && other.kind == AddressAxisStep::Kind::Known) {
-          int64_t stride;
-          unknown.axes[i] =
-              __builtin_mul_overflow(other.stride, *constant, &stride)
-                  ? AddressAxisStep{AddressAxisStep::Kind::Unknown, 0}
-                  : knownStep(stride);
-        } else if (constant) {
-          unknown.axes[i] = other;
-        } else if (left.axes[i].kind == AddressAxisStep::Kind::Known &&
-                   left.axes[i].stride == 0 &&
-                   right.axes[i].kind == AddressAxisStep::Kind::Known &&
-                   right.axes[i].stride == 0) {
-          unknown.axes[i] = knownStep();
-        } else {
-          unknown.axes[i] =
-              {unknown.dependsOnLoadedValue
-                   ? AddressAxisStep::Kind::LoadedIndex
-                   : AddressAxisStep::Kind::Unknown,
-               0};
-        }
-      }
-    } else {
-      const int64_t sign = name == "arith.subi" ? -1 : 1;
-      for (size_t i = 0; i < rank; ++i)
-        unknown.axes[i] = combineSteps(left.axes[i], right.axes[i], sign);
+  if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::IndexCastOp>(producer))
+    return getAddressAxisEvidence(producer->getOperand(0), axis, depth + 1);
+  if (producer->getNumOperands() != 2 ||
+      !isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, triton::AddPtrOp>(
+          producer))
+    return {};
+  Value lhs = producer->getOperand(0);
+  Value rhs = producer->getOperand(1);
+  AddressAxisEvidence left = getAddressAxisEvidence(lhs, axis, depth + 1);
+  AddressAxisEvidence right = getAddressAxisEvidence(rhs, axis, depth + 1);
+  if (isa<arith::MulIOp>(producer)) {
+    const auto lhsConstant = getSplatInteger(lhs);
+    const auto rhsConstant = getSplatInteger(rhs);
+    if ((lhsConstant && *lhsConstant == 0) ||
+        (rhsConstant && *rhsConstant == 0))
+      return {0, false};
+    if (lhsConstant || rhsConstant) {
+      const int64_t factor = lhsConstant ? *lhsConstant : *rhsConstant;
+      const AddressAxisEvidence &other = lhsConstant ? right : left;
+      int64_t product;
+      if (other.step &&
+          !__builtin_mul_overflow(*other.step, factor, &product))
+        return {product, other.loaded};
+      return {std::nullopt, other.loaded};
     }
-    return unknown;
+    return {left.step && right.step && *left.step == 0 && *right.step == 0
+                ? std::optional<int64_t>(0)
+                : std::nullopt,
+            left.loaded || right.loaded};
   }
-  return unknown;
+  int64_t rightStep, sum;
+  const int64_t sign = isa<arith::SubIOp>(producer) ? -1 : 1;
+  if (left.step && right.step &&
+      !__builtin_mul_overflow(*right.step, sign, &rightStep) &&
+      !__builtin_add_overflow(*left.step, rightStep, &sum))
+    return {sum, left.loaded || right.loaded};
+  return {std::nullopt, left.loaded || right.loaded};
 }
 
-using PointerAxisInfo = triton::PtrOffsetInfo::AxisInfo;
-
-// Avoid invoking OffsetAnalysis for pointers that cannot have an indirect
-// outer axis and a unit-stride trailing axis.  It expects parsed Triton
-// pointer roots, which arbitrary TTIR pointer tensors need not provide.
+// Reject unsupported pointer expressions before calling the mutating
+// OffsetAnalysis parser.  Full axis classification happens on its result.
 static bool hasPotentialPartialContinuousAddress(Operation *operation) {
   if (!operation || operation->getNumOperands() == 0)
     return false;
-  auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
-  if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2)
+  Value pointer = operation->getOperand(0);
+  auto type = dyn_cast<RankedTensorType>(pointer.getType());
+  if (!type || !type.hasStaticShape() || type.getRank() < 2 ||
+      !isa_and_nonnull<triton::AddPtrOp>(pointer.getDefiningOp()))
     return false;
-  AddressSteps address = getAddressSteps(operation->getOperand(0));
-  if (address.axes.size() != static_cast<size_t>(pointer.getRank()) ||
-      !llvm::any_of(address.axes, [](const AddressAxisStep &axis) {
-        return axis.kind == AddressAxisStep::Kind::LoadedIndex;
-      }))
-    return false;
-  const int64_t last = pointer.getRank() - 1;
-  return pointer.getDimSize(last) == 1 ||
-         (address.axes[last].kind == AddressAxisStep::Kind::Known &&
-          address.axes[last].stride == 1);
+  const int64_t last = type.getRank() - 1;
+  return type.getDimSize(last) == 1 ||
+         getAddressAxisEvidence(pointer, last).step == 1;
 }
 
 // OffsetAnalysis assumes tensor pointers originate from supported Triton
@@ -414,15 +321,13 @@ static bool hasUnsupportedPointerInput(Value value,
 }
 
 // Run the same pointer analysis as TritonToUnstructure on a detached clone.
-// Only the axis labels escape: PtrOffsetInfo also holds Values in the clone.
-static std::optional<SmallVector<PointerAxisInfo>>
+// Keep the result in the clone's lifetime: PtrOffsetInfo holds cloned Values.
+static std::optional<triton::PtrOffsetInfo>
 analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
                    llvm::DenseMap<Value, triton::PtrOffsetInfo> &offsetMap) {
   if (!clonedOperation || clonedOperation->getNumOperands() == 0)
     return std::nullopt;
   Value pointer = clonedOperation->getOperand(0);
-  // A loaded-index tile is formed through addptr.  Unsupported pointer
-  // producers stay in the original indirect class.
   if (!isa_and_nonnull<triton::AddPtrOp>(pointer.getDefiningOp()))
     return std::nullopt;
   llvm::DenseSet<Value> visited;
@@ -430,24 +335,24 @@ analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
     return std::nullopt;
   triton::parse(pointer, clonedOperation->getLoc(), rewriter, offsetMap);
   auto found = offsetMap.find(pointer);
-  if (found == offsetMap.end())
-    return std::nullopt;
-  const auto &axes = found->second.getStructured();
   auto pointerType = dyn_cast<RankedTensorType>(pointer.getType());
-  if (!pointerType || axes.size() != static_cast<size_t>(pointerType.getRank()))
+  if (found == offsetMap.end() || !pointerType ||
+      found->second.getStructured().size() !=
+          static_cast<size_t>(pointerType.getRank()) ||
+      !found->second.getOffset())
     return std::nullopt;
-  return SmallVector<PointerAxisInfo>(axes.begin(), axes.end());
+  return found->second;
 }
+
+using PointerAxisInfo = triton::PtrOffsetInfo::AxisInfo;
 
 static std::optional<PartialContinuousTile>
 classifyPartialContinuousTile(Operation *operation,
-                              ArrayRef<PointerAxisInfo> pointerAxes) {
+                              const triton::PtrOffsetInfo &pointerInfo) {
   auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
+  auto axes = pointerInfo.getStructured();
   if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2 ||
-      pointerAxes.size() != static_cast<size_t>(pointer.getRank()))
-    return std::nullopt;
-  const AddressSteps address = getAddressSteps(operation->getOperand(0));
-  if (address.axes.size() != pointerAxes.size())
+      axes.size() != static_cast<size_t>(pointer.getRank()))
     return std::nullopt;
 
   int64_t elementsPerRow = 1;
@@ -456,9 +361,9 @@ classifyPartialContinuousTile(Operation *operation,
     const int64_t extent = pointer.getDimSize(axis);
     if (extent <= 0 ||
         (extent > 1 &&
-         (pointerAxes[axis] != PointerAxisInfo::structured ||
-          address.axes[axis].kind != AddressAxisStep::Kind::Known ||
-          address.axes[axis].stride != elementsPerRow)))
+         (axes[axis] != PointerAxisInfo::structured ||
+          getAddressAxisEvidence(pointerInfo.getOffset(), axis).step !=
+              elementsPerRow)))
       break;
     if (elementsPerRow > std::numeric_limits<int64_t>::max() / extent)
       return std::nullopt;
@@ -474,12 +379,12 @@ classifyPartialContinuousTile(Operation *operation,
     const int64_t extent = pointer.getDimSize(axis);
     if (extent <= 0)
       return std::nullopt;
-    if (extent > 1 && pointerAxes[axis] != PointerAxisInfo::unstructured)
+    if (extent > 1 && axes[axis] != PointerAxisInfo::unstructured)
       return std::nullopt;
     rows *= static_cast<double>(extent);
     hasDiscreteLoadedAxis |=
         extent > 1 &&
-        address.axes[axis].kind == AddressAxisStep::Kind::LoadedIndex;
+        getAddressAxisEvidence(pointerInfo.getOffset(), axis).loaded;
   }
   if (!hasDiscreteLoadedAxis)
     return std::nullopt;
