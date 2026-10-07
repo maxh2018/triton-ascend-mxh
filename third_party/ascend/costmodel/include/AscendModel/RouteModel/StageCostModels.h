@@ -185,6 +185,11 @@ struct StageModeProfile {
 struct HardwareProfile {
   std::string profileVersion;
   std::string target;
+  /// Explicit opt-in to a target-specific random-address, matched-ALU fit.
+  /// Empty retains the legacy transaction model.
+  std::string simtIndirectLoadModel;
+  /// FP32 scalar-loop matched-address differential, random-address prior.
+  std::string simdIndirectLoadModel;
   /// Logical warp groups available to one SIMT program.  This is a compile
   /// option, not a hardware constant, and bounds cross-group interleaving in
   /// recurrence Stage models.

@@ -45,8 +45,14 @@ public:
     return found == tiles.end() ? std::nullopt : found->second;
   }
 
+  const AddressPatternSummary *lookupSummary(Operation *operation) const {
+    auto found = summaries.find(operation);
+    return found == summaries.end() ? nullptr : &found->second;
+  }
+
 private:
   llvm::DenseMap<Operation *, std::optional<PartialContinuousTile>> tiles;
+  llvm::DenseMap<Operation *, AddressPatternSummary> summaries;
 };
 
 } // namespace mlir::ascend
@@ -350,6 +356,250 @@ analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
 }
 
 using PointerAxisInfo = triton::PtrOffsetInfo::AxisInfo;
+
+// Keep the provable affine term even when a loaded index contributes to the
+// same axis. Preserve provenance independently of the coarse pointer-axis
+// classification used by the partial-tile classifier.
+struct AxisTerm {
+  int64_t fixedStride = 0;
+  bool loaded = false;
+  bool nonAffine = false;
+  bool runtimeStride = false;
+  bool opaque = false;
+  std::string reason;
+};
+
+static SmallVector<AxisTerm> unknownAxisTerms(Value value,
+                                               llvm::StringRef reason) {
+  SmallVector<AxisTerm> result;
+  if (auto type = dyn_cast<RankedTensorType>(value.getType()))
+    for (int64_t extent : type.getShape()) {
+      AxisTerm term;
+      term.opaque = extent > 1;
+      term.reason = reason.str();
+      result.push_back(std::move(term));
+    }
+  return result;
+}
+
+static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
+  auto result = unknownAxisTerms(value, "unsupported_value");
+  if (depth > 64)
+    return unknownAxisTerms(value, "analysis_depth_limit");
+  Operation *producer = value.getDefiningOp();
+  if (!producer) {
+    // A scalar block argument is uniform over tensor axes; a tensor block
+    // argument may vary arbitrarily and cannot be treated as stride zero.
+    for (AxisTerm &term : result)
+      term.reason = result.empty() ? "uniform_block_argument" :
+                    "opaque_tensor_block_argument";
+    return result;
+  }
+  const llvm::StringRef name = producer->getName().getStringRef();
+  const size_t rank = result.size();
+  if (name == "tt.load" || name == "tt.gather") {
+    auto shape = dyn_cast<RankedTensorType>(value.getType());
+    for (size_t i = 0; i < rank; ++i) {
+      result[i].opaque = false;
+      result[i].loaded = shape.getDimSize(i) > 1;
+      result[i].reason = "loaded_index";
+    }
+    return result;
+  }
+  if (name == "tt.make_range" && rank == 1) {
+    result[0].opaque = false;
+    result[0].fixedStride = 1;
+    result[0].reason = "tt.make_range";
+    return result;
+  }
+  if (name == "tt.get_program_id" ||
+      (name == "arith.constant" && getSplatInteger(value))) {
+    for (AxisTerm &term : result) {
+      term.opaque = false;
+      term.reason = name.str();
+    }
+    return result;
+  }
+  if (name == "tt.splat" && producer->getNumOperands() == 1) {
+    for (AxisTerm &term : result) {
+      term.opaque = false;
+      term.reason = "tt.splat";
+    }
+    return result;
+  }
+  if (name == "tt.expand_dims" && rank > 0) {
+    auto axis = producer->getAttrOfType<IntegerAttr>("axis");
+    auto source = getAxisTerms(producer->getOperand(0), depth + 1);
+    if (!axis || axis.getInt() < 0 ||
+        axis.getInt() >= static_cast<int64_t>(rank) ||
+        source.size() + 1 != rank)
+      return unknownAxisTerms(value, "invalid_expand_dims");
+    for (size_t i = 0, sourceAxis = 0; i < rank; ++i)
+      if (i == static_cast<size_t>(axis.getInt())) {
+        result[i].opaque = false;
+        result[i].reason = "expanded_unit_axis";
+      } else {
+        result[i] = source[sourceAxis++];
+      }
+    return result;
+  }
+  if (name == "tt.broadcast" && rank > 0) {
+    Value inputValue = producer->getOperand(0);
+    auto input = dyn_cast<RankedTensorType>(inputValue.getType());
+    auto source = getAxisTerms(inputValue, depth + 1);
+    if (!input || source.size() != rank)
+      return unknownAxisTerms(value, "invalid_broadcast");
+    for (size_t i = 0; i < rank; ++i)
+      if (input.getDimSize(i) == 1) {
+        result[i].opaque = false;
+        result[i].reason = "broadcast_axis";
+      } else {
+        result[i] = source[i];
+      }
+    return result;
+  }
+  if ((name == "arith.extsi" || name == "arith.extui" ||
+       name == "arith.index_cast") && producer->getNumOperands() == 1) {
+    auto source = getAxisTerms(producer->getOperand(0), depth + 1);
+    return source.size() == rank ? source : result;
+  }
+  if ((name == "arith.addi" || name == "arith.subi" ||
+       name == "arith.muli" || name == "tt.addptr") &&
+      producer->getNumOperands() == 2) {
+    auto left = getAxisTerms(producer->getOperand(0), depth + 1);
+    auto right = getAxisTerms(producer->getOperand(1), depth + 1);
+    if (left.size() != rank || right.size() != rank)
+      return unknownAxisTerms(value, "binary_rank_mismatch");
+    const auto leftConstant = getSplatInteger(producer->getOperand(0));
+    const auto rightConstant = getSplatInteger(producer->getOperand(1));
+    for (size_t i = 0; i < rank; ++i) {
+      AxisTerm &dst = result[i];
+      dst.loaded = left[i].loaded || right[i].loaded;
+      dst.opaque = left[i].opaque || right[i].opaque;
+      dst.nonAffine = left[i].nonAffine || right[i].nonAffine;
+      dst.runtimeStride = left[i].runtimeStride || right[i].runtimeStride;
+      if (name == "arith.muli") {
+        const auto constant = leftConstant ? leftConstant : rightConstant;
+        const AxisTerm &other = leftConstant ? right[i] : left[i];
+        if (constant) {
+          if (*constant == 0) {
+            dst = AxisTerm{};
+            dst.reason = "multiply_by_zero";
+          } else if (__builtin_mul_overflow(other.fixedStride, *constant,
+                                            &dst.fixedStride)) {
+            dst.opaque = true;
+            dst.reason = "stride_overflow";
+          } else {
+            dst = other;
+            dst.fixedStride *= *constant;
+            dst.reason = "constant_scale";
+          }
+        } else {
+          const bool leftVaries = left[i].fixedStride != 0 || left[i].loaded ||
+                                  left[i].nonAffine || left[i].runtimeStride;
+          const bool rightVaries = right[i].fixedStride != 0 || right[i].loaded ||
+                                   right[i].nonAffine || right[i].runtimeStride;
+          if (leftVaries && rightVaries) {
+            dst.fixedStride = 0;
+            dst.nonAffine = !dst.loaded;
+            dst.opaque = dst.opaque || dst.loaded;
+            dst.reason = "variable_times_variable";
+          } else if (leftVaries || rightVaries) {
+            dst.fixedStride = 0;
+            dst.runtimeStride = !dst.loaded;
+            dst.opaque = dst.opaque || dst.loaded;
+            dst.reason = "runtime_uniform_scale";
+          } else {
+            dst.fixedStride = 0;
+            dst.reason = "uniform_product";
+          }
+        }
+      } else {
+        int64_t signedRight = 0;
+        const int64_t sign = name == "arith.subi" ? -1 : 1;
+        if (__builtin_mul_overflow(right[i].fixedStride, sign, &signedRight) ||
+            __builtin_add_overflow(left[i].fixedStride, signedRight,
+                                   &dst.fixedStride)) {
+          dst.opaque = true;
+          dst.reason = "stride_overflow";
+        } else {
+          dst.reason = left[i].opaque ? left[i].reason :
+                       right[i].opaque ? right[i].reason :
+                       dst.loaded ? "loaded_plus_static_terms" :
+                       dst.nonAffine ? "computed_nonaffine_terms" :
+                       "affine_sum";
+        }
+      }
+    }
+    return result;
+  }
+  if (name == "arith.constant")
+    return unknownAxisTerms(value, "non_splat_constant");
+  return unknownAxisTerms(value, name);
+}
+
+static llvm::StringRef stringifyPointerAxis(PointerAxisInfo info) {
+  switch (info) {
+  case PointerAxisInfo::scalar: return "scalar";
+  case PointerAxisInfo::scalarlike: return "scalarlike";
+  case PointerAxisInfo::structured: return "structured";
+  case PointerAxisInfo::unstructured: return "unstructured";
+  }
+  llvm_unreachable("unknown pointer axis classification");
+}
+
+static AddressPatternSummary makeAddressSummary(
+    Operation *operation, int64_t ordinal,
+    const std::optional<triton::PtrOffsetInfo> &pointerInfo) {
+  AddressPatternSummary summary;
+  summary.ttirLoadOrdinal = ordinal;
+  summary.memoryOp = operation->getName().getStringRef().str();
+  llvm::raw_string_ostream locationStream(summary.sourceLocation);
+  locationStream << operation->getLoc();
+  locationStream.flush();
+  summary.dependsOnLoadedValue = isLoadedIndexDependentMemoryOp(operation);
+  if (operation->getNumOperands() == 0)
+    return summary;
+  Value pointer = operation->getOperand(0);
+  auto type = dyn_cast<RankedTensorType>(pointer.getType());
+  if (!type || !type.hasStaticShape())
+    return summary;
+  auto terms = getAxisTerms(pointer);
+  for (size_t axis = 0; axis < static_cast<size_t>(type.getRank()); ++axis) {
+    AddressAxisSummary output;
+    output.extent = type.getDimSize(axis);
+    if (pointerInfo && axis < pointerInfo->getStructured().size())
+      output.offsetAxisInfo =
+          stringifyPointerAxis(pointerInfo->getStructured()[axis]).str();
+    if (axis >= terms.size()) {
+      output.reason = "axis_analysis_rank_mismatch";
+    } else {
+      const AxisTerm &term = terms[axis];
+      output.knownStride = term.fixedStride;
+      output.provenance = term.loaded ? "loaded_value" :
+                          term.opaque ? "unknown" : "no_loaded_value";
+      output.hasUnknownComponent = term.loaded || term.nonAffine ||
+                                   term.runtimeStride || term.opaque;
+      output.regularity = term.opaque ? "opaque" :
+          term.nonAffine ? "computed_nonaffine" :
+          term.runtimeStride ? "uniform_runtime_stride" :
+          term.loaded && term.fixedStride != 0 ? "loaded_plus_fixed_stride" :
+          term.loaded ? "opaque_loaded" :
+          term.fixedStride != 0 ? "fixed_stride" : "constant_or_broadcast";
+      output.reason = term.reason;
+    }
+    summary.axes.push_back(std::move(output));
+  }
+  for (const AddressAxisSummary &axis : summary.axes) {
+    if (!summary.patternClass.empty())
+      summary.patternClass += "|";
+    summary.patternClass += axis.regularity;
+    if (axis.knownStride && *axis.knownStride != 0)
+      summary.patternClass += ":s" + std::to_string(*axis.knownStride);
+  }
+  return summary;
+}
+
 
 static std::optional<PartialContinuousTile>
 classifyPartialContinuousTile(Operation *operation,
@@ -1563,14 +1813,17 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
     return;
 
   SmallVector<Operation *> candidates;
+  SmallVector<Operation *> loads;
   module.walk([&](Operation *operation) {
     const llvm::StringRef name = operation->getName().getStringRef();
+    if (name == "tt.load")
+      loads.push_back(operation);
     if ((name == "tt.load" || name == "tt.store") &&
         isLoadedIndexDependentMemoryOp(operation) &&
         hasPotentialPartialContinuousAddress(operation))
       candidates.push_back(operation);
   });
-  if (candidates.empty())
+  if (candidates.empty() && loads.empty())
     return;
 
   IRMapping mapping;
@@ -1582,6 +1835,12 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
     auto axes = analyzePointerAxes(copy, rewriter, offsetMap);
     tiles[operation] =
         axes ? classifyPartialContinuousTile(operation, *axes) : std::nullopt;
+  }
+  for (auto indexed : llvm::enumerate(loads)) {
+    Operation *operation = indexed.value();
+    auto axes = analyzePointerAxes(mapping.lookupOrNull(operation), rewriter,
+                                   offsetMap);
+    summaries[operation] = makeAddressSummary(operation, indexed.index(), axes);
   }
 }
 
@@ -2113,6 +2372,16 @@ llvm::Error StageWorkloadAnalysis::analyze(
   for (LogicalStage &stage : partition.stages) {
     StageWorkload work;
     work.paysKernelSetup = stage.workload.paysKernelSetup;
+    if (memoryPatterns)
+      for (Operation *root : stage.operations)
+        root->walk([&](Operation *operation) {
+          if (operation->getName().getStringRef() != "tt.load")
+            return;
+          if (const auto *summary = memoryPatterns->lookupSummary(operation)) {
+            work.addressPatterns.push_back(*summary);
+            work.addressPatterns.back().stageId = stage.id;
+          }
+        });
     const int64_t loopCount = countAlgorithmLoops(stage);
     const int64_t fallbackLoopTripCount =
         loopCount > 0 ? std::max<int64_t>(1, stage.iterationCount / loopCount)

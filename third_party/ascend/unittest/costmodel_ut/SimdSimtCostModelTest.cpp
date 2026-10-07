@@ -134,6 +134,125 @@ TEST(SimdSimtCostModelTest, StageHasOnlySimdOrSimtImplementations) {
             StageMode::SIMT);
 }
 
+TEST(SimdSimtCostModelTest, SimdMatchedIndirectFitReplacesOnlyLoadResource) {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<mlir::func::FuncDialect>();
+  context.getOrLoadDialect<mlir::triton::TritonDialect>();
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+    module {
+      func.func @probe(%p: tensor<32x!tt.ptr<f32>>) {
+        %x = tt.load %p : tensor<32x!tt.ptr<f32>>
+        return
+      }
+    }
+  )mlir", &context);
+  ASSERT_TRUE(module);
+  auto stage = logicalStage("indirect", StageCostModelKind::IndirectGatherMemory);
+  module->walk([&](mlir::triton::LoadOp load) {
+    stage.operations.push_back(load.getOperation());
+  });
+  auto &work = stage.workload;
+  work.loadBytes = work.indirectLoadBytes = 128;
+  work.loadWarpInstructions = work.indirectLoadTransactions = 32;
+  work.scalarOperations = 7;
+  work.storeBytes = 16;
+  mlir::ascend::AddressPatternSummary pattern;
+  pattern.memoryOp = "tt.load"; pattern.stageId = stage.id;
+  pattern.dependsOnLoadedValue = true;
+  mlir::ascend::AddressAxisSummary axis;
+  axis.extent = 32; axis.regularity = "opaque_loaded";
+  pattern.axes.push_back(axis); work.addressPatterns.push_back(pattern);
+  auto profile = hardwareProfile();
+  profile.target = "Ascend950PR/dav-c310";
+  auto old = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(old));
+  profile.simdIndirectLoadModel = "random_f32_matched_ab_20261007";
+  auto fit = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(fit));
+  const auto &a = old->stages.front().implementations;
+  const auto &b = fit->stages.front().implementations;
+  EXPECT_DOUBLE_EQ(b[0].resources.load, 83.56748010753823 * 32);
+  EXPECT_DOUBLE_EQ(b[0].resources.scalar, a[0].resources.scalar);
+  EXPECT_DOUBLE_EQ(b[0].resources.store, a[0].resources.store);
+  EXPECT_DOUBLE_EQ(b[0].resources.compute, a[0].resources.compute);
+  EXPECT_DOUBLE_EQ(b[1].totalCycles, a[1].totalCycles);
+  profile.simd.indirectDependencyLatencyCycles = 10000;
+  auto changed = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(changed));
+  EXPECT_DOUBLE_EQ(changed->stages.front().implementations[0].totalCycles,
+                   b[0].totalCycles);
+}
+
+TEST(SimdSimtCostModelTest, RandomIndirectFitReplacesOnlyLoadResource) {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<mlir::func::FuncDialect>();
+  context.getOrLoadDialect<mlir::triton::TritonDialect>();
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+    module {
+      func.func @probe(%p: tensor<256x!tt.ptr<i32>>) {
+        %x = tt.load %p : tensor<256x!tt.ptr<i32>>
+        return
+      }
+    }
+  )mlir", &context);
+  ASSERT_TRUE(module);
+  auto stage = logicalStage("indirect", StageCostModelKind::IndirectGatherMemory,
+                            StageScheduleKind::StraightLine, 3);
+  module->walk([&](mlir::triton::LoadOp load) {
+    stage.operations.push_back(load.getOperation());
+  });
+  auto &work = stage.workload;
+  work.maximumLogicalTensorElements = 256;
+  work.loadBytes = work.indirectLoadBytes = 1024;
+  work.loadWarpInstructions = work.indirectLoadTransactions = 8;
+  work.scalarOperations = 7;
+  work.storeWarpInstructions = 2;
+  work.storeBytes = 16;
+  mlir::ascend::AddressPatternSummary pattern;
+  pattern.memoryOp = "tt.load";
+  pattern.stageId = stage.id;
+  pattern.dependsOnLoadedValue = true;
+  mlir::ascend::AddressAxisSummary axis;
+  axis.extent = 256;
+  axis.regularity = "opaque_loaded";
+  pattern.axes.push_back(axis);
+  work.addressPatterns.push_back(pattern);
+  auto profile = hardwareProfile();
+  profile.target = "Ascend950PR/dav-c310";
+  profile.logicalWarpGroupCount = 4;
+  profile.simtLogicalTensorParallelismCapacity = 4;
+  auto legacy = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(legacy));
+  profile.simtIndirectLoadModel = "random_i32_six_term_20261007";
+  auto calibrated = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(calibrated));
+  const auto &oldCosts = legacy->stages.front().implementations;
+  const auto &newCosts = calibrated->stages.front().implementations;
+  EXPECT_DOUBLE_EQ(newCosts[0].totalCycles, oldCosts[0].totalCycles);
+  const double fitted = 62.930686069640686 + 1.5502588407166296 * 256 +
+                        0.19338028618547126 * 256;
+  EXPECT_DOUBLE_EQ(newCosts[1].resources.load, fitted * 4);
+  EXPECT_DOUBLE_EQ(newCosts[1].resources.scalar, oldCosts[1].resources.scalar);
+  EXPECT_DOUBLE_EQ(newCosts[1].resources.store, oldCosts[1].resources.store);
+  EXPECT_DOUBLE_EQ(newCosts[1].resources.compute, oldCosts[1].resources.compute);
+  EXPECT_NEAR(newCosts[1].totalCycles - oldCosts[1].totalCycles,
+              3 * (fitted - oldCosts[1].resources.load / 4), 1e-9);
+  // Changing the old dependency latency cannot affect a fitted load.
+  profile.simt.indirectDependencyLatencyCycles = 10000;
+  auto changed = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(changed));
+  EXPECT_DOUBLE_EQ(changed->stages.front().implementations[1].totalCycles,
+                   newCosts[1].totalCycles);
+  // Unknown/non-affine axes and spill remain outside the calibrated domain.
+  profile.simt.indirectDependencyLatencyCycles = 20;
+  stage.workload.addressPatterns.front().axes.front().regularity =
+      "computed_nonaffine";
+  auto fallback = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(fallback));
+  EXPECT_DOUBLE_EQ(fallback->stages.front().implementations[1].totalCycles,
+                   oldCosts[1].totalCycles);
+}
+
 TEST(SimdSimtCostModelTest, SimdPricesShortAxesPerSegmentAndElementWidth) {
   auto simdCost = [](int64_t elementBits, int64_t contiguousElements,
                      double segmentCount) {
@@ -1641,6 +1760,18 @@ TEST(SimdSimtCostModelTest, PartialContinuousRowsUseDirectMemoryPerRow) {
           StageCostModelKind::PartialContinuousTileMemory)
         payload = &stage;
     ASSERT_NE(payload, nullptr) << "columns=" << columns;
+    ASSERT_EQ(payload->workload.addressPatterns.size(), 1u);
+    const auto &address = payload->workload.addressPatterns.front();
+    EXPECT_EQ(address.stageId, payload->id);
+    EXPECT_TRUE(address.dependsOnLoadedValue);
+    ASSERT_EQ(address.axes.size(), 2u);
+    EXPECT_EQ(address.axes[0].extent, 8);
+    EXPECT_EQ(address.axes[0].regularity, "opaque_loaded");
+    if (columns > 1) {
+      EXPECT_EQ(address.axes[1].regularity, "fixed_stride");
+      ASSERT_TRUE(address.axes[1].knownStride.has_value());
+      EXPECT_EQ(*address.axes[1].knownStride, 1);
+    }
     EXPECT_TRUE(payload->features.hasPartialContinuousMemory);
     EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 8.0);
     EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadBytes,

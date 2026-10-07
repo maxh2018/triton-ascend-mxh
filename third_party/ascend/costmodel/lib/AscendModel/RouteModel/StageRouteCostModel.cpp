@@ -231,6 +231,36 @@ llvm::json::Object ReductionWorkload::toJSON() const {
       {"logical_operation_instances_per_iteration", logicalOperationInstances}};
 }
 
+llvm::json::Object AddressAxisSummary::toJSON() const {
+  llvm::json::Object result;
+  result["extent"] = extent;
+  result["offset_axis_info"] = offsetAxisInfo;
+  result["regularity"] = regularity;
+  result["provenance"] = provenance;
+  result["known_stride_elements"] = knownStride
+      ? llvm::json::Value(*knownStride) : llvm::json::Value(nullptr);
+  result["has_unknown_component"] = hasUnknownComponent;
+  result["alignment_bytes"] = alignmentBytes
+      ? llvm::json::Value(*alignmentBytes) : llvm::json::Value(nullptr);
+  result["reason"] = reason;
+  return result;
+}
+
+llvm::json::Object AddressPatternSummary::toJSON() const {
+  llvm::json::Object result;
+  result["ttir_load_ordinal"] = ttirLoadOrdinal;
+  result["stage_id"] = stageId;
+  result["source_location"] = sourceLocation;
+  result["memory_op"] = memoryOp;
+  result["pattern_class"] = patternClass;
+  result["depends_on_loaded_value"] = dependsOnLoadedValue;
+  llvm::json::Array axisValues;
+  for (const AddressAxisSummary &axis : axes)
+    axisValues.push_back(axis.toJSON());
+  result["axes"] = std::move(axisValues);
+  return result;
+}
+
 bool StageWorkload::isFiniteAndNonNegative() const {
   const std::array<double, 24> values = {scalarOperations,
                                          loadBytes,
@@ -290,6 +320,10 @@ bool StageWorkload::isFiniteAndNonNegative() const {
 
 llvm::json::Object StageWorkload::toJSON() const {
   llvm::json::Object result;
+  llvm::json::Array addressValues;
+  for (const AddressPatternSummary &pattern : addressPatterns)
+    addressValues.push_back(pattern.toJSON());
+  result["address_patterns"] = std::move(addressValues);
   llvm::json::Object operations;
   for (const auto &[name, elements] : operationElements)
     operations[name] = elements;
@@ -414,6 +448,7 @@ bool StageImplementationCost::isValid() const {
 llvm::json::Object StageImplementationCost::toJSON() const {
   return llvm::json::Object{
       {"implementation", implementation.toJSON()},
+      {"indirect_load_pricing", indirectLoadPricing},
       {"total_system_cycles", totalCycles},
       {"logical_tensor_parallelism_factor", logicalTensorParallelismFactor},
       {"resource_system_cycles", resources.toJSON()}};

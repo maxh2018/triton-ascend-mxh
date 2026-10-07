@@ -15,6 +15,7 @@
 #include "llvm/Support/JSON.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -138,11 +139,41 @@ struct ReductionWorkload {
   llvm::json::Object toJSON() const;
 };
 
+/// TTIR-only address facts. The opt-in indirect-load fit uses these to check
+/// its calibrated domain, without altering Stage classification.
+/// A null stride/alignment means "not proven", not random.
+struct AddressAxisSummary {
+  int64_t extent = 0;
+  std::string offsetAxisInfo = "unknown";
+  std::string regularity = "opaque";
+  std::string provenance = "unknown";
+  std::optional<int64_t> knownStride;
+  bool hasUnknownComponent = true;
+  std::optional<int64_t> alignmentBytes;
+  std::string reason;
+
+  llvm::json::Object toJSON() const;
+};
+
+struct AddressPatternSummary {
+  int64_t ttirLoadOrdinal = -1;
+  std::string stageId;
+  std::string sourceLocation;
+  std::string memoryOp;
+  std::string patternClass;
+  bool dependsOnLoadedValue = false;
+  std::vector<AddressAxisSummary> axes;
+
+  llvm::json::Object toJSON() const;
+};
+
 /// Mode-independent work owned exactly once by one Stage.  Values are
 /// logical elements/bytes, not mode-specific instructions or cycles.
 struct StageWorkload {
   llvm::StringMap<double> operationElements;
   std::vector<TensorOperationWorkload> tensorOperationWorkloads;
+  /// Per-op address summaries, not multiplied by loop trips.
+  std::vector<AddressPatternSummary> addressPatterns;
   double scalarOperations = 0.0;
   double loadBytes = 0.0;
   double storeBytes = 0.0;
@@ -217,6 +248,7 @@ struct StageResourceCycles {
 
 struct StageImplementationCost {
   StageImplementation implementation;
+  std::string indirectLoadPricing = "legacy_transactions";
   double totalCycles = 0.0;
   /// Intra-program SIMT warp groups used to price logical tensor work. This is
   /// distinct from SuperBlock, which groups independent logical programs.

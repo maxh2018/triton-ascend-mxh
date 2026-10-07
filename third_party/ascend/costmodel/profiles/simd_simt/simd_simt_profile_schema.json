@@ -18,6 +18,14 @@
     "simt"
   ],
   "properties": {
+    "simd_indirect_load_model": {
+      "enum": ["random_f32_matched_ab_20261007"],
+      "description": "Optional FP32 rank-1 random-address scalar load effective increment from matched-address A/B measurements, in SYS_CNT cycles. Unsupported workloads retain legacy pricing."
+    },
+    "simt_indirect_load_model": {
+      "enum": ["random_i32_six_term_20261007"],
+      "description": "Optional Ascend950PR/dav-c310 random-address matched-ALU SIMT load fit in SYS_CNT cycles. Unsupported workloads retain legacy pricing; does not change SIMD."
+    },
     "$schema": {
       "type": "string",
       "description": "Relative path to this JSON Schema; used by editors and offline validators, not by Route Model scoring."
