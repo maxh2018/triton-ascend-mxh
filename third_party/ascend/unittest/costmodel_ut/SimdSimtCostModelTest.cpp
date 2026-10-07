@@ -183,6 +183,55 @@ TEST(SimdSimtCostModelTest, SimdMatchedIndirectFitReplacesOnlyLoadResource) {
                    b[0].totalCycles);
 }
 
+TEST(SimdSimtCostModelTest, SimdMatchedIndirectNarrowRankTwoDomain) {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<mlir::func::FuncDialect>();
+  context.getOrLoadDialect<mlir::triton::TritonDialect>();
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+    module {
+      func.func @probe(%p: tensor<4x8x!tt.ptr<f32>>) {
+        %x = tt.load %p : tensor<4x8x!tt.ptr<f32>>
+        return
+      }
+    }
+  )mlir", &context);
+  ASSERT_TRUE(module);
+  auto stage = logicalStage("rank2", StageCostModelKind::IndirectGatherMemory);
+  module->walk([&](mlir::triton::LoadOp load) {
+    stage.operations.push_back(load.getOperation());
+  });
+  auto &work = stage.workload;
+  work.loadBytes = work.indirectLoadBytes = 128;
+  work.loadWarpInstructions = work.indirectLoadTransactions = 32;
+  mlir::ascend::AddressPatternSummary pattern;
+  pattern.memoryOp = "tt.load";
+  pattern.stageId = stage.id;
+  pattern.dependsOnLoadedValue = true;
+  mlir::ascend::AddressAxisSummary outer, inner;
+  outer.extent = 4;
+  outer.regularity = "fixed_stride";
+  outer.knownStride = 4096;
+  inner.extent = 8;
+  inner.regularity = "opaque_loaded";
+  pattern.axes = {outer, inner};
+  work.addressPatterns = {pattern};
+  auto profile = hardwareProfile();
+  profile.target = "Ascend950PR/dav-c310";
+  profile.simdIndirectLoadModel = "random_f32_matched_ab_20261007";
+  for (const char *category : {"fixed_stride", "opaque_loaded"}) {
+    work.addressPatterns[0].axes[0].regularity = category;
+    auto result = evaluateOneStage(stage, profile);
+    ASSERT_TRUE(bool(result));
+    EXPECT_DOUBLE_EQ(result->stages.front().implementations[0].resources.load,
+                     83.56748010753823 * 32);
+  }
+  work.addressPatterns[0].axes[0].regularity = "computed_nonaffine";
+  auto fallback = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(fallback));
+  EXPECT_EQ(fallback->stages.front().implementations[0].indirectLoadPricing,
+            "legacy_transactions");
+}
+
 TEST(SimdSimtCostModelTest, RandomIndirectFitReplacesOnlyLoadResource) {
   mlir::MLIRContext context;
   context.getOrLoadDialect<mlir::func::FuncDialect>();

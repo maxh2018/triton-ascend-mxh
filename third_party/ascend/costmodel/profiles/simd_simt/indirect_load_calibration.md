@@ -68,6 +68,29 @@ Domain: one FP32 rank-one loaded-index `tt.load`, N in
 {8,16,32,64,128,256,512}. This is **not** the older whole-scalar-loop equation
 `61.72 + 96.52*N`.
 
+The rank-two extension uses the same coefficient only for E=R*C in
+{32,64,128,256,512}, C in {4,8}, a loaded-index inner axis, and either a
+loaded-index outer axis or known outer stride 4096. All axis extents must
+match the load type. Wider columns retain legacy pricing: real-device
+counterexamples prevent an unconditional rank-two extension.
+
+The new rank-two campaign measured 44 shape/category combinations and 1056
+random inputs (50688 launches). The unchanged rank-one coefficient passes
+1005/1056 overall, MAPE 6.35%, maximum 42.17%. Restricting to C=4/8 gives
+480/480, MAPE 1.90%, maximum 19.20%. Six larger-column-pool controls add 137
+inputs; the narrow-column controls pass 48/48, bringing the enabled domain
+to 528/528. This domain was narrowed after inspecting the results, not
+established by a fresh blind test. The campaigns do not guarantee arbitrary
+runtime address distributions. Wider-column exploratory refits were not
+adopted.
+
+Rank-two payload and baseline come from each real two-dimensional Triton
+kernel's lowered scalar loops. The timer starts after index DMA completion
+and ends after the outer scalar loop and barrier, before output DMA. The
+baseline preserves full addresses via the same hash as the rank-one study.
+The new campaign verifies every output and loaded binary hash and archives
+LLVM IR; it does not add a final-ISA simulator audit for rank two.
+
 The baseline preserves UB index loads, address computation, UB result stores
 and loop structure by writing a fold of the full address instead of loading
 the GM value. Actual N32 instruction traces confirm 32 index loads and 32 UB

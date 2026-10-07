@@ -181,18 +181,33 @@ static std::optional<double> calibratedSimdIndirectLoad(
       op->getNumResults() != 1 || op->getNumOperands() != 1)
     return std::nullopt;
   auto type = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-  if (!type || !type.hasStaticShape() || type.getRank() != 1 ||
+  if (!type || !type.hasStaticShape() ||
+      (type.getRank() != 1 && type.getRank() != 2) ||
       !type.getElementType().isF32())
     return std::nullopt;
   const auto &pattern = work.addressPatterns.front();
   const int64_t elements = type.getNumElements();
   if (pattern.memoryOp != "tt.load" || pattern.stageId != stage.id ||
-      !pattern.dependsOnLoadedValue || pattern.axes.size() != 1 ||
-      pattern.axes.front().regularity != "opaque_loaded" ||
-      pattern.axes.front().extent != elements || elements < 8 || elements > 512 ||
+      !pattern.dependsOnLoadedValue ||
+      pattern.axes.size() != static_cast<size_t>(type.getRank()) ||
+      pattern.axes.back().regularity != "opaque_loaded" ||
+      elements < 8 || elements > 512 ||
       (elements & (elements - 1)) || work.indirectLoadBytes != 4 * elements ||
       work.indirectLoadTransactions <= 0)
     return std::nullopt;
+  for (int64_t axis = 0; axis < type.getRank(); ++axis)
+    if (pattern.axes[axis].extent != type.getDimSize(axis))
+      return std::nullopt;
+  if (type.getRank() == 2) {
+    const auto &outer = pattern.axes.front();
+    const int64_t columns = type.getDimSize(1);
+    // Rank-two validation currently supports the narrow-column domain only.
+    // Wider columns have measured counterexamples; keep their legacy fallback.
+    if (elements < 32 || (columns != 4 && columns != 8) ||
+        (outer.regularity != "opaque_loaded" &&
+         !(outer.regularity == "fixed_stride" && outer.knownStride == 4096)))
+      return std::nullopt;
+  }
   // Effective load increment, NOT the old 61.72 + 96.52*N whole-loop fit.
   // The address-preserving baseline has a small extra ALU bias; random-only
   // input validation and baseline-sensitivity results accompany calibration.
