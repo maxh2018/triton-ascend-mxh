@@ -134,6 +134,84 @@ TEST(SimdSimtCostModelTest, StageHasOnlySimdOrSimtImplementations) {
             StageMode::SIMT);
 }
 
+TEST(SimdSimtCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
+  mlir::MLIRContext context;
+  context.getOrLoadDialect<mlir::func::FuncDialect>();
+  context.getOrLoadDialect<mlir::triton::TritonDialect>();
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+    module {
+      func.func @probe(%p: tensor<32x!tt.ptr<f32>>, %v: tensor<32xf32>) {
+        tt.store %p, %v : tensor<32x!tt.ptr<f32>>
+        return
+      }
+    }
+  )mlir", &context);
+  ASSERT_TRUE(module);
+  auto stage = logicalStage("store", StageCostModelKind::IndirectGatherMemory);
+  module->walk([&](mlir::triton::StoreOp op) {
+    stage.operations.push_back(op.getOperation());
+  });
+  auto &work = stage.workload;
+  work.maximumLogicalTensorElements = 32;
+  work.storeBytes = work.indirectStoreBytes = 128;
+  work.storeWarpInstructions = work.indirectStoreTransactions = 1;
+  work.scalarOperations = 7;
+  work.loadBytes = 16;
+  mlir::ascend::AddressPatternSummary pattern;
+  pattern.memoryOp = "tt.store";
+  pattern.stageId = stage.id;
+  pattern.dependsOnLoadedValue = true;
+  mlir::ascend::AddressAxisSummary axis;
+  axis.extent = 32;
+  axis.regularity = "opaque_loaded";
+  pattern.axes.push_back(axis);
+  work.addressPatterns.push_back(pattern);
+  auto profile = hardwareProfile();
+  profile.target = "Ascend950PR/dav-c310";
+  auto old = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(old));
+  profile.simdIndirectStoreModel = "random_f32_store_no_fill_first_20261007";
+  profile.simtIndirectStoreModel = "random_f32_store_fill_ab_20261007";
+  auto fit = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(fit));
+  const auto &a = old->stages.front().implementations;
+  const auto &b = fit->stages.front().implementations;
+  EXPECT_DOUBLE_EQ(b[0].resources.store, 150.13769870695648 * 32);
+  EXPECT_NEAR(b[1].resources.store, 145.04451206999323, 1e-9);
+  for (unsigned i = 0; i < 2; ++i) {
+    EXPECT_DOUBLE_EQ(b[i].resources.load, a[i].resources.load);
+    EXPECT_DOUBLE_EQ(b[i].resources.scalar, a[i].resources.scalar);
+    EXPECT_DOUBLE_EQ(b[i].resources.compute, a[i].resources.compute);
+    EXPECT_EQ(b[i].indirectLoadPricing, "legacy_transactions");
+    EXPECT_NE(b[i].indirectStorePricing, "legacy_transactions");
+  }
+  profile.simd.indirectDependencyLatencyCycles = 10000;
+  auto changed = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(changed));
+  EXPECT_DOUBLE_EQ(changed->stages.front().implementations[0].totalCycles,
+                   b[0].totalCycles);
+  profile.simdIndirectStoreModel = "random_f32_store_no_fill_reuse_20261007";
+  changed = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(changed));
+  EXPECT_EQ(changed->stages.front().implementations[0].indirectStorePricing,
+            "legacy_transactions");
+  work.hasProvenIndirectStoreReuse = true;
+  changed = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(changed));
+  EXPECT_DOUBLE_EQ(changed->stages.front().implementations[0].resources.store,
+                   65.26772542192847 * 32);
+  work.predicateElements = 1;
+  changed = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(changed));
+  for (const auto &cost : changed->stages.front().implementations)
+    EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
+  profile.simdIndirectStoreModel = "unknown";
+  EXPECT_FALSE(profile.isValid());
+  profile.simdIndirectStoreModel.clear();
+  profile.target = "other-target";
+  EXPECT_FALSE(profile.isValid());
+}
+
 TEST(SimdSimtCostModelTest, SimdMatchedIndirectFitReplacesOnlyLoadResource) {
   mlir::MLIRContext context;
   context.getOrLoadDialect<mlir::func::FuncDialect>();

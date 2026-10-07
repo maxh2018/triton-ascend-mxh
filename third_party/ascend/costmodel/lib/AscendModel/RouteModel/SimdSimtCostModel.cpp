@@ -439,6 +439,21 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     if (hardware.simdIndirectLoadModel != "random_f32_matched_ab_20261007")
       reader.setError("unsupported simd_indirect_load_model");
   }
+  if (root->get("simt_indirect_store_model")) {
+    hardware.simtIndirectStoreModel =
+        reader.string(*root, "simt_indirect_store_model", "profile");
+    if (hardware.simtIndirectStoreModel != "random_f32_store_fill_ab_20261007")
+      reader.setError("unsupported simt_indirect_store_model");
+  }
+  if (root->get("simd_indirect_store_model")) {
+    hardware.simdIndirectStoreModel =
+        reader.string(*root, "simd_indirect_store_model", "profile");
+    if (hardware.simdIndirectStoreModel !=
+            "random_f32_store_no_fill_first_20261007" &&
+        hardware.simdIndirectStoreModel !=
+            "random_f32_store_no_fill_reuse_20261007")
+      reader.setError("unsupported simd_indirect_store_model");
+  }
   if (microbench && llvm::StringRef(hardware.target) != microbench->getTarget())
     reader.setError("selection profile target '" + hardware.target +
                     "' does not match shared microbenchmark target '" +

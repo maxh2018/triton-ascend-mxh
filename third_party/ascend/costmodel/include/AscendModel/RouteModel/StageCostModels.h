@@ -190,6 +190,10 @@ struct HardwareProfile {
   std::string simtIndirectLoadModel;
   /// FP32 scalar-loop matched-address differential, random-address prior.
   std::string simdIndirectLoadModel;
+  /// F32 random store A/B fits. Empty retains legacy transactions. SIMD state
+  /// is an explicit profile prior, not an inferred cache-state guarantee.
+  std::string simtIndirectStoreModel;
+  std::string simdIndirectStoreModel;
   /// Logical warp groups available to one SIMT program.  This is a compile
   /// option, not a hardware constant, and bounds cross-group interleaving in
   /// recurrence Stage models.

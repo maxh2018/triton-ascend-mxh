@@ -275,10 +275,102 @@ static std::optional<double> calibratedIndirectLoad(
          0.19338028618547126 * elements * (type.getRank() == 1);
 }
 
+// Effective write plus required synchronization increment, not a whole Stage.
+// Address randomness and memory history are profile priors: neither is proven
+// by pointer analysis. In particular, the no-fill first fit has >20% outliers.
+static std::optional<double> calibratedIndirectStore(
+    const LogicalStage &stage, const HardwareProfile &hardware,
+    const StageImplementation &implementation) {
+  const auto &work = stage.workload;
+  const bool simd = implementation.mode == StageMode::SIMD;
+  if (hardware.target != "Ascend950PR/dav-c310" ||
+      implementation.superblockFactor != 1 ||
+      stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
+      stage.operations.size() != 1 || work.addressPatterns.size() != 1 ||
+      work.estimatedSpillTransactions != 0 || work.predicateElements != 0 ||
+      stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1.0 ||
+      work.partialContinuousStoreBytes != 0 || work.indirectLoadBytes != 0)
+    return std::nullopt;
+  if (simd) {
+    if ((hardware.simdIndirectStoreModel !=
+             "random_f32_store_no_fill_first_20261007" &&
+         hardware.simdIndirectStoreModel !=
+             "random_f32_store_no_fill_reuse_20261007") ||
+        hardware.logicalWarpGroupCount != 1)
+      return std::nullopt;
+  } else if (implementation.mode != StageMode::SIMT ||
+             hardware.simtIndirectStoreModel !=
+                 "random_f32_store_fill_ab_20261007") {
+    return std::nullopt;
+  }
+  Operation *op = stage.operations.front();
+  if (op->getName().getStringRef() != "tt.store" ||
+      op->getNumOperands() != 2 || op->getNumResults() != 0)
+    return std::nullopt;
+  auto type = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
+  if (!type || !type.hasStaticShape() || !type.getElementType().isF32() ||
+      (type.getRank() != 1 && type.getRank() != 2))
+    return std::nullopt;
+  const auto &pattern = work.addressPatterns.front();
+  const int64_t elements = type.getNumElements();
+  if (pattern.memoryOp != "tt.store" || pattern.stageId != stage.id ||
+      !pattern.dependsOnLoadedValue ||
+      pattern.axes.size() != static_cast<size_t>(type.getRank()) ||
+      pattern.axes.back().regularity != "opaque_loaded" ||
+      work.indirectStoreBytes != 4 * elements ||
+      work.indirectStoreTransactions <= 0)
+    return std::nullopt;
+  for (int64_t axis = 0; axis < type.getRank(); ++axis)
+    if (pattern.axes[axis].extent != type.getDimSize(axis))
+      return std::nullopt;
+  const bool rankTwo = type.getRank() == 2;
+  const int64_t columns = rankTwo ? type.getDimSize(1) : 32;
+  const bool inner = rankTwo &&
+                     pattern.axes.front().regularity == "fixed_stride";
+  if (rankTwo &&
+      (type.getDimSize(0) < 2 ||
+       (pattern.axes.front().regularity != "opaque_loaded" && !inner) ||
+       (inner && pattern.axes.front().knownStride != (simd ? 32768 : 4096))))
+    return std::nullopt;
+  if (simd) {
+    // Exactly the measured shape domain. Row/column loaded and per-element
+    // loaded templates share this slope; unsupported expressions fall back.
+    if ((!rankTwo && (elements < 8 || elements > 512 ||
+                      (elements & (elements - 1)))) ||
+        (rankTwo && ((elements != 32 && elements != 128 && elements != 512) ||
+                     (columns != 4 && columns != 16 && columns != 64))))
+      return std::nullopt;
+    if (hardware.simdIndirectStoreModel ==
+            "random_f32_store_no_fill_reuse_20261007" &&
+        !work.hasProvenIndirectStoreReuse)
+      return std::nullopt;
+    return elements * (hardware.simdIndirectStoreModel ==
+                               "random_f32_store_no_fill_reuse_20261007"
+                           ? 65.26772542192847
+                           : 150.13769870695648);
+  }
+  const int64_t warps = hardware.logicalWarpGroupCount;
+  if (warps < 1 || warps > 64 || (warps & (warps - 1)))
+    return std::nullopt;
+  const double q = elements / (32.0 * warps);
+  if ((q != 1 && q != 2 && q != 4) ||
+      (rankTwo && columns != 8 && columns != 32))
+    return std::nullopt;
+  if (elements >= 512)
+    return 1.9039194506414692 * elements;
+  const double logW = std::log2(static_cast<double>(warps));
+  return 157.465336398077 + 2.046486341690834 * elements -
+         13.874579575172818 * std::sqrt(static_cast<double>(elements)) +
+         (-0.8540920211063882 - 0.4681840422126738 * q) * logW +
+         0.5780871675460912 * elements / columns -
+         15.490435818576909 * inner;
+}
+
 static StageResourceCycles mapWorkload(const LogicalStage &stage,
                                        const StageModeProfile &profile,
                                        StageMode mode,
-                                       std::optional<double> fittedLoad) {
+                                       std::optional<double> fittedLoad,
+                                       std::optional<double> fittedStore) {
   StageResourceCycles resources;
   const StageWorkload &work = stage.workload;
   const bool simd = mode == StageMode::SIMD;
@@ -336,15 +428,16 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
   }
   resources.load += fittedLoad.value_or(
       work.indirectLoadTransactions / profile.indirectLoadTransactionsPerCycle);
-  resources.store += work.indirectStoreTransactions /
-                     profile.indirectStoreTransactionsPerCycle;
+  resources.store += fittedStore.value_or(
+      work.indirectStoreTransactions / profile.indirectStoreTransactionsPerCycle);
   // Preserve one uncovered loaded-index dependency latency per Stage
   // iteration, but charge it only when an actual indirect access exists.
   if (work.indirectLoadTransactions > 0.0) {
     // Matched-load difference already includes the induced index wait.
     if (!fittedLoad)
       resources.load += profile.indirectDependencyLatencyCycles;
-  } else if (work.indirectStoreTransactions > 0.0)
+  } else if (work.indirectStoreTransactions > 0.0 && !fittedStore)
+    // The matched-store increment replaces the legacy write/wait estimate.
     resources.store += profile.indirectDependencyLatencyCycles;
 
   for (const AtomicWorkload &atomic : work.atomicWorkloads) {
@@ -763,6 +856,13 @@ bool HardwareProfile::isValid() const {
          (simdIndirectLoadModel.empty() ||
           (simdIndirectLoadModel == "random_f32_matched_ab_20261007" &&
            target == "Ascend950PR/dav-c310")) &&
+         (simtIndirectStoreModel.empty() ||
+          (simtIndirectStoreModel == "random_f32_store_fill_ab_20261007" &&
+           target == "Ascend950PR/dav-c310")) &&
+         (simdIndirectStoreModel.empty() ||
+          ((simdIndirectStoreModel == "random_f32_store_no_fill_first_20261007" ||
+            simdIndirectStoreModel == "random_f32_store_no_fill_reuse_20261007") &&
+           target == "Ascend950PR/dav-c310")) &&
          logicalWarpGroupCount > 0 &&
          simtLogicalTensorParallelismCapacity > 0 &&
          superblockUsefulFactorLimit > 0 &&
@@ -852,20 +952,27 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       const int64_t parallelism =
           logicalTensorParallelismFactor(stage, profile, implementation.mode);
       auto fittedLoad = calibratedIndirectLoad(stage, profile, implementation);
+      auto fittedStore = calibratedIndirectStore(stage, profile, implementation);
       // The fit already describes all W warps. mapWorkload stores pre-division
       // resource work; compensate only this term for the common division below.
       if (fittedLoad)
         *fittedLoad *= parallelism;
+      if (fittedStore)
+        *fittedStore *= parallelism;
       StageResourceCycles resources = mapWorkload(
           stage,
           implementation.mode == StageMode::SIMD ? profile.simd : profile.simt,
-          implementation.mode, fittedLoad);
+          implementation.mode, fittedLoad, fittedStore);
       StageImplementationCost cost;
       cost.implementation = implementation;
       if (fittedLoad)
         cost.indirectLoadPricing = implementation.mode == StageMode::SIMD
                                        ? profile.simdIndirectLoadModel
                                        : profile.simtIndirectLoadModel;
+      if (fittedStore)
+        cost.indirectStorePricing = implementation.mode == StageMode::SIMD
+                                        ? profile.simdIndirectStoreModel
+                                        : profile.simtIndirectStoreModel;
       cost.resources = resources;
       cost.logicalTensorParallelismFactor = parallelism;
       const double tensorParallelCycles = applyLogicalTensorParallelism(
