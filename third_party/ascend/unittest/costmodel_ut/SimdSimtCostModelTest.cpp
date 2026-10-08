@@ -1657,7 +1657,7 @@ TEST(SimdSimtCostModelTest, PartialContinuousRowsUseDirectMemoryPerRow) {
   }
 }
 
-TEST(SimdSimtCostModelTest, PartialContinuousStoreAndStrideCounterexample) {
+TEST(SimdSimtCostModelTest, PartialStructuredStoreAndNonunitStride) {
   for (bool store : {false, true}) {
     mlir::MLIRContext context;
     context.getOrLoadDialect<mlir::arith::ArithDialect>();
@@ -1665,7 +1665,7 @@ TEST(SimdSimtCostModelTest, PartialContinuousStoreAndStrideCounterexample) {
     context.getOrLoadDialect<mlir::triton::TritonDialect>();
     context.allowUnregisteredDialects();
     auto module = mlir::parseSourceString<mlir::ModuleOp>(
-        partialContinuousTileIR(8, 8, store ? 1 : 2, store), &context);
+        partialContinuousTileIR(8, 8, 2, store), &context);
     ASSERT_TRUE(module);
     auto partition = StagePartitioner().partition(
         *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
@@ -1682,9 +1682,11 @@ TEST(SimdSimtCostModelTest, PartialContinuousStoreAndStrideCounterexample) {
         EXPECT_DOUBLE_EQ(stage.workload.indirectStoreTransactions, 0.0);
       }
       if (!store &&
-          stage.costModelKind == StageCostModelKind::IndirectGatherMemory) {
+          stage.costModelKind ==
+              StageCostModelKind::PartialContinuousTileMemory) {
         sawExpectedKind = true;
-        EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 0.0);
+        EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 8.0);
+        EXPECT_DOUBLE_EQ(stage.workload.indirectLoadTransactions, 0.0);
       }
     }
     EXPECT_TRUE(sawExpectedKind);
@@ -1716,6 +1718,41 @@ TEST(SimdSimtCostModelTest, PartialContinuousStoreAndStrideCounterexample) {
     FAIL() << llvm::toString(partition.takeError());
   for (const LogicalStage &stage : partition->stages)
     EXPECT_NE(stage.costModelKind, StageCostModelKind::PartialContinuousTileMemory);
+}
+
+TEST(SimdSimtCostModelTest, PartialStructuredPrefixDoesNotRequireLoadedIndex) {
+  for (bool store : {false, true}) {
+    std::string source = partialContinuousTileIR(8, 8, 2, store);
+    size_t begin = source.find("        %index = tt.load");
+    size_t end = source.find("        %index2d =", begin);
+    ASSERT_NE(begin, std::string::npos);
+    ASSERT_NE(end, std::string::npos);
+    source.replace(begin, end - begin,
+                   "        %index = arith.muli %indexRange, %indexRange : "
+                   "tensor<8xi32>\n");
+    mlir::MLIRContext context;
+    context.getOrLoadDialect<mlir::arith::ArithDialect>();
+    context.getOrLoadDialect<mlir::func::FuncDialect>();
+    context.getOrLoadDialect<mlir::triton::TritonDialect>();
+    auto module = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+    ASSERT_TRUE(module);
+    auto partition = StagePartitioner().partition(
+        *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
+    if (!partition)
+      FAIL() << llvm::toString(partition.takeError());
+    bool sawPayload = false;
+    for (const LogicalStage &stage : partition->stages) {
+      const double rows = store ? stage.workload.partialContinuousStoreRows
+                                : stage.workload.partialContinuousLoadRows;
+      if (rows == 0.0)
+        continue;
+      sawPayload = true;
+      EXPECT_EQ(stage.costModelKind,
+                StageCostModelKind::PartialContinuousTileMemory);
+      EXPECT_DOUBLE_EQ(rows, 8.0);
+    }
+    EXPECT_TRUE(sawPayload);
+  }
 }
 
 TEST(SimdSimtCostModelTest, PartialContinuousTwoAxisSuffix) {
@@ -1787,8 +1824,8 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
   EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadBytes, 2.0 * 4.0 * 8.0 * 4.0);
   EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadWarpInstructions, 2.0);
 
-  // An outer structured axis before a middle indirect axis is not a
-  // structured suffix and must retain the indirect-memory classification.
+  // A structured outer axis is allowed before an unstructured middle axis.
+  // Only the middle axis is expanded; the outer and tail axes stay in a slice.
   auto replaceOnce = [&](llvm::StringRef oldText, llvm::StringRef newText) {
     size_t position = source.find(oldText.str());
     ASSERT_NE(position, std::string::npos);
@@ -1834,13 +1871,15 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
       if (!type || type.getShape() != llvm::ArrayRef<int64_t>({2, 4, 8}))
         continue;
       sawPayload = true;
-      EXPECT_EQ(stage.costModelKind, StageCostModelKind::IndirectGatherMemory);
-      EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 0.0);
+      EXPECT_EQ(stage.costModelKind,
+                StageCostModelKind::PartialContinuousTileMemory);
+      EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 4.0);
+      EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadWarpInstructions, 4.0);
     }
   EXPECT_TRUE(sawPayload);
 
-  // When both leading axes are indirect, the final 8 elements are the
-  // contiguous suffix of each of the 2x4 outer slices.
+  // With both prefix axes unstructured, both expand and each structured
+  // slice contains the final 8 elements.
   replaceOnce("arith.muli %outer_broadcast, %row_stride",
               "arith.muli %index_broadcast, %row_stride");
   auto twoIndirectAxes =
