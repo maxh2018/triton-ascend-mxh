@@ -557,8 +557,8 @@ static double estimateStage(const LogicalStage &stage,
            dispatchCount * std::max(r.scalar + controlBody(r), r.issue);
   }
   case StageCostModelKind::PartialContinuousTileMemory:
-    // Discrete rows are billed as a sum of direct-memory accesses.  Do not
-    // apply the independent SIMD load/store overlap path to this Stage.
+    // Slices expanded along unstructured axes are billed serially. Structured
+    // axes may have nonunit strides; they do not imply contiguous addresses.
     return serial;
   case StageCostModelKind::ContinuousTileMemory:
   case StageCostModelKind::ContinuousTileStore:

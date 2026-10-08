@@ -35,7 +35,8 @@ struct PartialContinuousTile {
 };
 
 // OffsetAnalysis creates helper IR while parsing pointers.  Keep one cloned
-// module and retain only its per-axis classifications for the original ops.
+// module and retain only axis classifications and address summaries for the
+// original ops. Stage classification and calibrated pricing share the cache.
 class StageMemoryPatternAnalysis {
 public:
   explicit StageMemoryPatternAnalysis(ModuleOp module);
@@ -50,9 +51,17 @@ public:
     return found == summaries.end() ? nullptr : &found->second;
   }
 
+  std::optional<bool> hasUnstructuredAxes(Operation *operation) const {
+    auto found = unstructuredMemory.find(operation);
+    if (found == unstructuredMemory.end())
+      return std::nullopt;
+    return found->second;
+  }
+
 private:
   llvm::DenseMap<Operation *, std::optional<PartialContinuousTile>> tiles;
   llvm::DenseMap<Operation *, AddressPatternSummary> summaries;
+  llvm::DenseMap<Operation *, bool> unstructuredMemory;
 };
 
 } // namespace mlir::ascend
@@ -189,124 +198,6 @@ static double getMaximumTensorElements(Operation *operation) {
   return elements;
 }
 
-// PtrOffsetInfo owns the structured/unstructured decision.  This narrow
-// query supplies only the facts it does not expose: a static address step on
-// one axis and whether a loaded tensor index varies on that axis.
-struct AddressAxisEvidence {
-  std::optional<int64_t> step;
-  bool loaded = false;
-};
-
-static std::optional<int64_t> getSplatInteger(Value value) {
-  if (auto splat = value.getDefiningOp<triton::SplatOp>())
-    value = splat.getSrc();
-  if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
-    if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
-      return integer.getInt();
-    if (auto dense = dyn_cast<DenseIntElementsAttr>(constant.getValue()))
-      if (dense.isSplat())
-        return dense.getSplatValue<APInt>().getSExtValue();
-  }
-  return std::nullopt;
-}
-
-static AddressAxisEvidence getAddressAxisEvidence(Value value, int64_t axis,
-                                                  unsigned depth = 0) {
-  if (depth > 64)
-    return {};
-  auto tensor = dyn_cast<RankedTensorType>(value.getType());
-  if (!tensor)
-    return {0, false};
-  if (axis < 0 || axis >= tensor.getRank())
-    return {};
-  if (tensor.getDimSize(axis) == 1)
-    return {0, false};
-  Operation *producer = value.getDefiningOp();
-  if (!producer)
-    return {};
-  if (isa<triton::LoadOp, triton::GatherOp>(producer))
-    return {std::nullopt, true};
-  if (isa<triton::MakeRangeOp>(producer))
-    return tensor.getRank() == 1 ? AddressAxisEvidence{1, false}
-                                 : AddressAxisEvidence{};
-  if (isa<triton::SplatOp>(producer) || getSplatInteger(value) ||
-      isa<triton::GetProgramIdOp>(producer))
-    return {0, false};
-  if (auto expand = dyn_cast<triton::ExpandDimsOp>(producer)) {
-    const int64_t inserted = expand.getAxis();
-    return axis == inserted
-               ? AddressAxisEvidence{0, false}
-               : getAddressAxisEvidence(expand.getSrc(),
-                                        axis > inserted ? axis - 1 : axis,
-                                        depth + 1);
-  }
-  if (auto broadcast = dyn_cast<triton::BroadcastOp>(producer)) {
-    auto input = dyn_cast<RankedTensorType>(broadcast.getSrc().getType());
-    if (!input || input.getRank() != tensor.getRank())
-      return {};
-    return input.getDimSize(axis) == 1
-               ? AddressAxisEvidence{0, false}
-               : getAddressAxisEvidence(broadcast.getSrc(), axis, depth + 1);
-  }
-  if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::IndexCastOp>(producer))
-    return getAddressAxisEvidence(producer->getOperand(0), axis, depth + 1);
-  if (producer->getNumOperands() != 2 ||
-      !isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, triton::AddPtrOp>(
-          producer))
-    return {};
-  Value lhs = producer->getOperand(0);
-  Value rhs = producer->getOperand(1);
-  AddressAxisEvidence left = getAddressAxisEvidence(lhs, axis, depth + 1);
-  AddressAxisEvidence right = getAddressAxisEvidence(rhs, axis, depth + 1);
-  if (isa<arith::MulIOp>(producer)) {
-    const auto lhsConstant = getSplatInteger(lhs);
-    const auto rhsConstant = getSplatInteger(rhs);
-    if ((lhsConstant && *lhsConstant == 0) ||
-        (rhsConstant && *rhsConstant == 0))
-      return {0, false};
-    if (lhsConstant || rhsConstant) {
-      const int64_t factor = lhsConstant ? *lhsConstant : *rhsConstant;
-      const AddressAxisEvidence &other = lhsConstant ? right : left;
-      int64_t product;
-      if (other.step &&
-          !__builtin_mul_overflow(*other.step, factor, &product))
-        return {product, other.loaded};
-      return {std::nullopt, other.loaded};
-    }
-    return {left.step && right.step && *left.step == 0 && *right.step == 0
-                ? std::optional<int64_t>(0)
-                : std::nullopt,
-            left.loaded || right.loaded};
-  }
-  int64_t rightStep, sum;
-  const int64_t sign = isa<arith::SubIOp>(producer) ? -1 : 1;
-  if (left.step && right.step &&
-      !__builtin_mul_overflow(*right.step, sign, &rightStep) &&
-      !__builtin_add_overflow(*left.step, rightStep, &sum))
-    return {sum, left.loaded || right.loaded};
-  return {std::nullopt, left.loaded || right.loaded};
-}
-
-// Reject unsupported pointer expressions before calling the mutating
-// OffsetAnalysis parser.  Full axis classification happens on its result.
-static bool hasPotentialPartialContinuousAddress(Operation *operation) {
-  if (!operation || operation->getNumOperands() == 0)
-    return false;
-  Value pointer = operation->getOperand(0);
-  auto type = dyn_cast<RankedTensorType>(pointer.getType());
-  if (!type || !type.hasStaticShape() || type.getRank() < 2 ||
-      !isa_and_nonnull<triton::AddPtrOp>(pointer.getDefiningOp()))
-    return false;
-  const int64_t last = type.getRank() - 1;
-  if (type.getDimSize(last) != 1 &&
-      getAddressAxisEvidence(pointer, last).step != 1)
-    return false;
-  for (int64_t axis = 0; axis < type.getRank(); ++axis)
-    if (getAddressAxisEvidence(pointer, axis).loaded)
-      return true;
-  return false;
-}
-
 // OffsetAnalysis assumes tensor pointers originate from supported Triton
 // expressions and that tt.broadcast expands at least one dimension.
 static bool hasUnsupportedPointerInput(Value value,
@@ -356,6 +247,21 @@ analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
 }
 
 using PointerAxisInfo = triton::PtrOffsetInfo::AxisInfo;
+
+// Address summaries retain constant affine terms for the calibrated pricing
+// guards. Partial-tile classification uses PtrOffsetInfo directly instead.
+static std::optional<int64_t> getSplatInteger(Value value) {
+  if (auto splat = value.getDefiningOp<triton::SplatOp>())
+    value = splat.getSrc();
+  if (auto constant = value.getDefiningOp<arith::ConstantOp>()) {
+    if (auto integer = dyn_cast<IntegerAttr>(constant.getValue()))
+      return integer.getInt();
+    if (auto dense = dyn_cast<DenseIntElementsAttr>(constant.getValue()))
+      if (dense.isSplat())
+        return dense.getSplatValue<APInt>().getSExtValue();
+  }
+  return std::nullopt;
+}
 
 // Keep the provable affine term even when a loaded index contributes to the
 // same axis. Preserve provenance independently of the coarse pointer-axis
@@ -601,56 +507,41 @@ static AddressPatternSummary makeAddressSummary(
 }
 
 
+// Require exactly one structured axis at the tail and unstructured axes
+// throughout the prefix. Structured does not imply physical contiguity.
 static std::optional<PartialContinuousTile>
 classifyPartialContinuousTile(Operation *operation,
                               const triton::PtrOffsetInfo &pointerInfo) {
   auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
-  auto axes = pointerInfo.getStructured();
   if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2 ||
-      axes.size() != static_cast<size_t>(pointer.getRank()))
+      pointerInfo.getStructured().size() !=
+          static_cast<size_t>(pointer.getRank()) ||
+      !pointerInfo.isStructured(pointer.getRank() - 1))
     return std::nullopt;
 
-  int64_t elementsPerRow = 1;
-  int64_t suffixBegin = pointer.getRank();
-  for (int64_t axis = pointer.getRank(); axis-- > 0;) {
-    const int64_t extent = pointer.getDimSize(axis);
-    if (extent <= 0 ||
-        (extent > 1 &&
-         (axes[axis] != PointerAxisInfo::structured ||
-          getAddressAxisEvidence(pointerInfo.getOffset(), axis).step !=
-              elementsPerRow)))
-      break;
-    if (elementsPerRow > std::numeric_limits<int64_t>::max() / extent)
-      return std::nullopt;
-    elementsPerRow *= extent;
-    suffixBegin = axis;
-  }
-  if (suffixBegin == 0 || suffixBegin == pointer.getRank())
+  const int64_t lastAxis = pointer.getRank() - 1;
+  auto unstructuredDims = pointerInfo.getUnstructuredDims();
+  // The tail is already known to be structured, so every other axis must
+  // appear in the unstructured dimension list, including unit-size axes.
+  if (unstructuredDims.size() != static_cast<size_t>(lastAxis))
     return std::nullopt;
 
-  bool hasDiscreteLoadedAxis = false;
   double rows = 1.0;
-  for (int64_t axis = 0; axis < suffixBegin; ++axis) {
-    const int64_t extent = pointer.getDimSize(axis);
+  for (int64_t axis = 0; axis < pointer.getRank(); ++axis) {
+    int64_t extent = pointer.getDimSize(axis);
     if (extent <= 0)
       return std::nullopt;
-    if (extent > 1 && axes[axis] != PointerAxisInfo::unstructured)
-      return std::nullopt;
-    rows *= static_cast<double>(extent);
-    hasDiscreteLoadedAxis |=
-        extent > 1 &&
-        getAddressAxisEvidence(pointerInfo.getOffset(), axis).loaded;
+    if (axis < lastAxis)
+      rows *= static_cast<double>(extent);
   }
-  if (!hasDiscreteLoadedAxis)
-    return std::nullopt;
-  return PartialContinuousTile{rows, static_cast<double>(elementsPerRow)};
+  return PartialContinuousTile{
+      rows, static_cast<double>(pointer.getDimSize(lastAxis))};
 }
 
 static std::optional<PartialContinuousTile>
 getPartialContinuousTile(Operation *operation,
                          const StageMemoryPatternAnalysis *memoryPatterns) {
-  if (!operation || !isLoadedIndexDependentMemoryOp(operation) ||
-      operation->getNumOperands() == 0)
+  if (!operation || operation->getNumOperands() == 0)
     return std::nullopt;
   if (memoryPatterns)
     return memoryPatterns->lookup(operation);
@@ -658,6 +549,16 @@ getPartialContinuousTile(Operation *operation,
   if (!module)
     return std::nullopt;
   return StageMemoryPatternAnalysis(module).lookup(operation);
+}
+
+static bool isIndirectMemoryOperation(
+    Operation *operation, const StageMemoryPatternAnalysis *memoryPatterns) {
+  const bool hasUnstructuredAxes =
+      memoryPatterns &&
+      memoryPatterns->hasUnstructuredAxes(operation).value_or(false);
+  // Preserve loaded-index cases even when pointer analysis reports no
+  // unstructured axes. The indirect classification is the union of both.
+  return hasUnstructuredAxes || isLoadedIndexDependentMemoryOp(operation);
 }
 
 static bool hasTensorResult(Operation *operation) {
@@ -928,7 +829,7 @@ static void accumulateOneOperation(
       work.partialContinuousLoadBytes += bytes;
       work.partialContinuousLoadWarpInstructions += logicalMemoryGroups;
     } else if (name == "tt.gather" ||
-               isLoadedIndexDependentMemoryOp(operation)) {
+               isIndirectMemoryOperation(operation, memoryPatterns)) {
       work.indirectLoadBytes += bytes;
       work.indirectLoadTransactions += logicalMemoryGroups;
     }
@@ -952,7 +853,7 @@ static void accumulateOneOperation(
       work.partialContinuousStoreRows += partial->rows;
       work.partialContinuousStoreBytes += bytes;
       work.partialContinuousStoreWarpInstructions += logicalMemoryGroups;
-    } else if (isLoadedIndexDependentMemoryOp(operation)) {
+    } else if (isIndirectMemoryOperation(operation, memoryPatterns)) {
       work.indirectStoreBytes += bytes;
       work.indirectStoreTransactions += logicalMemoryGroups;
     }
@@ -1316,13 +1217,14 @@ static bool operationTreeContainsName(Operation *root, llvm::StringRef name) {
   return found;
 }
 
-static bool operationTreeContainsLoadedIndexMemory(Operation *root) {
-  bool found = root && isLoadedIndexDependentMemoryOp(root);
+static bool operationTreeContainsIndirectMemory(
+    Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
+  bool found = root && isIndirectMemoryOperation(root, memoryPatterns);
   if (!root || found)
     return found;
   root->walk([&](Operation *nested) {
     if (!found)
-      found = isLoadedIndexDependentMemoryOp(nested);
+      found = isIndirectMemoryOperation(nested, memoryPatterns);
   });
   return found;
 }
@@ -1339,11 +1241,11 @@ static bool operationTreeHasOnlyPartialContinuousMemory(
       hasOtherIndirect = true;
       return;
     }
-    if (!isLoadedIndexDependentMemoryOp(operation))
+    if (name != "tt.load" && name != "tt.store")
       return;
     if (getPartialContinuousTile(operation, memoryPatterns))
       hasPartial = true;
-    else
+    else if (isIndirectMemoryOperation(operation, memoryPatterns))
       hasOtherIndirect = true;
   });
   return hasPartial && !hasOtherIndirect;
@@ -1569,7 +1471,7 @@ static StageCostModelKind classifySemanticRoot(
     return StageCostModelKind::AtomicMemory;
   if (operationTreeHasOnlyPartialContinuousMemory(root, memoryPatterns))
     return StageCostModelKind::PartialContinuousTileMemory;
-  if (operationTreeContainsLoadedIndexMemory(root) ||
+  if (operationTreeContainsIndirectMemory(root, memoryPatterns) ||
       operationTreeHasAnyName(root, {"tt.gather"}))
     return StageCostModelKind::IndirectGatherMemory;
   if (operationTreeHasAnyName(root, {"scf.for", "scf.while"}))
@@ -1818,9 +1720,12 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
     const llvm::StringRef name = operation->getName().getStringRef();
     if (name == "tt.load")
       loads.push_back(operation);
-    if ((name == "tt.load" || name == "tt.store") &&
-        isLoadedIndexDependentMemoryOp(operation) &&
-        hasPotentialPartialContinuousAddress(operation))
+    if (name != "tt.load" && name != "tt.store")
+      return;
+    auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
+    if (pointer && pointer.hasStaticShape() && pointer.getRank() > 0 &&
+        isa_and_nonnull<triton::AddPtrOp>(
+            operation->getOperand(0).getDefiningOp()))
       candidates.push_back(operation);
   });
   if (candidates.empty() && loads.empty())
@@ -1833,6 +1738,8 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
   for (Operation *operation : candidates) {
     Operation *copy = mapping.lookupOrNull(operation);
     auto axes = analyzePointerAxes(copy, rewriter, offsetMap);
+    if (axes)
+      unstructuredMemory[operation] = axes->hasUnstructuredDim();
     tiles[operation] =
         axes ? classifyPartialContinuousTile(operation, *axes) : std::nullopt;
   }
@@ -2197,7 +2104,8 @@ llvm::Error StageFeatureAnalysis::analyze(
         if (!scalarLoad && !scalarStore) {
           hasMemory = true;
           const bool indirect =
-              isLoadedIndexDependentMemoryOp(operation) || name == "tt.gather";
+              isIndirectMemoryOperation(operation, memoryPatterns) ||
+              name == "tt.gather";
           facts.hasIndirectMemory |= indirect;
           hasContiguousMemory |= !indirect;
           if (indirect) {
