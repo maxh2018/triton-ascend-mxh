@@ -2567,3 +2567,97 @@ TEST(SimdSimtCostModelTest, IncompatibleDominantStructuresRequireStageSplit) {
   EXPECT_NE(llvm::toString(std::move(error)).find("requires_split"),
             std::string::npos);
 }
+
+TEST(SimdSimtCostModelTest, RandomStoreDtypeRankStateAndDomain) {
+  mlir::MLIRContext context;
+  context.allowUnregisteredDialects();
+  auto p = hardwareProfile();
+  p.target = "Ascend950PR/dav-c310";
+  auto evaluate = [](LogicalStage s, const HardwareProfile &profile) {
+    StagePartition partition;
+    partition.stages.push_back(s);
+    auto result = StageCostEvaluator().evaluate(partition, profile);
+    if (!result) llvm::report_fatal_error(llvm::Twine(llvm::toString(result.takeError())));
+    return result->stages.front().implementations;
+  };
+  for (int bits : {1, 8, 16, 32, 64}) {
+    for (int e : {8, 128, 256, 512, 2048}) {
+      for (int w : {1, 2, 4, 8, 16, 32, 64}) {
+        for (bool reuse : {false, true}) {
+          // Rank 1 and rank 3 exercise shape-independent pricing.
+          for (bool rank3 : {false, true}) {
+            llvm::SmallVector<int64_t> shape = rank3
+                ? llvm::SmallVector<int64_t>{2, 2, e / 4}
+                : llvm::SmallVector<int64_t>{e};
+            auto type = mlir::RankedTensorType::get(
+                shape, mlir::IntegerType::get(&context, bits));
+            mlir::Block block;
+            auto loc = mlir::UnknownLoc::get(&context);
+            auto ptr = block.addArgument(mlir::IndexType::get(&context), loc);
+            auto value = block.addArgument(type, loc);
+            mlir::OperationState state(loc, "tt.store");
+            state.addOperands({ptr, value});
+            auto *op = mlir::Operation::create(state);
+            LogicalStage s;
+            s.id = "random-store";
+            s.costModelKind = StageCostModelKind::IndirectGatherMemory;
+            s.simdLegal = s.simtLegal = true;
+            s.legalSimtFactors = {1};
+            s.operations = {op};
+            auto &a = s.workload;
+            a.maximumLogicalTensorElements = e;
+            a.storeBytes = a.indirectStoreBytes = std::max(1, bits / 8) * e;
+            a.storeWarpInstructions = a.indirectStoreTransactions = 1;
+            a.hasProvenIndirectStoreReuse = reuse;
+            mlir::ascend::AddressPatternSummary pattern;
+            pattern.memoryOp = "tt.store";
+            pattern.stageId = s.id;
+            pattern.dependsOnLoadedValue = true;
+            for (int64_t extent : shape) {
+              mlir::ascend::AddressAxisSummary axis;
+              axis.extent = extent;
+              axis.regularity = "opaque_loaded";
+              pattern.axes.push_back(axis);
+            }
+            a.addressPatterns = {pattern};
+            p.logicalWarpGroupCount = w;
+            p.simtLogicalTensorParallelismCapacity = w;
+            p.simdIndirectStoreModel = p.simtIndirectStoreModel = reuse
+                ? "random_store_no_fill_reuse_20261008"
+                : "random_store_no_fill_first_20261008";
+            auto fit = evaluate(s, p);
+            int g = bits <= 16 ? 0 : (bits == 32 ? 1 : 2);
+            const double beta[2][3] = {{152.8758408085307,162.87111975882544,161.07674811788297},
+                                      {68.58965840703893,69.21236829277788,64.45492494749357}};
+            const double b[2][3] = {{4.664669494263474,1.3935292896269613,2.0019961511928295},
+                                   {4.4638287665056,1.1754145133075695,2.076648173015399}};
+            const double d[2][3] = {{-25.526112727120946,-19.191779247532597,-35.604138981973364},
+                                   {-9.072748388478542,-20.88472709201174,-38.4225252759396}};
+            bool supported[] = {w == 1, e <= 512*w && (w == 1 || e >= 32*w)};
+            double expected[] = {(reuse ? 0 : 125.41805018354371) + beta[reuse][g]*e,
+              (reuse ? 70.0956884939018 : 382.1012717872757) + b[reuse][g]*e +
+              (reuse ? .8774560851959086 : .6797627278581438)*std::max(e-(reuse?128:256),0) +
+              d[reuse][g]*e/(32.0*w)};
+            for (unsigned i=0; i<2; ++i) {
+              if (supported[i]) {
+                EXPECT_EQ(fit[i].indirectStorePricing, p.simdIndirectStoreModel);
+                EXPECT_NEAR(fit[i].resources.store,
+                    expected[i]*fit[i].logicalTensorParallelismFactor, 1e-7);
+              } else EXPECT_EQ(fit[i].indirectStorePricing, "legacy_transactions");
+            }
+            if (reuse) {
+              a.hasProvenIndirectStoreReuse = false;
+              for (const auto &cost : evaluate(s,p))
+                EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
+              a.hasProvenIndirectStoreReuse = true;
+            }
+            a.addressPatterns[0].axes[0].regularity = "fixed_stride";
+            for (const auto &cost : evaluate(s,p))
+              EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
+            op->destroy();
+          }
+        }
+      }
+    }
+  }
+}

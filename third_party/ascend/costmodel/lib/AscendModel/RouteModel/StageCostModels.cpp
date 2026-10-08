@@ -275,6 +275,78 @@ static std::optional<double> calibratedIndirectLoad(
          0.19338028618547126 * elements * (type.getRank() == 1);
 }
 
+// Random, collision-free addresses; no target fill. Coefficients price the
+// measured A/B increment in SYS_CNT ticks, not a worst-case latency bound.
+static std::optional<double> randomDtypeIndirectStore(
+    const LogicalStage &stage, const HardwareProfile &hardware, bool simd,
+    bool reuse) {
+  const auto &work = stage.workload;
+  if (reuse && !work.hasProvenIndirectStoreReuse)
+    return std::nullopt;
+  Operation *op = stage.operations.front();
+  if (op->getName().getStringRef() != "tt.store" ||
+      op->getNumOperands() != 2 || op->getNumResults() != 0)
+    return std::nullopt;
+  auto type = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
+  if (!type || !type.hasStaticShape() || type.getRank() < 1 ||
+      type.getRank() > 8)
+    return std::nullopt;
+  Type element = type.getElementType();
+  if (!isa<IntegerType>(element) && !element.isF16() && !element.isBF16() &&
+      !element.isF32() && !(element.isF64() && !simd) &&
+      !isa<Float8E4M3FNType, Float8E5M2Type>(element))
+    return std::nullopt;
+  unsigned bits = element.getIntOrFloatBitWidth();
+  if (bits != 1 && bits != 8 && bits != 16 && bits != 32 && bits != 64)
+    return std::nullopt;
+  const auto &pattern = work.addressPatterns.front();
+  const int64_t elements = type.getNumElements();
+  const int64_t warps = hardware.logicalWarpGroupCount;
+  if (elements < 8 || elements > (simd ? 4096 : 16384) ||
+      (elements & (elements - 1)) || warps < 1 || warps > 64 ||
+      (warps & (warps - 1)) || (simd && warps != 1) ||
+      (!simd && (elements > 512 * warps ||
+                 (warps > 1 && elements < 32 * warps))) ||
+      pattern.memoryOp != "tt.store" || pattern.stageId != stage.id ||
+      !pattern.dependsOnLoadedValue ||
+      pattern.axes.size() != static_cast<size_t>(type.getRank()) ||
+      work.indirectStoreBytes != std::max(1u, bits / 8) * elements ||
+      work.indirectStoreTransactions <= 0)
+    return std::nullopt;
+  // The calibrated prior excludes broadcast/structured-prefix addresses.
+  for (int64_t axis = 0; axis < type.getRank(); ++axis) {
+    int64_t extent = type.getDimSize(axis);
+    if (extent < 1 || (extent & (extent - 1)) ||
+        pattern.axes[axis].extent != extent ||
+        pattern.axes[axis].regularity != "opaque_loaded")
+      return std::nullopt;
+  }
+  const unsigned group = bits <= 16 ? 0 : (bits == 32 ? 1 : 2);
+  if (simd) {
+    const double first[] = {152.8758408085307, 162.87111975882544,
+                            161.07674811788297};
+    const double warm[] = {68.58965840703893, 69.21236829277788,
+                           64.45492494749357};
+    return (reuse ? 0.0 : 125.41805018354371) +
+           (reuse ? warm[group] : first[group]) * elements;
+  }
+  const double firstSlope[] = {4.664669494263474, 1.3935292896269613,
+                               2.0019961511928295};
+  const double warmSlope[] = {4.4638287665056, 1.1754145133075695,
+                              2.076648173015399};
+  const double firstWarp[] = {-25.526112727120946, -19.191779247532597,
+                              -35.604138981973364};
+  const double warmWarp[] = {-9.072748388478542, -20.88472709201174,
+                             -38.4225252759396};
+  // q is a fitted scheduling correction, not a negative hardware latency.
+  return (reuse ? 70.0956884939018 : 382.1012717872757) +
+         (reuse ? warmSlope[group] : firstSlope[group]) * elements +
+         (reuse ? 0.8774560851959086 : 0.6797627278581438) *
+             std::max<int64_t>(elements - (reuse ? 128 : 256), 0) +
+         (reuse ? warmWarp[group] : firstWarp[group]) *
+             (elements / (32.0 * warps));
+}
+
 // Effective write plus required synchronization increment, not a whole Stage.
 // Address randomness and memory history are profile priors: neither is proven
 // by pointer analysis. In particular, the no-fill first fit has >20% outliers.
@@ -291,6 +363,14 @@ static std::optional<double> calibratedIndirectStore(
       stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1.0 ||
       work.partialContinuousStoreBytes != 0 || work.indirectLoadBytes != 0)
     return std::nullopt;
+  const auto &model = simd ? hardware.simdIndirectStoreModel
+                           : hardware.simtIndirectStoreModel;
+  if ((simd || implementation.mode == StageMode::SIMT) &&
+      (model == "random_store_no_fill_first_20261008" ||
+       model == "random_store_no_fill_reuse_20261008"))
+    return randomDtypeIndirectStore(
+        stage, hardware, simd,
+        model == "random_store_no_fill_reuse_20261008");
   if (simd) {
     if ((hardware.simdIndirectStoreModel !=
              "random_f32_store_no_fill_first_20261007" &&
@@ -857,11 +937,15 @@ bool HardwareProfile::isValid() const {
           (simdIndirectLoadModel == "random_f32_matched_ab_20261007" &&
            target == "Ascend950PR/dav-c310")) &&
          (simtIndirectStoreModel.empty() ||
-          (simtIndirectStoreModel == "random_f32_store_fill_ab_20261007" &&
+          ((simtIndirectStoreModel == "random_f32_store_fill_ab_20261007" ||
+            simtIndirectStoreModel == "random_store_no_fill_first_20261008" ||
+            simtIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectStoreModel.empty() ||
           ((simdIndirectStoreModel == "random_f32_store_no_fill_first_20261007" ||
-            simdIndirectStoreModel == "random_f32_store_no_fill_reuse_20261007") &&
+            simdIndirectStoreModel == "random_f32_store_no_fill_reuse_20261007" ||
+            simdIndirectStoreModel == "random_store_no_fill_first_20261008" ||
+            simdIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          logicalWarpGroupCount > 0 &&
          simtLogicalTensorParallelismCapacity > 0 &&

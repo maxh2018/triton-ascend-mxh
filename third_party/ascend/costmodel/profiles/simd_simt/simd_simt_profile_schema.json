@@ -20,23 +20,31 @@
   "properties": {
     "simt_indirect_store_model": {
       "enum": [
-        "random_f32_store_fill_ab_20261007"
+        "random_f32_store_fill_ab_20261007",
+        "random_store_no_fill_first_20261008",
+        "random_store_no_fill_reuse_20261008"
       ],
       "description": "Optional F32 random SIMT store A/B increment calibrated with target fill before calls; history is an experimental prior, not a proven runtime state. Unsupported domains use legacy rates."
     },
     "simd_indirect_store_model": {
       "enum": [
         "random_f32_store_no_fill_first_20261007",
-        "random_f32_store_no_fill_reuse_20261007"
+        "random_f32_store_no_fill_reuse_20261007",
+        "random_store_no_fill_first_20261008",
+        "random_store_no_fill_reuse_20261008"
       ],
       "description": "Optional no-extra-fill F32 SIMD store A/B increment. First has unresolved outliers; reuse assumes identical targets previously written twice. Profile selection is a state prior, not a cache proof. Unsupported domains use legacy rates."
     },
     "simd_indirect_load_model": {
-      "enum": ["random_f32_matched_ab_20261007"],
+      "enum": [
+        "random_f32_matched_ab_20261007"
+      ],
       "description": "Optional FP32 rank-1 random-address scalar load effective increment from matched-address A/B measurements, in SYS_CNT cycles. Unsupported workloads retain legacy pricing."
     },
     "simt_indirect_load_model": {
-      "enum": ["random_i32_six_term_20261007"],
+      "enum": [
+        "random_i32_six_term_20261007"
+      ],
       "description": "Optional Ascend950PR/dav-c310 random-address matched-ALU SIMT load fit in SYS_CNT cycles. Unsupported workloads retain legacy pricing; does not change SIMD."
     },
     "$schema": {
