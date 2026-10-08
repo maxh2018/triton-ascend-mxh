@@ -1902,6 +1902,54 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
   EXPECT_DOUBLE_EQ(payload->workload.indirectLoadTransactions, 0.0);
 }
 
+TEST(SimdSimtCostModelTest, LoadedScalarIndexRemainsIndirect) {
+  for (bool store : {false, true}) {
+    std::string source = partialContinuousTileIR(8, 8, 1, store);
+    size_t begin = source.find("        %index = tt.load");
+    size_t end = source.find("        %index2d =", begin);
+    ASSERT_NE(begin, std::string::npos);
+    ASSERT_NE(end, std::string::npos);
+    // A loaded scalar is uniform across both axes. Pointer analysis reports
+    // no unstructured axes, but the original loaded-index rule still applies.
+    source.replace(begin, end - begin,
+                   "        %shift = tt.load %indices : !tt.ptr<i32>\n"
+                   "        %index = tt.splat %shift : i32 -> tensor<8xi32>\n");
+    mlir::MLIRContext context;
+    context.getOrLoadDialect<mlir::arith::ArithDialect>();
+    context.getOrLoadDialect<mlir::func::FuncDialect>();
+    context.getOrLoadDialect<mlir::triton::TritonDialect>();
+    auto module = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+    ASSERT_TRUE(module);
+    auto partition = StagePartitioner().partition(
+        *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
+    if (!partition)
+      FAIL() << llvm::toString(partition.takeError());
+    bool sawPayload = false;
+    for (const LogicalStage &stage : partition->stages)
+      for (mlir::Operation *operation : stage.operations) {
+        if (operation->getName().getStringRef() !=
+            (store ? "tt.store" : "tt.load"))
+          continue;
+        auto type = mlir::dyn_cast<mlir::RankedTensorType>(
+            operation->getOperand(0).getType());
+        if (!type || type.getShape() != llvm::ArrayRef<int64_t>({8, 8}))
+          continue;
+        sawPayload = true;
+        EXPECT_TRUE(mlir::ascend::isLoadedIndexDependentMemoryOp(operation));
+        EXPECT_EQ(stage.costModelKind, StageCostModelKind::IndirectGatherMemory);
+        EXPECT_TRUE(stage.features.hasIndirectMemory);
+        EXPECT_FALSE(stage.features.hasPartialContinuousMemory);
+        EXPECT_DOUBLE_EQ(store ? stage.workload.indirectStoreBytes
+                               : stage.workload.indirectLoadBytes,
+                         256.0);
+        EXPECT_DOUBLE_EQ(store ? stage.workload.partialContinuousStoreRows
+                               : stage.workload.partialContinuousLoadRows,
+                         0.0);
+      }
+    EXPECT_TRUE(sawPayload);
+  }
+}
+
 TEST(SimdSimtCostModelTest, PartialContinuousStageAlwaysUsesSerialCost) {
   LogicalStage stage = logicalStage(
       "partial", StageCostModelKind::PartialContinuousTileMemory,

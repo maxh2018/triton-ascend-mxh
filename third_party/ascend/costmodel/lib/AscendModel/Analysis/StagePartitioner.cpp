@@ -283,13 +283,14 @@ getPartialContinuousTile(Operation *operation,
   return StageMemoryPatternAnalysis(module).lookup(operation);
 }
 
-static bool isUnstructuredMemoryOperation(
+static bool isIndirectMemoryOperation(
     Operation *operation, const StageMemoryPatternAnalysis *memoryPatterns) {
-  if (memoryPatterns)
-    if (auto unstructured = memoryPatterns->hasUnstructuredAxes(operation))
-      return *unstructured;
-  // Keep the loaded-index fallback only when pointer analysis is unavailable.
-  return isLoadedIndexDependentMemoryOp(operation);
+  const bool hasUnstructuredAxes =
+      memoryPatterns &&
+      memoryPatterns->hasUnstructuredAxes(operation).value_or(false);
+  // Preserve loaded-index cases even when pointer analysis reports no
+  // unstructured axes. The indirect classification is the union of both.
+  return hasUnstructuredAxes || isLoadedIndexDependentMemoryOp(operation);
 }
 
 static bool hasTensorResult(Operation *operation) {
@@ -560,7 +561,7 @@ static void accumulateOneOperation(
       work.partialContinuousLoadBytes += bytes;
       work.partialContinuousLoadWarpInstructions += logicalMemoryGroups;
     } else if (name == "tt.gather" ||
-               isUnstructuredMemoryOperation(operation, memoryPatterns)) {
+               isIndirectMemoryOperation(operation, memoryPatterns)) {
       work.indirectLoadBytes += bytes;
       work.indirectLoadTransactions += logicalMemoryGroups;
     }
@@ -584,7 +585,7 @@ static void accumulateOneOperation(
       work.partialContinuousStoreRows += partial->rows;
       work.partialContinuousStoreBytes += bytes;
       work.partialContinuousStoreWarpInstructions += logicalMemoryGroups;
-    } else if (isUnstructuredMemoryOperation(operation, memoryPatterns)) {
+    } else if (isIndirectMemoryOperation(operation, memoryPatterns)) {
       work.indirectStoreBytes += bytes;
       work.indirectStoreTransactions += logicalMemoryGroups;
     }
@@ -948,14 +949,14 @@ static bool operationTreeContainsName(Operation *root, llvm::StringRef name) {
   return found;
 }
 
-static bool operationTreeContainsUnstructuredMemory(
+static bool operationTreeContainsIndirectMemory(
     Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
-  bool found = root && isUnstructuredMemoryOperation(root, memoryPatterns);
+  bool found = root && isIndirectMemoryOperation(root, memoryPatterns);
   if (!root || found)
     return found;
   root->walk([&](Operation *nested) {
     if (!found)
-      found = isUnstructuredMemoryOperation(nested, memoryPatterns);
+      found = isIndirectMemoryOperation(nested, memoryPatterns);
   });
   return found;
 }
@@ -976,7 +977,7 @@ static bool operationTreeHasOnlyPartialContinuousMemory(
       return;
     if (getPartialContinuousTile(operation, memoryPatterns))
       hasPartial = true;
-    else if (isUnstructuredMemoryOperation(operation, memoryPatterns))
+    else if (isIndirectMemoryOperation(operation, memoryPatterns))
       hasOtherIndirect = true;
   });
   return hasPartial && !hasOtherIndirect;
@@ -1202,7 +1203,7 @@ static StageCostModelKind classifySemanticRoot(
     return StageCostModelKind::AtomicMemory;
   if (operationTreeHasOnlyPartialContinuousMemory(root, memoryPatterns))
     return StageCostModelKind::PartialContinuousTileMemory;
-  if (operationTreeContainsUnstructuredMemory(root, memoryPatterns) ||
+  if (operationTreeContainsIndirectMemory(root, memoryPatterns) ||
       operationTreeHasAnyName(root, {"tt.gather"}))
     return StageCostModelKind::IndirectGatherMemory;
   if (operationTreeHasAnyName(root, {"scf.for", "scf.while"}))
@@ -1826,7 +1827,7 @@ llvm::Error StageFeatureAnalysis::analyze(
         if (!scalarLoad && !scalarStore) {
           hasMemory = true;
           const bool indirect =
-              isUnstructuredMemoryOperation(operation, memoryPatterns) ||
+              isIndirectMemoryOperation(operation, memoryPatterns) ||
               name == "tt.gather";
           facts.hasIndirectMemory |= indirect;
           hasContiguousMemory |= !indirect;
