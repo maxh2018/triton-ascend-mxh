@@ -239,8 +239,8 @@ analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
   return found->second;
 }
 
-// The legacy kind name refers to a structured tail with at least one
-// unstructured prefix axis, not to physically contiguous addresses.
+// Require exactly one structured axis at the tail and unstructured axes
+// throughout the prefix. Structured does not imply physical contiguity.
 static std::optional<PartialContinuousTile>
 classifyPartialContinuousTile(Operation *operation,
                               const triton::PtrOffsetInfo &pointerInfo) {
@@ -251,24 +251,23 @@ classifyPartialContinuousTile(Operation *operation,
       !pointerInfo.isStructured(pointer.getRank() - 1))
     return std::nullopt;
 
+  const int64_t lastAxis = pointer.getRank() - 1;
   auto unstructuredDims = pointerInfo.getUnstructuredDims();
-  if (unstructuredDims.empty())
+  // The tail is already known to be structured, so every other axis must
+  // appear in the unstructured dimension list, including unit-size axes.
+  if (unstructuredDims.size() != static_cast<size_t>(lastAxis))
     return std::nullopt;
 
-  // UnstructureConversion expands only unstructured dimensions. Structured
-  // dimensions in the prefix remain in each slice alongside the tail.
   double rows = 1.0;
-  double elementsPerRow = 1.0;
   for (int64_t axis = 0; axis < pointer.getRank(); ++axis) {
     int64_t extent = pointer.getDimSize(axis);
     if (extent <= 0)
       return std::nullopt;
-    if (llvm::is_contained(unstructuredDims, axis))
+    if (axis < lastAxis)
       rows *= static_cast<double>(extent);
-    else
-      elementsPerRow *= static_cast<double>(extent);
   }
-  return PartialContinuousTile{rows, elementsPerRow};
+  return PartialContinuousTile{
+      rows, static_cast<double>(pointer.getDimSize(lastAxis))};
 }
 
 static std::optional<PartialContinuousTile>

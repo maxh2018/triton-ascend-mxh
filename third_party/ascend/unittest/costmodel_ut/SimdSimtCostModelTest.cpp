@@ -1720,7 +1720,7 @@ TEST(SimdSimtCostModelTest, PartialStructuredStoreAndNonunitStride) {
     EXPECT_NE(stage.costModelKind, StageCostModelKind::PartialContinuousTileMemory);
 }
 
-TEST(SimdSimtCostModelTest, PartialStructuredPrefixDoesNotRequireLoadedIndex) {
+TEST(SimdSimtCostModelTest, PartialUnstructuredPrefixDoesNotRequireLoadedIndex) {
   for (bool store : {false, true}) {
     std::string source = partialContinuousTileIR(8, 8, 2, store);
     size_t begin = source.find("        %index = tt.load");
@@ -1755,7 +1755,7 @@ TEST(SimdSimtCostModelTest, PartialStructuredPrefixDoesNotRequireLoadedIndex) {
   }
 }
 
-TEST(SimdSimtCostModelTest, PartialContinuousTwoAxisSuffix) {
+TEST(SimdSimtCostModelTest, PartialStructuredTailRequiresAllPrefixAxesUnstructured) {
   mlir::MLIRContext context;
   context.getOrLoadDialect<mlir::arith::ArithDialect>();
   context.getOrLoadDialect<mlir::triton::TritonDialect>();
@@ -1815,17 +1815,29 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
   if (!partition)
     FAIL() << llvm::toString(partition.takeError());
-  const LogicalStage *payload = nullptr;
-  for (const LogicalStage &stage : partition->stages)
-    if (stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory)
-      payload = &stage;
+  auto findPayload = [](const StagePartition &partition)
+      -> const LogicalStage * {
+    for (const LogicalStage &stage : partition.stages)
+      for (mlir::Operation *operation : stage.operations) {
+        if (operation->getName().getStringRef() != "tt.load" ||
+            operation->getNumResults() != 1)
+          continue;
+        auto type = mlir::dyn_cast<mlir::RankedTensorType>(
+            operation->getResult(0).getType());
+        if (type && type.getShape() == llvm::ArrayRef<int64_t>({2, 4, 8}))
+          return &stage;
+      }
+    return nullptr;
+  };
+  const LogicalStage *payload = findPayload(*partition);
   ASSERT_NE(payload, nullptr);
-  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 2.0);
-  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadBytes, 2.0 * 4.0 * 8.0 * 4.0);
-  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadWarpInstructions, 2.0);
+  // [U, S, S]: a second structured suffix axis excludes the partial kind.
+  EXPECT_EQ(payload->costModelKind, StageCostModelKind::IndirectGatherMemory);
+  EXPECT_FALSE(payload->features.hasPartialContinuousMemory);
+  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 0.0);
+  EXPECT_DOUBLE_EQ(payload->workload.indirectLoadBytes, 256.0);
 
-  // A structured outer axis is allowed before an unstructured middle axis.
-  // Only the middle axis is expanded; the outer and tail axes stay in a slice.
+  // [S, U, S]: a structured outer axis also excludes the partial kind.
   auto replaceOnce = [&](llvm::StringRef oldText, llvm::StringRef newText) {
     size_t position = source.find(oldText.str());
     ASSERT_NE(position, std::string::npos);
@@ -1860,23 +1872,12 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
       *crossedModule, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
   if (!crossed)
     FAIL() << llvm::toString(crossed.takeError());
-  bool sawPayload = false;
-  for (const LogicalStage &stage : crossed->stages)
-    for (mlir::Operation *operation : stage.operations) {
-      if (operation->getName().getStringRef() != "tt.load" ||
-          operation->getNumResults() != 1)
-        continue;
-      auto type = mlir::dyn_cast<mlir::RankedTensorType>(
-          operation->getResult(0).getType());
-      if (!type || type.getShape() != llvm::ArrayRef<int64_t>({2, 4, 8}))
-        continue;
-      sawPayload = true;
-      EXPECT_EQ(stage.costModelKind,
-                StageCostModelKind::PartialContinuousTileMemory);
-      EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 4.0);
-      EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadWarpInstructions, 4.0);
-    }
-  EXPECT_TRUE(sawPayload);
+  payload = findPayload(*crossed);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(payload->costModelKind, StageCostModelKind::IndirectGatherMemory);
+  EXPECT_FALSE(payload->features.hasPartialContinuousMemory);
+  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 0.0);
+  EXPECT_DOUBLE_EQ(payload->workload.indirectLoadBytes, 256.0);
 
   // With both prefix axes unstructured, both expand and each structured
   // slice contains the final 8 elements.
@@ -1890,23 +1891,15 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
       StagePartitionerOptions{});
   if (!twoAxisPartition)
     FAIL() << llvm::toString(twoAxisPartition.takeError());
-  bool sawTwoAxisPayload = false;
-  for (const LogicalStage &stage : twoAxisPartition->stages)
-    for (mlir::Operation *operation : stage.operations) {
-      if (operation->getName().getStringRef() != "tt.load" ||
-          operation->getNumResults() != 1)
-        continue;
-      auto type = mlir::dyn_cast<mlir::RankedTensorType>(
-          operation->getResult(0).getType());
-      if (!type || type.getShape() != llvm::ArrayRef<int64_t>({2, 4, 8}))
-        continue;
-      sawTwoAxisPayload = true;
-      EXPECT_EQ(stage.costModelKind,
-                StageCostModelKind::PartialContinuousTileMemory);
-      EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 8.0);
-      EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadBytes, 256.0);
-    }
-  EXPECT_TRUE(sawTwoAxisPayload);
+  payload = findPayload(*twoAxisPartition);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(payload->costModelKind,
+            StageCostModelKind::PartialContinuousTileMemory);
+  EXPECT_TRUE(payload->features.hasPartialContinuousMemory);
+  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 8.0);
+  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadBytes, 256.0);
+  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadWarpInstructions, 8.0);
+  EXPECT_DOUBLE_EQ(payload->workload.indirectLoadTransactions, 0.0);
 }
 
 TEST(SimdSimtCostModelTest, PartialContinuousStageAlwaysUsesSerialCost) {
