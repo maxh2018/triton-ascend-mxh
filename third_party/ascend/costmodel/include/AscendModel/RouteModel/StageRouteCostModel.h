@@ -54,6 +54,8 @@ struct StageModelFeatures {
   bool hasPointerInduction = false;
   bool hasContiguousMemory = false;
   bool hasIndirectMemory = false;
+  /// Loaded-index outer axes with a proven unit-stride contiguous suffix.
+  bool hasPartialContinuousMemory = false;
   bool hasAtomicMemory = false;
   bool hasReduction = false;
   bool hasPrefixScan = false;
@@ -154,6 +156,14 @@ struct StageWorkload {
   double indirectStoreBytes = 0.0;
   double indirectLoadTransactions = 0.0;
   double indirectStoreTransactions = 0.0;
+  /// Direct-memory work summed once per discrete contiguous row.  These are
+  /// subsets of the direct load/store totals, not additional resources.
+  double partialContinuousLoadRows = 0.0;
+  double partialContinuousStoreRows = 0.0;
+  double partialContinuousLoadBytes = 0.0;
+  double partialContinuousStoreBytes = 0.0;
+  double partialContinuousLoadWarpInstructions = 0.0;
+  double partialContinuousStoreWarpInstructions = 0.0;
   std::vector<AtomicWorkload> atomicWorkloads;
   std::vector<ReductionWorkload> reductionWorkloads;
   /// Maximum width of one logical tensor operation in this Stage. Unlike
