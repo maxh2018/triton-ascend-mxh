@@ -11,7 +11,7 @@ Optional profile fields select versioned models:
 
 ```json
 "simt_indirect_load_model": "random_i32_six_term_20261007",
-"simd_indirect_load_model": "random_f32_matched_ab_20261007"
+"simd_indirect_load_model": "random_dtype_matched_ab_20261008"
 ```
 
 Absent switches and unsupported workloads retain legacy pricing. JSON reports
@@ -58,61 +58,74 @@ The six-term simplification retained 357/360 historical test inputs within
 20% (MAPE 5.06%, maximum 25.79%). It was examined after test-set comparison;
 this is not a fresh blind-test claim for the simplified equation.
 
-## SIMD equation and baseline audit
+## SIMD dtype/rank equation (2026-10-08)
+
+The David profile now selects `random_dtype_matched_ab_20261008`.
+With E = payload tensor elements, b = bytes per element and r = tensor rank:
 
 ```text
-T = 83.56748010753823 * N
+T = beta_small32 * E    if b == 4 and r == 1 and E <= 16
+T = beta_regular * E    otherwise within the guarded domain
+beta_small32 = 49.57621548794853
+beta_regular = 81.94869549595556
 ```
 
-Domain: one FP32 rank-one loaded-index `tt.load`, N in
-{8,16,32,64,128,256,512}. This is **not** the older whole-scalar-loop equation
-`61.72 + 96.52*N`.
+Values are effective SYS_CNT/system_cycle increments per element, not
+isolated opcode latencies. No warp division or runtime-index feature is used.
+INT32 E16 instruction traces show unrolled scalar GM loads with overlapping
+execution intervals; INT32 E32 uses a loop. INT8 E16 also unrolls but lacks
+the same overlap. The tiny-32-bit coefficient therefore represents measured
+grouping/scheduling effects, not a universal hardware threshold.
 
-The rank-two extension uses the same coefficient only for E=R*C in
-{32,64,128,256,512}, C in {4,8}, a loaded-index inner axis, and either a
-loaded-index outer axis or known outer stride 4096. All axis extents must
-match the load type. Wider columns retain legacy pricing: real-device
-counterexamples prevent an unconditional rank-two extension.
+Guarded domain: one mask-free loaded-index `tt.load` in
+`IndirectGatherMemory`, rank 1--5, power-of-two non-unit extents, E=4--2048.
+The Stage may also own the load's address/shape producers; it need not contain
+only one operation. Those helpers retain their normal resource charges.
+Rank two additionally requires E>=32 and C=4--128. Supported TTIR result
+types are i8/i16/i32/i64, f16/bf16/f32, f8E4M3FN and f8E5M2. Triton bool
+loads normalize to i8; raw i1 is not admitted. The float8e4b15 experiment
+uses i8 TTIR plus a raw-byte host-pointer ABI, not a stock FP8 launcher.
+FP64 and other unmeasured FP8 formats retain legacy pricing.
 
-The new rank-two campaign measured 44 shape/category combinations and 1056
-random inputs (50688 launches). The unchanged rank-one coefficient passes
-1005/1056 overall, MAPE 6.35%, maximum 42.17%. Restricting to C=4/8 gives
-480/480, MAPE 1.90%, maximum 19.20%. Six larger-column-pool controls add 137
-inputs; the narrow-column controls pass 48/48, bringing the enabled domain
-to 528/528. This domain was narrowed after inspecting the results, not
-established by a fresh blind test. The campaigns do not guarantee arbitrary
-runtime address distributions. Wider-column exploratory refits were not
-adopted.
+The whole pointer must depend on a loaded index and every summarized extent
+must match the type. An axis may be opaque/opaque_loaded, or a positive proven
+fixed stride on an outer axis. Reshape-erased per-axis provenance (`opaque`)
+does not invalidate the independently proven whole-pointer dependency.
+A structured tail or computed_nonaffine axis is not forced into this fit.
+These are bounded generalization guards, not a claim that every combination
+in the Cartesian product has been measured. Rank 6--8 remains excluded;
+the existing classifier's rank gate is unchanged.
 
-Rank-two payload and baseline come from each real two-dimensional Triton
-kernel's lowered scalar loops. The timer starts after index DMA completion
-and ends after the outer scalar loop and barrier, before output DMA. The
-baseline preserves full addresses via the same hash as the rank-one study.
-The new campaign verifies every output and loaded binary hash and archives
-LLVM IR; it does not add a final-ISA simulator audit for rank two.
+The main matrix planned 514 configurations: 493 measured and 21 compiler
+failures. Main splits: 283 train, 48 development, 90 test, 48 warp controls,
+24 high-rank controls; eight random inputs/configuration. Another 45 tiny
+boundary configurations were collected. Payload addresses sample random
+unique elements without sorting; matrix, fixed-outer/loaded-inner and
+loaded-outer/loaded-inner templates are represented. This is an explicit
+random-scattered prior, not a compiler proof or worst-case bound.
 
-The baseline preserves UB index loads, address computation, UB result stores
-and loop structure by writing a fold of the full address instead of loading
-the GM value. Actual N32 instruction traces confirm 32 index loads and 32 UB
-stores in both versions, with 32 GM loads only in the payload. The baseline
-also emits extra address/bitwise ALU instructions. A second minimal baseline
-on N8/N32/N512 changes the load difference by at most 5.37% of the primary
-label. Thus this is an effective incremental cost with measured baseline
-sensitivity, not an isolated opcode latency.
+A and B derive from the same real Triton lowering. B replaces only the
+payload GM load by a fold of its complete address; it retains index reads,
+address dependencies, loop structure and same-width UB output. The timer
+surrounds the outer payload loop, after index materialization and before
+output DMA. A-B is an effective increment: extra baseline ALU and changed
+scheduling cannot be perfectly cancelled. Earlier FP32 baseline sensitivity
+was at most 5.37% of the primary label.
 
-840 random inputs, 40320 raw samples; 288 training, 144 development, 408 test.
-Inputs sample N unique indices without replacement from pools of
-`max(32768,256*N) * {1,4,16}`. Each pool uses seeds 2026100800..2026100839.
-N128 is held out entirely; other sizes use the first 16 seeds for training,
-next 8 for development and last 16 for testing. For each A/B input, take the
-median of six retained launches after two warmups, then the median of three
-rounds. Subtract baseline from payload. Alternate A/B order.
+After freezing both coefficients, new random seeds on 90 existing
+configurations produced **720/720 inputs within 20%**, MAPE 4.03%, P95 11.45%,
+maximum 16.48%. This is new-input validation, not unseen-shape validation.
+Retrospective old-test results are 720/720, MAPE 3.77%, maximum 18.90%;
+five old-training inputs remain slightly above 20% (maximum 20.14%).
+No failing input was removed for model accuracy. On the shared device a
+measurement-only >5% cross-round spread rule triggered whole-configuration
+repeats; median aggregation across nine rounds retained all raw slow samples
+and did not change the frozen coefficients.
 
-Relative-error weighted least squares fits training data only. Development
-selects between slope-only and intercept-plus-slope, preferring the simpler
-model when its maximum error is at most 10%. Test: **408/408 within 20%**,
-MAPE 1.56%, P95 4.45%, maximum 11.04%. These are per-input differential-label
-errors, not complete-Stage or arbitrary-address guarantees.
+The prior `random_f32_matched_ab_20261007` switch retains its original
+83.56748010753823*E behavior and narrow domain for profile reproducibility.
+It is no longer the David default. Historical wide-column counterexamples
+are not erased or combined with the new measurement protocol.
 
 ## Shared limits and TTIR information
 
@@ -129,13 +142,24 @@ a compiler proof or a worst-case bound. No Stage classification is changed.
 
 ## Validation status
 
-Independent C++ execution checked 137 SIMT shape/warp configurations and seven
-SIMD sizes, including replacement, iteration accounting, other-resource
-preservation, duplicate-dependency suppression and out-of-domain fallback.
-Repository regression tests cover both mode integrations and TTIR axis-summary
-provenance. Full backend/GTest execution remains blocked in the calibration
-environment by existing external NPU-IR header/build configuration issues;
-do not interpret independent tests as a full compiler rebuild or deployment.
+The current PR's pricing, profile-loader and partitioner translation units
+were compiled and linked against existing generated/dependency objects.
+All 58 repository `SimdSimtCostModel` GTests passed, including old-model
+compatibility, dtype/rank rates, resource preservation, duplicate-dependency
+suppression, iteration accounting, warp independence and guarded fallback.
+The previous independent 137 SIMT / 7 rank-one SIMD / 44 rank-two checks also
+remain passing.
+
+End-to-end source-level replay of 530 archived real TTIR programs using the
+new David profile admitted all 506 rank-1--5 payload loads and left all 24
+rank-6--8 controls on legacy pricing. Every admitted real Stage owns address
+helpers as well as the single target load; the integration deliberately
+accepts this structure rather than requiring a one-operation Stage.
+A profile with only the new switch disabled confirmed unchanged Stage
+workloads, all non-load resources, serial/iteration accounting and all SIMT
+implementation costs. C++ load values matched the frozen two-rate equation.
+This is a real classification/profile/pricing replay, not a complete compiler
+rebuild or installed-wheel deployment.
 
 Raw timing, binaries and simulator files are retained in the calibration
 workspace rather than committed into this source PR. No compiler wheel was

@@ -19,8 +19,8 @@
   ],
   "properties": {
     "simd_indirect_load_model": {
-      "enum": ["random_f32_matched_ab_20261007"],
-      "description": "Optional FP32 rank-1 random-address scalar load effective increment from matched-address A/B measurements, in SYS_CNT cycles. Unsupported workloads retain legacy pricing."
+      "enum": ["random_f32_matched_ab_20261007", "random_dtype_matched_ab_20261008"],
+      "description": "Optional Ascend950PR SIMD random-address scalar load effective increment from matched-address A/B measurements, in SYS_CNT cycles. The 20261008 model extends validated integer/floating-point types and ranks 1-5 with two per-element rates; the 20261007 FP32 model remains reproducible. Unsupported workloads retain legacy pricing."
     },
     "simt_indirect_load_model": {
       "enum": ["random_i32_six_term_20261007"],

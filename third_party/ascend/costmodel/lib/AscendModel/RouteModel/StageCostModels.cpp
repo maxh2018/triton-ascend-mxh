@@ -166,21 +166,84 @@ static std::optional<double> calibratedSimdIndirectLoad(
     const LogicalStage &stage, const HardwareProfile &hardware,
     const StageImplementation &implementation) {
   const auto &work = stage.workload;
-  if (hardware.simdIndirectLoadModel != "random_f32_matched_ab_20261007" ||
+  const bool dtypeRankModel =
+      hardware.simdIndirectLoadModel == "random_dtype_matched_ab_20261008";
+  if ((!dtypeRankModel &&
+       hardware.simdIndirectLoadModel != "random_f32_matched_ab_20261007") ||
       hardware.target != "Ascend950PR/dav-c310" ||
       implementation.mode != StageMode::SIMD ||
       implementation.superblockFactor != 1 ||
       stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
-      stage.operations.size() != 1 || work.addressPatterns.size() != 1 ||
+      (!dtypeRankModel && stage.operations.size() != 1) ||
+      work.addressPatterns.size() != 1 ||
       work.estimatedSpillTransactions != 0 || work.predicateElements != 0 ||
       stage.features.activeLaneRatio != 1.0 ||
       work.partialContinuousLoadBytes != 0 || work.indirectStoreBytes != 0)
     return std::nullopt;
-  Operation *op = stage.operations.front();
-  if (op->getName().getStringRef() != "tt.load" ||
+  // Real Stage partitioning owns the payload's splat/addptr/reshape producers
+  // too. Require one load, not one total operation; those independent helpers
+  // retain their normal resource charges. Old profiles keep their old guard.
+  Operation *op = nullptr;
+  for (Operation *candidate : stage.operations) {
+    if (candidate->getName().getStringRef() != "tt.load")
+      continue;
+    if (op)
+      return std::nullopt;
+    op = candidate;
+  }
+  if (!op ||
       op->getNumResults() != 1 || op->getNumOperands() != 1)
     return std::nullopt;
   auto type = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (dtypeRankModel) {
+    if (!type || !type.hasStaticShape() || type.getRank() < 1 ||
+        type.getRank() > 5)
+      return std::nullopt;
+    Type element = type.getElementType();
+    const bool supportedInteger = element.isInteger(8) || element.isInteger(16) ||
+                                  element.isInteger(32) || element.isInteger(64);
+    if (!supportedInteger &&
+        !isa<Float16Type, BFloat16Type, Float32Type, Float8E4M3FNType,
+             Float8E5M2Type>(element))
+      return std::nullopt;
+    // Triton bool loads are normalized to i8 before this analysis. A raw i1
+    // load is not covered: its packed TTIR byte count differs from that ABI.
+    const int64_t elements = type.getNumElements();
+    const int64_t elementBytes = element.getIntOrFloatBitWidth() / 8;
+    const auto &pattern = work.addressPatterns.front();
+    if (elements < 4 || elements > 2048 || (elements & (elements - 1)) ||
+        work.indirectLoadBytes != elementBytes * elements ||
+        work.indirectLoadTransactions <= 0 || pattern.memoryOp != "tt.load" ||
+        pattern.stageId != stage.id || !pattern.dependsOnLoadedValue ||
+        pattern.axes.size() != static_cast<size_t>(type.getRank()))
+      return std::nullopt;
+    for (int64_t axis = 0; axis < type.getRank(); ++axis) {
+      const auto &summary = pattern.axes[axis];
+      const int64_t extent = type.getDimSize(axis);
+      if (extent < 2 || (extent & (extent - 1)) || summary.extent != extent)
+        return std::nullopt;
+      // Reshape can erase per-axis loaded provenance without erasing the
+      // whole pointer's loaded-index dependency. The measured inner-index
+      // templates produce "opaque" here; do not reject them as direct loads.
+      const bool opaque = summary.regularity == "opaque_loaded" ||
+                          summary.regularity == "opaque";
+      const bool fixedOuter = axis + 1 < type.getRank() &&
+                              summary.regularity == "fixed_stride" &&
+                              summary.knownStride > 0;
+      if (!opaque && !fixedOuter)
+        return std::nullopt;
+    }
+    if (type.getRank() == 2 &&
+        (elements < 32 || type.getDimSize(1) < 4 || type.getDimSize(1) > 128))
+      return std::nullopt;
+    // Effective matched-address load increment in SYS_CNT/system_cycles.
+    // The tiny 32-bit path has measured unrolling/grouping differences; it is
+    // not a universal hardware latency threshold. No SIMD warp division.
+    const bool small32 =
+        elementBytes == 4 && type.getRank() == 1 && elements <= 16;
+    return elements * (small32 ? 49.57621548794853 : 81.94869549595556);
+  }
+  // Keep the previously versioned FP32 model reproducible for old profiles.
   if (!type || !type.hasStaticShape() ||
       (type.getRank() != 1 && type.getRank() != 2) ||
       !type.getElementType().isF32())
@@ -761,7 +824,8 @@ bool HardwareProfile::isValid() const {
           (simtIndirectLoadModel == "random_i32_six_term_20261007" &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectLoadModel.empty() ||
-          (simdIndirectLoadModel == "random_f32_matched_ab_20261007" &&
+          ((simdIndirectLoadModel == "random_f32_matched_ab_20261007" ||
+            simdIndirectLoadModel == "random_dtype_matched_ab_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          logicalWarpGroupCount > 0 &&
          simtLogicalTensorParallelismCapacity > 0 &&

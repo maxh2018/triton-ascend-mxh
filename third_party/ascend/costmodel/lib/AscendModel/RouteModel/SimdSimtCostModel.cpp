@@ -436,7 +436,8 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
   if (root->get("simd_indirect_load_model")) {
     hardware.simdIndirectLoadModel =
         reader.string(*root, "simd_indirect_load_model", "profile");
-    if (hardware.simdIndirectLoadModel != "random_f32_matched_ab_20261007")
+    if (hardware.simdIndirectLoadModel != "random_f32_matched_ab_20261007" &&
+        hardware.simdIndirectLoadModel != "random_dtype_matched_ab_20261008")
       reader.setError("unsupported simd_indirect_load_model");
   }
   if (microbench && llvm::StringRef(hardware.target) != microbench->getTarget())
