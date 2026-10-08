@@ -185,6 +185,11 @@ struct StageWorkload {
   /// priced independently.  Atomic RMW work is never included in store totals.
   double indirectLoadBytes = 0.0;
   double indirectStoreBytes = 0.0;
+  /// Evidence contract for the optional store reuse fit: the identical target
+  /// addresses were written at least twice without intervening state changes.
+  /// No current pointer analysis proves this; default false, never inferred
+  /// from loop iteration count, allocation, or a profile model name alone.
+  bool hasProvenIndirectStoreReuse = false;
   double indirectLoadTransactions = 0.0;
   double indirectStoreTransactions = 0.0;
   /// Direct-memory work summed once per discrete contiguous row.  These are
@@ -249,6 +254,7 @@ struct StageResourceCycles {
 struct StageImplementationCost {
   StageImplementation implementation;
   std::string indirectLoadPricing = "legacy_transactions";
+  std::string indirectStorePricing = "legacy_transactions";
   double totalCycles = 0.0;
   /// Intra-program SIMT warp groups used to price logical tensor work. This is
   /// distinct from SuperBlock, which groups independent logical programs.

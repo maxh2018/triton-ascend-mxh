@@ -1,7 +1,9 @@
 {
   "$schema": "./simd_simt_profile_schema.json",
   "schema_version": 12,
-  "profile_version": "david-v100-simd-simt-20261008-v30-simd-indirect-dtype-rank",
+  "profile_version": "david-v100-simd-simt-20261009-v31-indirect-load-store",
+  "simt_indirect_store_model": "random_store_no_fill_first_20261008",
+  "simd_indirect_store_model": "random_store_no_fill_first_20261008",
   "simt_indirect_load_model": "random_i32_six_term_20261007",
   "simd_indirect_load_model": "random_dtype_matched_ab_20261008",
   "target": "Ascend950PR/dav-c310",

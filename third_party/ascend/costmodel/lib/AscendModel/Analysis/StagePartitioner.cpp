@@ -1716,10 +1716,13 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
 
   SmallVector<Operation *> candidates;
   SmallVector<Operation *> loads;
+  SmallVector<Operation *> stores;
   module.walk([&](Operation *operation) {
     const llvm::StringRef name = operation->getName().getStringRef();
     if (name == "tt.load")
       loads.push_back(operation);
+    if (name == "tt.store")
+      stores.push_back(operation);
     if (name != "tt.load" && name != "tt.store")
       return;
     auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
@@ -1728,7 +1731,7 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
             operation->getOperand(0).getDefiningOp()))
       candidates.push_back(operation);
   });
-  if (candidates.empty() && loads.empty())
+  if (candidates.empty() && loads.empty() && stores.empty())
     return;
 
   IRMapping mapping;
@@ -1748,6 +1751,13 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
     auto axes = analyzePointerAxes(mapping.lookupOrNull(operation), rewriter,
                                    offsetMap);
     summaries[operation] = makeAddressSummary(operation, indexed.index(), axes);
+  }
+  // Store calibration consumes the same per-axis facts. Keep load ordinals
+  // unchanged; -1 marks summaries that do not describe a tt.load.
+  for (Operation *operation : stores) {
+    auto axes = analyzePointerAxes(mapping.lookupOrNull(operation), rewriter,
+                                   offsetMap);
+    summaries[operation] = makeAddressSummary(operation, -1, axes);
   }
 }
 
@@ -2283,7 +2293,8 @@ llvm::Error StageWorkloadAnalysis::analyze(
     if (memoryPatterns)
       for (Operation *root : stage.operations)
         root->walk([&](Operation *operation) {
-          if (operation->getName().getStringRef() != "tt.load")
+          const auto name = operation->getName().getStringRef();
+          if (name != "tt.load" && name != "tt.store")
             return;
           if (const auto *summary = memoryPatterns->lookupSummary(operation)) {
             work.addressPatterns.push_back(*summary);

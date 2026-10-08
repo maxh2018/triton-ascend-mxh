@@ -345,6 +345,7 @@ llvm::json::Object StageWorkload::toJSON() const {
       storeWarpInstructions - indirectStoreTransactions;
   result["indirect_load_bytes_per_iteration"] = indirectLoadBytes;
   result["indirect_store_bytes_per_iteration"] = indirectStoreBytes;
+  result["has_proven_indirect_store_reuse"] = hasProvenIndirectStoreReuse;
   result["indirect_load_transactions_per_iteration"] = indirectLoadTransactions;
   result["indirect_store_transactions_per_iteration"] =
       indirectStoreTransactions;
@@ -449,6 +450,7 @@ llvm::json::Object StageImplementationCost::toJSON() const {
   return llvm::json::Object{
       {"implementation", implementation.toJSON()},
       {"indirect_load_pricing", indirectLoadPricing},
+      {"indirect_store_pricing", indirectStorePricing},
       {"total_system_cycles", totalCycles},
       {"logical_tensor_parallelism_factor", logicalTensorParallelismFactor},
       {"resource_system_cycles", resources.toJSON()}};
