@@ -41,9 +41,10 @@
     },
     "simt_indirect_load_model": {
       "enum": [
-        "random_i32_six_term_20261007"
+        "random_i32_six_term_20261007",
+        "random_dtype_six_term_20261008"
       ],
-      "description": "Optional Ascend950PR/dav-c310 random-address matched-ALU SIMT load fit in SYS_CNT cycles. Unsupported workloads retain legacy pricing; does not change SIMD."
+      "description": "Optional Ascend950PR/dav-c310 random-address matched-ALU SIMT load fit in SYS_CNT cycles. The 20261008 model shares coefficients by 1/2/4/8-byte storage width, ranks 1-5, W=1-64, q=1/2/4, H<=2, and admits address helpers alongside one target load. The 20261007 INT32 model is explicit historical compatibility only. Unsupported workloads retain legacy pricing; does not change SIMD."
     },
     "$schema": {
       "type": "string",

@@ -186,6 +186,8 @@ struct HardwareProfile {
   std::string profileVersion;
   std::string target;
   /// Explicit opt-in to a target-specific random-address, matched-ALU fit.
+  /// The dtype model selects by storage width, not integer/floating names;
+  /// the INT32-only identifier is retained for old-profile reproducibility.
   /// Empty retains the legacy transaction model.
   std::string simtIndirectLoadModel;
   /// FP32 scalar-loop matched-address differential, random-address prior.

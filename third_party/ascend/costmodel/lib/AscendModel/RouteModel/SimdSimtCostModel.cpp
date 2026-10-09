@@ -430,7 +430,8 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
   if (root->get("simt_indirect_load_model")) {
     hardware.simtIndirectLoadModel =
         reader.string(*root, "simt_indirect_load_model", "profile");
-    if (hardware.simtIndirectLoadModel != "random_i32_six_term_20261007")
+    if (hardware.simtIndirectLoadModel != "random_i32_six_term_20261007" &&
+        hardware.simtIndirectLoadModel != "random_dtype_six_term_20261008")
       reader.setError("unsupported simt_indirect_load_model");
   }
   if (root->get("simd_indirect_load_model")) {

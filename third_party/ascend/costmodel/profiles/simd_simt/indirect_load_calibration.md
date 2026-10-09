@@ -10,7 +10,7 @@ CostModel `system_cycle`; no compute-clock conversion is applied.
 Optional profile fields select versioned models:
 
 ```json
-"simt_indirect_load_model": "random_i32_six_term_20261007",
+"simt_indirect_load_model": "random_dtype_six_term_20261008",
 "simd_indirect_load_model": "random_dtype_matched_ab_20261008"
 ```
 
@@ -29,34 +29,55 @@ applies normally.
 ## SIMT equation
 
 Let E be the number of payload elements, W the compile-time warp count,
-q=E/(32W), and C the last extent for rank two (C=32 for rank one). Define:
+q=E/(32W), and C the last extent for rank >=2 (C=32 for rank one). Define:
 
 ```text
 H = max(4*q/C - 2, 0)
 S = 1 if E <= 128 else 0
 D = max(log2(32/C), 0)
 F = 1 for rank one, otherwise 0
-T = a + b*E + c*H + d*S + e*E*D + f*E*F
+T = alpha + beta*E + sigma*S + phi*E*F + gamma*H + nu*E*D
 ```
 
-| Coefficient | SYS_CNT-domain value |
-|---|---:|
-| a | 62.930686069640686 |
-| b | 1.5502588407166296 |
-| c | 141.51064147799983 |
-| d | 47.159408679724294 |
-| e | 0.05304437217224805 |
-| f | 0.19338028618547126 |
+| Storage bytes | alpha | beta | sigma | phi | gamma | nu |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 7.617911783542814 | 1.5780971099377332 | 92.18952965944916 | 0.19387737354356369 | 0 | 0.049471659398567715 |
+| 2 | 12.456944150614481 | 1.6732132663368477 | 95.13859585355112 | 0.11214618741568584 | 5.634318857353958 | 0.026588037490546692 |
+| 4 | 50.71936539506111 | 1.693396365504775 | 60.38681262899275 | 0.09265123974451413 | 82.91193957489877 | 0.026814982781878355 |
+| 8 | 96.09572807125711 | 1.937402636239715 | 24.962585867214496 | 0.20099293498091206 | 41.8669299352394 | 0.03855485734655757 |
 
-Domain: one INT32 `tt.load` owned by an `IndirectGatherMemory` Stage;
-W in {1,2,4,8,16,32,64}, q in {1,2,4}; rank one with a loaded-index axis,
-or rank two with both axes loaded-index-derived, or fixed outer stride 4096
-and loaded inner index. Rank-two C is in {4,8,16,32,64,128}, with at least two
-rows. Computed-nonaffine `outer_square` is excluded.
+INT32, UINT32 and FP32 use the same 4-byte row; integer signedness and floating
+names do not select separate coefficients. Supported result types are
+i8/i16/i32/i64, f16/bf16/f32/f64, f8E4M3FN and f8E5M2. Raw i1 and unmeasured
+FP8 formats are not admitted; language-normalized bool loads use i8.
 
-The six-term simplification retained 357/360 historical test inputs within
-20% (MAPE 5.06%, maximum 25.79%). It was examined after test-set comparison;
-this is not a fresh blind-test claim for the simplified equation.
+Domain: exactly one target `tt.load` owned by an `IndirectGatherMemory` Stage;
+independent address/shape helpers are allowed and retain their existing costs.
+The target load may be nested in an owned explicit SIMT scope; inspect the
+owned regions rather than assuming every owned operation is itself a load.
+W in {1,2,4,8,16,32,64}, q in {1,2,4}, rank 1--5, static power-of-two extents
+each >=2; C in {2,4,8,16,32,64,128} for rank >=2 and H<=2. C=2,q=4 gives H=6,
+has measured counterexamples and remains on legacy pricing. The whole pointer
+must depend on loaded indices; its tail must be opaque/opaque_loaded. Prefix
+axes may be opaque/opaque_loaded or proven positive fixed strides. Prefix
+structure does not create an independent inner coefficient group. Computed
+non-affine axes, structured tails and multiple target loads are not admitted.
+
+This is a frozen pure-random prior fit, not an assertion that the real indices
+are random. H and E*D are baseline-mismatch compensations, not proven GM row
+or short-axis hardware penalties. The 128-element small-load threshold is
+empirical within q=1/2/4, not a universal hardware discontinuity.
+
+The retained independent dtype/rank test data give 583/584 inputs within 20%,
+MAPE 4.22%, maximum 21.09%. A separate 244-configuration coverage matrix gives
+1948/1952 within 20%, MAPE 3.92%, maximum 28.80%. These remain measured A/B
+proxy labels, not independently timed whole Stages. The guarded production
+domain excludes four C=2,q=4 configurations, not their archived observations.
+
+The prior `random_i32_six_term_20261007` profile identifier retains its original
+INT32 rank-1/2 coefficients and single-operation guard solely for reproducible
+old profiles. It is no longer the David default or a dtype-specific exception
+inside the four-width model.
 
 ## SIMD dtype/rank equation (2026-10-08)
 
@@ -142,24 +163,36 @@ a compiler proof or a worst-case bound. No Stage classification is changed.
 
 ## Validation status
 
-The current PR's pricing, profile-loader and partitioner translation units
-were compiled and linked against existing generated/dependency objects.
-All 58 repository `SimdSimtCostModel` GTests passed, including old-model
-compatibility, dtype/rank rates, resource preservation, duplicate-dependency
-suppression, iteration accounting, warp independence and guarded fallback.
-The previous independent 137 SIMT / 7 rank-one SIMD / 44 rank-two checks also
-remain passing.
+The PR's pricing, profile-loader and partitioner translation units were
+compiled and linked against existing generated/dependency objects. All 65
+`SimdSimtCostModel` GTests passed, including 1155 dtype/W/q/rank combinations
+inside the new SIMT test, owned-region loads, old-profile compatibility,
+resource preservation, dependency suppression, iteration accounting and
+guarded fallback.
 
-End-to-end source-level replay of 530 archived real TTIR programs using the
-new David profile admitted all 506 rank-1--5 payload loads and left all 24
-rank-6--8 controls on legacy pricing. Every admitted real Stage owns address
-helpers as well as the single target load; the integration deliberately
-accepts this structure rather than requiring a one-operation Stage.
-A profile with only the new switch disabled confirmed unchanged Stage
-workloads, all non-load resources, serial/iteration accounting and all SIMT
-implementation costs. C++ load values matched the frozen two-rate equation.
+705 real SIMT TTIR programs (461 dtype/rank and 244 coverage configurations)
+were replayed through the current profile, partitioner and pricing. All 701
+in-domain programs matched the frozen four-width equation, and all four H=6
+controls stayed on legacy pricing. Their non-load resources, classification
+and SIMD/store pricing matched a switch-disabled profile. Their original
+real-device A/B labels were used to recompute the accuracy quoted above;
+no refit or new device measurements were performed for integration.
+
+An additional 530 real TTIR programs checked SIMD and multi-operation Stages:
+506 SIMD payload loads still matched the two-rate equation; 24 rank-6--8
+controls stayed on fallback. The new SIMT model admitted 229 multi-operation
+Stages and preserved all their independent resources. 54 pointer-analysis
+classification cases and all costs in 40 real scatter programs were unchanged.
+
+Cross-dataset re-evaluation of 137 historical INT32 configurations (1644
+random inputs) gives 1608/1644 within 20%, MAPE 4.77%, maximum 27.69% with
+the unified 4-byte coefficients. The old specialized model gave 1644/1644,
+MAPE 4.44% on these same inputs. This regression is retained explicitly;
+unifying parameter groups is not a claim that a broader fit beats every
+specialized fit. It does not justify a hidden INT32 exception in the default.
+
 This is a real classification/profile/pricing replay, not a complete compiler
-rebuild or installed-wheel deployment.
+rebuild, newly blind accuracy test, or installed-wheel deployment.
 
 Raw timing, binaries and simulator files are retained in the calibration
 workspace rather than committed into this source PR. No compiler wheel was

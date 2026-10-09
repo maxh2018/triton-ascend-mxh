@@ -4,6 +4,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -277,12 +278,115 @@ static std::optional<double> calibratedSimdIndirectLoad(
   return 83.56748010753823 * elements;
 }
 
+static std::optional<double> calibratedSimtDtypeIndirectLoad(
+    const LogicalStage &stage, const HardwareProfile &hardware,
+    const StageImplementation &implementation) {
+  const auto &work = stage.workload;
+  if (hardware.target != "Ascend950PR/dav-c310" ||
+      implementation.mode != StageMode::SIMT ||
+      implementation.superblockFactor != 1 ||
+      stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
+      work.addressPatterns.size() != 1 ||
+      work.estimatedSpillTransactions != 0 || work.predicateElements != 0 ||
+      stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1.0 ||
+      work.partialContinuousLoadBytes != 0 || work.indirectStoreBytes != 0)
+    return std::nullopt;
+  // Partitioned Stages also own address/shape producers. Their resources stay
+  // independent; the fit replaces only the single target indirect load.
+  // Explicit SIMT regions may be represented by their owning scope op. Walk
+  // owned regions too; counting only top-level ops misses real Triton loads.
+  llvm::SmallPtrSet<Operation *, 4> loads;
+  for (Operation *owned : stage.operations)
+    owned->walk([&](Operation *candidate) {
+      if (candidate->getName().getStringRef() == "tt.load")
+        loads.insert(candidate);
+    });
+  if (loads.size() != 1)
+    return std::nullopt;
+  Operation *op = *loads.begin();
+  if (op->getNumResults() != 1 || op->getNumOperands() != 1)
+    return std::nullopt;
+  auto type = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!type || !type.hasStaticShape() || type.getRank() < 1 ||
+      type.getRank() > 5)
+    return std::nullopt;
+  Type element = type.getElementType();
+  const bool supportedInteger = element.isInteger(8) || element.isInteger(16) ||
+                                element.isInteger(32) || element.isInteger(64);
+  if (!supportedInteger &&
+      !isa<Float16Type, BFloat16Type, Float32Type, Float64Type,
+           Float8E4M3FNType, Float8E5M2Type>(element))
+    return std::nullopt;
+  // Raw i1 is not a one-byte TTIR load; normalized bool loads use i8.
+  const int64_t elementBytes = element.getIntOrFloatBitWidth() / 8;
+  const auto &pattern = work.addressPatterns.front();
+  if (pattern.memoryOp != "tt.load" || pattern.stageId != stage.id ||
+      !pattern.dependsOnLoadedValue ||
+      pattern.axes.size() != static_cast<size_t>(type.getRank()))
+    return std::nullopt;
+  for (int64_t axis = 0; axis < type.getRank(); ++axis) {
+    const auto &summary = pattern.axes[axis];
+    const int64_t extent = type.getDimSize(axis);
+    const bool opaque = summary.regularity == "opaque_loaded" ||
+                        summary.regularity == "opaque";
+    const bool fixedOuter = axis + 1 < type.getRank() &&
+                            summary.regularity == "fixed_stride" &&
+                            summary.knownStride > 0;
+    if (extent < 2 || (extent & (extent - 1)) || summary.extent != extent ||
+        (!opaque && !fixedOuter))
+      return std::nullopt;
+  }
+  const int64_t warps = hardware.logicalWarpGroupCount;
+  if (warps < 1 || warps > 64 || (warps & (warps - 1)))
+    return std::nullopt;
+  const double elements = type.getNumElements();
+  const double q = elements / (32.0 * warps);
+  const int64_t columns = type.getRank() == 1 ? 32 : type.getShape().back();
+  if ((q != 1 && q != 2 && q != 4) || columns < 2 || columns > 128 ||
+      work.indirectLoadBytes != elementBytes * elements ||
+      work.indirectLoadTransactions <= 0)
+    return std::nullopt;
+  const double h = std::max(4 * q / columns - 2, 0.0);
+  // C=2,q=4 has H=6, beyond the calibrated H<=2 range and with measured
+  // counterexamples. Do not silently extrapolate this baseline correction.
+  if (h > 2)
+    return std::nullopt;
+  const double d = std::max(std::log2(32.0 / columns), 0.0);
+  struct Coefficients {
+    double fixed, elements, small, flat, rowBaseline, narrowBaseline;
+  };
+  // Frozen pure-random, four-storage-width calibration. INT32/UINT32/FP32
+  // share the 4-byte row; dtype names do not select historical coefficients.
+  static constexpr Coefficients coefficients[] = {
+      {7.617911783542814, 1.5780971099377332, 92.18952965944916,
+       0.19387737354356369, 0.0, 0.049471659398567715},
+      {12.456944150614481, 1.6732132663368477, 95.13859585355112,
+       0.11214618741568584, 5.634318857353958, 0.026588037490546692},
+      {50.71936539506111, 1.693396365504775, 60.38681262899275,
+       0.09265123974451413, 82.91193957489877, 0.026814982781878355},
+      {96.09572807125711, 1.937402636239715, 24.962585867214496,
+       0.20099293498091206, 41.8669299352394, 0.03855485734655757}};
+  const auto &c = coefficients[elementBytes == 1   ? 0
+                               : elementBytes == 2 ? 1
+                               : elementBytes == 4 ? 2
+                                                   : 3];
+  // Effective A/B increment in SYS_CNT/system_cycles, already including W
+  // warp parallelism. H and E*D compensate baseline mismatch, not GM latency.
+  return c.fixed + c.elements * elements + c.small * (elements <= 128) +
+         c.flat * elements * (type.getRank() == 1) +
+         c.rowBaseline * h + c.narrowBaseline * elements * d;
+}
+
 static std::optional<double> calibratedIndirectLoad(
     const LogicalStage &stage, const HardwareProfile &hardware,
     const StageImplementation &implementation) {
   const auto &work = stage.workload;
   if (implementation.mode == StageMode::SIMD)
     return calibratedSimdIndirectLoad(stage, hardware, implementation);
+  if (hardware.simtIndirectLoadModel == "random_dtype_six_term_20261008")
+    return calibratedSimtDtypeIndirectLoad(stage, hardware, implementation);
+  // Explicitly versioned compatibility model, not an INT32 exception inside
+  // the four-width model. Old profiles retain their coefficients and guards.
   if (hardware.simtIndirectLoadModel != "random_i32_six_term_20261007" ||
       hardware.target != "Ascend950PR/dav-c310" ||
       implementation.mode != StageMode::SIMT ||
@@ -1007,7 +1111,8 @@ bool StageModeProfile::isValid(StageMode mode) const {
 bool HardwareProfile::isValid() const {
   return !profileVersion.empty() && !target.empty() &&
          (simtIndirectLoadModel.empty() ||
-          (simtIndirectLoadModel == "random_i32_six_term_20261007" &&
+          ((simtIndirectLoadModel == "random_i32_six_term_20261007" ||
+            simtIndirectLoadModel == "random_dtype_six_term_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectLoadModel.empty() ||
           ((simdIndirectLoadModel == "random_f32_matched_ab_20261007" ||
