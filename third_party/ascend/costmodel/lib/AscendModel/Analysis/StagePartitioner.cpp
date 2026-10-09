@@ -265,7 +265,7 @@ struct AxisTerm {
 };
 
 static SmallVector<AxisTerm> unknownAxisTerms(Value value,
-                                               llvm::StringRef reason) {
+                                              llvm::StringRef reason) {
   SmallVector<AxisTerm> result;
   if (auto type = dyn_cast<RankedTensorType>(value.getType()))
     for (int64_t extent : type.getShape()) {
@@ -286,8 +286,8 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
     // A scalar block argument is uniform over tensor axes; a tensor block
     // argument may vary arbitrarily and cannot be treated as stride zero.
     for (AxisTerm &term : result)
-      term.reason = result.empty() ? "uniform_block_argument" :
-                    "opaque_tensor_block_argument";
+      term.reason = result.empty() ? "uniform_block_argument"
+                                   : "opaque_tensor_block_argument";
     return result;
   }
   const llvm::StringRef name = producer->getName().getStringRef();
@@ -354,12 +354,13 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
     return result;
   }
   if ((name == "arith.extsi" || name == "arith.extui" ||
-       name == "arith.index_cast") && producer->getNumOperands() == 1) {
+       name == "arith.index_cast") &&
+      producer->getNumOperands() == 1) {
     auto source = getAxisTerms(producer->getOperand(0), depth + 1);
     return source.size() == rank ? source : result;
   }
-  if ((name == "arith.addi" || name == "arith.subi" ||
-       name == "arith.muli" || name == "tt.addptr") &&
+  if ((name == "arith.addi" || name == "arith.subi" || name == "arith.muli" ||
+       name == "tt.addptr") &&
       producer->getNumOperands() == 2) {
     auto left = getAxisTerms(producer->getOperand(0), depth + 1);
     auto right = getAxisTerms(producer->getOperand(1), depth + 1);
@@ -392,8 +393,9 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
         } else {
           const bool leftVaries = left[i].fixedStride != 0 || left[i].loaded ||
                                   left[i].nonAffine || left[i].runtimeStride;
-          const bool rightVaries = right[i].fixedStride != 0 || right[i].loaded ||
-                                   right[i].nonAffine || right[i].runtimeStride;
+          const bool rightVaries = right[i].fixedStride != 0 ||
+                                   right[i].loaded || right[i].nonAffine ||
+                                   right[i].runtimeStride;
           if (leftVaries && rightVaries) {
             dst.fixedStride = 0;
             dst.nonAffine = !dst.loaded;
@@ -418,11 +420,11 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
           dst.opaque = true;
           dst.reason = "stride_overflow";
         } else {
-          dst.reason = left[i].opaque ? left[i].reason :
-                       right[i].opaque ? right[i].reason :
-                       dst.loaded ? "loaded_plus_static_terms" :
-                       dst.nonAffine ? "computed_nonaffine_terms" :
-                       "affine_sum";
+          dst.reason = left[i].opaque    ? left[i].reason
+                       : right[i].opaque ? right[i].reason
+                       : dst.loaded      ? "loaded_plus_static_terms"
+                       : dst.nonAffine   ? "computed_nonaffine_terms"
+                                         : "affine_sum";
         }
       }
     }
@@ -435,17 +437,21 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
 
 static llvm::StringRef stringifyPointerAxis(PointerAxisInfo info) {
   switch (info) {
-  case PointerAxisInfo::scalar: return "scalar";
-  case PointerAxisInfo::scalarlike: return "scalarlike";
-  case PointerAxisInfo::structured: return "structured";
-  case PointerAxisInfo::unstructured: return "unstructured";
+  case PointerAxisInfo::scalar:
+    return "scalar";
+  case PointerAxisInfo::scalarlike:
+    return "scalarlike";
+  case PointerAxisInfo::structured:
+    return "structured";
+  case PointerAxisInfo::unstructured:
+    return "unstructured";
   }
   llvm_unreachable("unknown pointer axis classification");
 }
 
-static AddressPatternSummary makeAddressSummary(
-    Operation *operation, int64_t ordinal,
-    const std::optional<triton::PtrOffsetInfo> &pointerInfo) {
+static AddressPatternSummary
+makeAddressSummary(Operation *operation, int64_t ordinal,
+                   const std::optional<triton::PtrOffsetInfo> &pointerInfo) {
   AddressPatternSummary summary;
   summary.ttirLoadOrdinal = ordinal;
   summary.memoryOp = operation->getName().getStringRef().str();
@@ -471,16 +477,19 @@ static AddressPatternSummary makeAddressSummary(
     } else {
       const AxisTerm &term = terms[axis];
       output.knownStride = term.fixedStride;
-      output.provenance = term.loaded ? "loaded_value" :
-                          term.opaque ? "unknown" : "no_loaded_value";
-      output.hasUnknownComponent = term.loaded || term.nonAffine ||
-                                   term.runtimeStride || term.opaque;
-      output.regularity = term.opaque ? "opaque" :
-          term.nonAffine ? "computed_nonaffine" :
-          term.runtimeStride ? "uniform_runtime_stride" :
-          term.loaded && term.fixedStride != 0 ? "loaded_plus_fixed_stride" :
-          term.loaded ? "opaque_loaded" :
-          term.fixedStride != 0 ? "fixed_stride" : "constant_or_broadcast";
+      output.provenance = term.loaded   ? "loaded_value"
+                          : term.opaque ? "unknown"
+                                        : "no_loaded_value";
+      output.hasUnknownComponent =
+          term.loaded || term.nonAffine || term.runtimeStride || term.opaque;
+      output.regularity = term.opaque          ? "opaque"
+                          : term.nonAffine     ? "computed_nonaffine"
+                          : term.runtimeStride ? "uniform_runtime_stride"
+                          : term.loaded && term.fixedStride != 0
+                              ? "loaded_plus_fixed_stride"
+                          : term.loaded           ? "opaque_loaded"
+                          : term.fixedStride != 0 ? "fixed_stride"
+                                                  : "constant_or_broadcast";
       output.reason = term.reason;
     }
     summary.axes.push_back(std::move(output));
@@ -494,7 +503,6 @@ static AddressPatternSummary makeAddressSummary(
   }
   return summary;
 }
-
 
 // Require exactly one structured axis at the tail and unstructured axes
 // throughout the prefix. Structured does not imply physical contiguity.
@@ -540,8 +548,9 @@ getPartialContinuousTile(Operation *operation,
   return StageMemoryPatternAnalysis(module).lookup(operation);
 }
 
-static bool isIndirectMemoryOperation(
-    Operation *operation, const StageMemoryPatternAnalysis *memoryPatterns) {
+static bool
+isIndirectMemoryOperation(Operation *operation,
+                          const StageMemoryPatternAnalysis *memoryPatterns) {
   const bool hasUnstructuredAxes =
       memoryPatterns &&
       memoryPatterns->hasUnstructuredAxes(operation).value_or(false);
@@ -779,9 +788,9 @@ static AtomicWorkload getAtomicWorkload(Operation *operation) {
 static bool isScalarLoadOperation(Operation *op);
 static bool isScalarStoreOperation(Operation *op);
 
-static void accumulateOneOperation(
-    Operation *operation, StageWorkload &work,
-    const StageMemoryPatternAnalysis *memoryPatterns) {
+static void
+accumulateOneOperation(Operation *operation, StageWorkload &work,
+                       const StageMemoryPatternAnalysis *memoryPatterns) {
   if (!operation || operation->hasTrait<OpTrait::IsTerminator>())
     return;
   const llvm::StringRef name = operation->getName().getStringRef();
@@ -821,9 +830,8 @@ static void accumulateOneOperation(
     const double bytes = getValueBytes(value);
     const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
-        partial
-            ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
-            : std::ceil(getTypeElementCount(value.getType()) / 32.0);
+        partial ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
+                : std::ceil(getTypeElementCount(value.getType()) / 32.0);
     work.storeBytes += bytes;
     work.storeWarpInstructions += logicalMemoryGroups;
     if (partial) {
@@ -1424,8 +1432,9 @@ static double semanticRootEntryMultiplicity(Operation *root) {
 /// Classify one transitive semantic ownership unit.  This function consumes
 /// only TTIR structure; it does not inspect a kernel name, workload name,
 /// measured performance, or route score.
-static StageCostModelKind classifySemanticRoot(
-    Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
+static StageCostModelKind
+classifySemanticRoot(Operation *root,
+                     const StageMemoryPatternAnalysis *memoryPatterns) {
   if (root->hasAttr("ta.auto_blockify_v1.loop"))
     return StageCostModelKind::AutoBlockifyLoop;
   if (root->hasAttr("ta.auto_blockify_v1.schedule"))
@@ -1696,7 +1705,8 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
       stores.push_back(operation);
     if (name != "tt.load" && name != "tt.store")
       return;
-    auto pointer = dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
+    auto pointer =
+        dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
     if (pointer && pointer.hasStaticShape() && pointer.getRank() > 0 &&
         isa_and_nonnull<triton::AddPtrOp>(
             operation->getOperand(0).getDefiningOp()))
@@ -1941,8 +1951,7 @@ buildAnchorGroups(const ProgramStructure &structure,
   return groups;
 }
 
-llvm::Expected<StagePartition>
-StageBoundaryAnalysis::analyze(
+llvm::Expected<StagePartition> StageBoundaryAnalysis::analyze(
     const ProgramStructure &structure, const SimtAnchorPlan &anchorPlan,
     const StageMemoryPatternAnalysis *memoryPatterns) const {
   if (structure.rootOperations.empty())
@@ -1979,7 +1988,8 @@ StageBoundaryAnalysis::analyze(
     while (next < structure.rootOperations.size()) {
       Operation *candidate = structure.rootOperations[next];
       const int64_t candidateAnchorGroup = (*anchorGroups)[next];
-      const StageCostModelKind candidateKind = classifySemanticRoot(candidate, memoryPatterns);
+      const StageCostModelKind candidateKind =
+          classifySemanticRoot(candidate, memoryPatterns);
       const StageScheduleKind candidateSchedule =
           scheduleForSemanticRoot(candidate, candidateKind);
       const bool sameCompoundAnchor =

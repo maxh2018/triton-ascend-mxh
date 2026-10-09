@@ -112,9 +112,10 @@ materializeControlFlow(const LogicalStage &stage, StageMode mode,
 // Effective incremental latency of one indirect load (payload - matched ALU),
 // not a whole-Stage cost. The random-address prior is intentional: no runtime
 // indices or final ISA facts are inputs. Unsupported domains use legacy rates.
-static std::optional<double> calibratedSimdIndirectLoad(
-    const LogicalStage &stage, const HardwareProfile &hardware,
-    const StageImplementation &implementation) {
+static std::optional<double>
+calibratedSimdIndirectLoad(const LogicalStage &stage,
+                           const HardwareProfile &hardware,
+                           const StageImplementation &implementation) {
   const auto &work = stage.workload;
   const bool dtypeRankModel =
       hardware.simdIndirectLoadModel == "random_dtype_matched_ab_20261008";
@@ -141,8 +142,7 @@ static std::optional<double> calibratedSimdIndirectLoad(
       return std::nullopt;
     op = candidate;
   }
-  if (!op ||
-      op->getNumResults() != 1 || op->getNumOperands() != 1)
+  if (!op || op->getNumResults() != 1 || op->getNumOperands() != 1)
     return std::nullopt;
   auto type = dyn_cast<RankedTensorType>(op->getResult(0).getType());
   if (dtypeRankModel) {
@@ -150,11 +150,11 @@ static std::optional<double> calibratedSimdIndirectLoad(
         type.getRank() > 5)
       return std::nullopt;
     Type element = type.getElementType();
-    const bool supportedInteger = element.isInteger(8) || element.isInteger(16) ||
-                                  element.isInteger(32) || element.isInteger(64);
-    if (!supportedInteger &&
-        !isa<Float16Type, BFloat16Type, Float32Type, Float8E4M3FNType,
-             Float8E5M2Type>(element))
+    const bool supportedInteger =
+        element.isInteger(8) || element.isInteger(16) ||
+        element.isInteger(32) || element.isInteger(64);
+    if (!supportedInteger && !isa<Float16Type, BFloat16Type, Float32Type,
+                                  Float8E4M3FNType, Float8E5M2Type>(element))
       return std::nullopt;
     // Triton bool loads are normalized to i8 before this analysis. A raw i1
     // load is not covered: its packed TTIR byte count differs from that ABI.
@@ -203,9 +203,9 @@ static std::optional<double> calibratedSimdIndirectLoad(
   if (pattern.memoryOp != "tt.load" || pattern.stageId != stage.id ||
       !pattern.dependsOnLoadedValue ||
       pattern.axes.size() != static_cast<size_t>(type.getRank()) ||
-      pattern.axes.back().regularity != "opaque_loaded" ||
-      elements < 8 || elements > 512 ||
-      (elements & (elements - 1)) || work.indirectLoadBytes != 4 * elements ||
+      pattern.axes.back().regularity != "opaque_loaded" || elements < 8 ||
+      elements > 512 || (elements & (elements - 1)) ||
+      work.indirectLoadBytes != 4 * elements ||
       work.indirectLoadTransactions <= 0)
     return std::nullopt;
   for (int64_t axis = 0; axis < type.getRank(); ++axis)
@@ -227,9 +227,10 @@ static std::optional<double> calibratedSimdIndirectLoad(
   return 83.56748010753823 * elements;
 }
 
-static std::optional<double> calibratedSimtDtypeIndirectLoad(
-    const LogicalStage &stage, const HardwareProfile &hardware,
-    const StageImplementation &implementation) {
+static std::optional<double>
+calibratedSimtDtypeIndirectLoad(const LogicalStage &stage,
+                                const HardwareProfile &hardware,
+                                const StageImplementation &implementation) {
   const auto &work = stage.workload;
   if (hardware.target != "Ascend950PR/dav-c310" ||
       implementation.mode != StageMode::SIMT ||
@@ -276,8 +277,8 @@ static std::optional<double> calibratedSimtDtypeIndirectLoad(
   for (int64_t axis = 0; axis < type.getRank(); ++axis) {
     const auto &summary = pattern.axes[axis];
     const int64_t extent = type.getDimSize(axis);
-    const bool opaque = summary.regularity == "opaque_loaded" ||
-                        summary.regularity == "opaque";
+    const bool opaque =
+        summary.regularity == "opaque_loaded" || summary.regularity == "opaque";
     const bool fixedOuter = axis + 1 < type.getRank() &&
                             summary.regularity == "fixed_stride" &&
                             summary.knownStride > 0;
@@ -322,13 +323,14 @@ static std::optional<double> calibratedSimtDtypeIndirectLoad(
   // Effective A/B increment in SYS_CNT/system_cycles, already including W
   // warp parallelism. H and E*D compensate baseline mismatch, not GM latency.
   return c.fixed + c.elements * elements + c.small * (elements <= 128) +
-         c.flat * elements * (type.getRank() == 1) +
-         c.rowBaseline * h + c.narrowBaseline * elements * d;
+         c.flat * elements * (type.getRank() == 1) + c.rowBaseline * h +
+         c.narrowBaseline * elements * d;
 }
 
-static std::optional<double> calibratedIndirectLoad(
-    const LogicalStage &stage, const HardwareProfile &hardware,
-    const StageImplementation &implementation) {
+static std::optional<double>
+calibratedIndirectLoad(const LogicalStage &stage,
+                       const HardwareProfile &hardware,
+                       const StageImplementation &implementation) {
   const auto &work = stage.workload;
   if (implementation.mode == StageMode::SIMD)
     return calibratedSimdIndirectLoad(stage, hardware, implementation);
@@ -347,8 +349,8 @@ static std::optional<double> calibratedIndirectLoad(
       work.partialContinuousLoadBytes != 0 || work.indirectStoreBytes != 0)
     return std::nullopt;
   Operation *op = stage.operations.front();
-  if (op->getName().getStringRef() != "tt.load" ||
-      op->getNumResults() != 1 || op->getNumOperands() != 1)
+  if (op->getName().getStringRef() != "tt.load" || op->getNumResults() != 1 ||
+      op->getNumOperands() != 1)
     return std::nullopt;
   auto type = dyn_cast<RankedTensorType>(op->getResult(0).getType());
   if (!type || !type.hasStaticShape() || !type.getElementType().isInteger(32) ||
@@ -376,8 +378,8 @@ static std::optional<double> calibratedIndirectLoad(
   const double q = elements / (32.0 * warps);
   const int64_t columns = type.getRank() == 1 ? 32 : type.getDimSize(1);
   if ((q != 1 && q != 2 && q != 4) ||
-      (type.getRank() == 2 && type.getDimSize(0) < 2) ||
-      columns < 4 || columns > 128 || (columns & (columns - 1)) ||
+      (type.getRank() == 2 && type.getDimSize(0) < 2) || columns < 4 ||
+      columns > 128 || (columns & (columns - 1)) ||
       work.indirectLoadBytes != 4 * elements ||
       work.indirectLoadTransactions <= 0)
     return std::nullopt;
@@ -385,17 +387,17 @@ static std::optional<double> calibratedIndirectLoad(
   const double d = std::max(std::log2(32.0 / columns), 0.0);
   // SYS_CNT ticks are already CostModel system_cycles (no clock conversion).
   return 62.930686069640686 + 1.5502588407166296 * elements +
-         141.51064147799983 * h +
-         47.159408679724294 * (elements <= 128) +
+         141.51064147799983 * h + 47.159408679724294 * (elements <= 128) +
          0.05304437217224805 * elements * d +
          0.19338028618547126 * elements * (type.getRank() == 1);
 }
 
 // Random, collision-free addresses; no target fill. Coefficients price the
 // measured A/B increment in SYS_CNT ticks, not a worst-case latency bound.
-static std::optional<double> randomDtypeIndirectStore(
-    const LogicalStage &stage, const HardwareProfile &hardware, bool simd,
-    bool reuse) {
+static std::optional<double>
+randomDtypeIndirectStore(const LogicalStage &stage,
+                         const HardwareProfile &hardware, bool simd,
+                         bool reuse) {
   const auto &work = stage.workload;
   if (reuse && !work.hasProvenIndirectStoreReuse)
     return std::nullopt;
@@ -429,8 +431,8 @@ static std::optional<double> randomDtypeIndirectStore(
   if (elements < 8 || elements > (simd ? 4096 : 16384) ||
       (elements & (elements - 1)) || warps < 1 || warps > 64 ||
       (warps & (warps - 1)) || (simd && warps != 1) ||
-      (!simd && (elements > 512 * warps ||
-                 (warps > 1 && elements < 32 * warps))) ||
+      (!simd &&
+       (elements > 512 * warps || (warps > 1 && elements < 32 * warps))) ||
       pattern.memoryOp != "tt.store" || pattern.stageId != stage.id ||
       pattern.axes.size() != static_cast<size_t>(type.getRank()) ||
       work.indirectStoreBytes != std::max(1u, bits / 8) * elements ||
@@ -476,9 +478,10 @@ static std::optional<double> randomDtypeIndirectStore(
 // Effective write plus required synchronization increment, not a whole Stage.
 // Address randomness and memory history are profile priors: neither is proven
 // by pointer analysis. In particular, the no-fill first fit has >20% outliers.
-static std::optional<double> calibratedIndirectStore(
-    const LogicalStage &stage, const HardwareProfile &hardware,
-    const StageImplementation &implementation) {
+static std::optional<double>
+calibratedIndirectStore(const LogicalStage &stage,
+                        const HardwareProfile &hardware,
+                        const StageImplementation &implementation) {
   const auto &work = stage.workload;
   const bool simd = implementation.mode == StageMode::SIMD;
   if (hardware.target != "Ascend950PR/dav-c310" ||
@@ -489,14 +492,13 @@ static std::optional<double> calibratedIndirectStore(
       stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1.0 ||
       work.partialContinuousStoreBytes != 0 || work.indirectLoadBytes != 0)
     return std::nullopt;
-  const auto &model = simd ? hardware.simdIndirectStoreModel
-                           : hardware.simtIndirectStoreModel;
+  const auto &model =
+      simd ? hardware.simdIndirectStoreModel : hardware.simtIndirectStoreModel;
   if ((simd || implementation.mode == StageMode::SIMT) &&
       (model == "random_store_no_fill_first_20261008" ||
        model == "random_store_no_fill_reuse_20261008"))
     return randomDtypeIndirectStore(
-        stage, hardware, simd,
-        model == "random_store_no_fill_reuse_20261008");
+        stage, hardware, simd, model == "random_store_no_fill_reuse_20261008");
   // Preserve the historical FP32 model's original admission boundary.
   if (stage.operations.size() != 1)
     return std::nullopt;
@@ -513,8 +515,8 @@ static std::optional<double> calibratedIndirectStore(
     return std::nullopt;
   }
   Operation *op = stage.operations.front();
-  if (op->getName().getStringRef() != "tt.store" ||
-      op->getNumOperands() != 2 || op->getNumResults() != 0)
+  if (op->getName().getStringRef() != "tt.store" || op->getNumOperands() != 2 ||
+      op->getNumResults() != 0)
     return std::nullopt;
   auto type = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
   if (!type || !type.hasStaticShape() || !type.getElementType().isF32() ||
@@ -534,8 +536,8 @@ static std::optional<double> calibratedIndirectStore(
       return std::nullopt;
   const bool rankTwo = type.getRank() == 2;
   const int64_t columns = rankTwo ? type.getDimSize(1) : 32;
-  const bool inner = rankTwo &&
-                     pattern.axes.front().regularity == "fixed_stride";
+  const bool inner =
+      rankTwo && pattern.axes.front().regularity == "fixed_stride";
   if (rankTwo &&
       (type.getDimSize(0) < 2 ||
        (pattern.axes.front().regularity != "opaque_loaded" && !inner) ||
@@ -544,8 +546,8 @@ static std::optional<double> calibratedIndirectStore(
   if (simd) {
     // Exactly the measured shape domain. Row/column loaded and per-element
     // loaded templates share this slope; unsupported expressions fall back.
-    if ((!rankTwo && (elements < 8 || elements > 512 ||
-                      (elements & (elements - 1)))) ||
+    if ((!rankTwo &&
+         (elements < 8 || elements > 512 || (elements & (elements - 1)))) ||
         (rankTwo && ((elements != 32 && elements != 128 && elements != 512) ||
                      (columns != 4 && columns != 16 && columns != 64))))
       return std::nullopt;
@@ -571,8 +573,7 @@ static std::optional<double> calibratedIndirectStore(
   return 157.465336398077 + 2.046486341690834 * elements -
          13.874579575172818 * std::sqrt(static_cast<double>(elements)) +
          (-0.8540920211063882 - 0.4681840422126738 * q) * logW +
-         0.5780871675460912 * elements / columns -
-         15.490435818576909 * inner;
+         0.5780871675460912 * elements / columns - 15.490435818576909 * inner;
 }
 
 static StageResourceCycles mapWorkload(const LogicalStage &stage,
@@ -637,8 +638,9 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
   }
   resources.load += fittedLoad.value_or(
       work.indirectLoadTransactions / profile.indirectLoadTransactionsPerCycle);
-  resources.store += fittedStore.value_or(
-      work.indirectStoreTransactions / profile.indirectStoreTransactionsPerCycle);
+  resources.store +=
+      fittedStore.value_or(work.indirectStoreTransactions /
+                           profile.indirectStoreTransactionsPerCycle);
   // Preserve one uncovered loaded-index dependency latency per Stage
   // iteration, but charge it only when an actual indirect access exists.
   if (work.indirectLoadTransactions > 0.0) {
@@ -1054,13 +1056,14 @@ bool HardwareProfile::isValid() const {
             simtIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectStoreModel.empty() ||
-          ((simdIndirectStoreModel == "random_f32_store_no_fill_first_20261007" ||
-            simdIndirectStoreModel == "random_f32_store_no_fill_reuse_20261007" ||
+          ((simdIndirectStoreModel ==
+                "random_f32_store_no_fill_first_20261007" ||
+            simdIndirectStoreModel ==
+                "random_f32_store_no_fill_reuse_20261007" ||
             simdIndirectStoreModel == "random_store_no_fill_first_20261008" ||
             simdIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
-         logicalWarpGroupCount > 0 &&
-         superblockUsefulFactorLimit > 0 &&
+         logicalWarpGroupCount > 0 && superblockUsefulFactorLimit > 0 &&
          superblockPersistentStatePressureFreeFactor > 0 &&
          superblockPersistentStatePressureFreeFactor <=
              superblockUsefulFactorLimit &&
@@ -1145,7 +1148,8 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
                                        "Stage '%s' has an illegal candidate",
                                        stage.id.c_str());
       auto fittedLoad = calibratedIndirectLoad(stage, profile, implementation);
-      auto fittedStore = calibratedIndirectStore(stage, profile, implementation);
+      auto fittedStore =
+          calibratedIndirectStore(stage, profile, implementation);
       // Fits already describe the full W-warp increment; do not divide by W.
       StageResourceCycles resources = mapWorkload(
           stage,

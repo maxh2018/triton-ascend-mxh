@@ -147,7 +147,8 @@ TEST(SimdSimtCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
         return
       }
     }
-  )mlir", &context);
+  )mlir",
+                                                        &context);
   ASSERT_TRUE(module);
   auto stage = logicalStage("store", StageCostModelKind::IndirectGatherMemory);
   module->walk([&](mlir::triton::StoreOp op) {
@@ -224,9 +225,11 @@ TEST(SimdSimtCostModelTest, SimdMatchedIndirectFitReplacesOnlyLoadResource) {
         return
       }
     }
-  )mlir", &context);
+  )mlir",
+                                                        &context);
   ASSERT_TRUE(module);
-  auto stage = logicalStage("indirect", StageCostModelKind::IndirectGatherMemory);
+  auto stage =
+      logicalStage("indirect", StageCostModelKind::IndirectGatherMemory);
   module->walk([&](mlir::triton::LoadOp load) {
     stage.operations.push_back(load.getOperation());
   });
@@ -236,11 +239,14 @@ TEST(SimdSimtCostModelTest, SimdMatchedIndirectFitReplacesOnlyLoadResource) {
   work.scalarOperations = 7;
   work.storeBytes = 16;
   mlir::ascend::AddressPatternSummary pattern;
-  pattern.memoryOp = "tt.load"; pattern.stageId = stage.id;
+  pattern.memoryOp = "tt.load";
+  pattern.stageId = stage.id;
   pattern.dependsOnLoadedValue = true;
   mlir::ascend::AddressAxisSummary axis;
-  axis.extent = 32; axis.regularity = "opaque_loaded";
-  pattern.axes.push_back(axis); work.addressPatterns.push_back(pattern);
+  axis.extent = 32;
+  axis.regularity = "opaque_loaded";
+  pattern.axes.push_back(axis);
+  work.addressPatterns.push_back(pattern);
   auto profile = hardwareProfile();
   profile.target = "Ascend950PR/dav-c310";
   auto old = evaluateOneStage(stage, profile);
@@ -273,7 +279,8 @@ TEST(SimdSimtCostModelTest, SimdMatchedIndirectNarrowRankTwoDomain) {
         return
       }
     }
-  )mlir", &context);
+  )mlir",
+                                                        &context);
   ASSERT_TRUE(module);
   auto stage = logicalStage("rank2", StageCostModelKind::IndirectGatherMemory);
   module->walk([&](mlir::triton::LoadOp load) {
@@ -315,14 +322,18 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
   mlir::MLIRContext context;
   context.allowUnregisteredDialects();
   const llvm::SmallVector<mlir::Type> types = {
-      mlir::IntegerType::get(&context, 8), mlir::IntegerType::get(&context, 16),
-      mlir::IntegerType::get(&context, 32), mlir::IntegerType::get(&context, 64),
-      mlir::Float16Type::get(&context), mlir::BFloat16Type::get(&context),
-      mlir::Float32Type::get(&context), mlir::Float8E4M3FNType::get(&context),
+      mlir::IntegerType::get(&context, 8),
+      mlir::IntegerType::get(&context, 16),
+      mlir::IntegerType::get(&context, 32),
+      mlir::IntegerType::get(&context, 64),
+      mlir::Float16Type::get(&context),
+      mlir::BFloat16Type::get(&context),
+      mlir::Float32Type::get(&context),
+      mlir::Float8E4M3FNType::get(&context),
       mlir::Float8E5M2Type::get(&context)};
   const llvm::SmallVector<llvm::SmallVector<int64_t>> shapes = {
-      {4}, {8}, {16}, {32}, {2048}, {8, 16}, {8, 64},
-      {2, 4, 16}, {2, 2, 4, 8}, {2, 2, 2, 4, 8}};
+      {4},     {8},     {16},       {32},         {2048},
+      {8, 16}, {8, 64}, {2, 4, 16}, {2, 2, 4, 8}, {2, 2, 2, 4, 8}};
   for (mlir::Type element : types) {
     for (const auto &shape : shapes) {
       auto type = mlir::RankedTensorType::get(shape, element);
@@ -334,8 +345,9 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
       state.addOperands(ptr);
       state.addTypes(type);
       auto *op = mlir::Operation::create(state);
-      auto stage = logicalStage("dtype-rank", StageCostModelKind::IndirectGatherMemory,
-                                StageScheduleKind::StraightLine, 3);
+      auto stage =
+          logicalStage("dtype-rank", StageCostModelKind::IndirectGatherMemory,
+                       StageScheduleKind::StraightLine, 3);
       stage.operations = {op};
       stage.features.loopBackedgeCount = 1;
       auto &work = stage.workload;
@@ -369,11 +381,13 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
                            shape.size() == 1 && elements <= 16;
       EXPECT_EQ(fit[0].indirectLoadPricing, profile.simdIndirectLoadModel);
       EXPECT_DOUBLE_EQ(fit[0].resources.load,
-                       elements * (small32 ? 49.57621548794853 : 81.94869549595556));
+                       elements *
+                           (small32 ? 49.57621548794853 : 81.94869549595556));
       EXPECT_DOUBLE_EQ(fit[0].resources.scalar, old[0].resources.scalar);
       EXPECT_DOUBLE_EQ(fit[0].resources.compute, old[0].resources.compute);
       EXPECT_DOUBLE_EQ(fit[0].resources.store, old[0].resources.store);
-      EXPECT_DOUBLE_EQ(fit[0].resources.loopControl, old[0].resources.loopControl);
+      EXPECT_DOUBLE_EQ(fit[0].resources.loopControl,
+                       old[0].resources.loopControl);
       EXPECT_DOUBLE_EQ(fit[0].resources.setup, old[0].resources.setup);
       EXPECT_NEAR(fit[0].totalCycles - old[0].totalCycles,
                   3 * (fit[0].resources.load - old[0].resources.load), 1e-8);
@@ -405,15 +419,15 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
 TEST(SimdSimtCostModelTest, SimdDtypeRankFitRejectsUnvalidatedDomains) {
   mlir::MLIRContext context;
   context.allowUnregisteredDialects();
-  const llvm::SmallVector<std::pair<mlir::Type, llvm::SmallVector<int64_t>>> cases = {
-      {mlir::Float64Type::get(&context), {32}},
-      {mlir::IntegerType::get(&context, 1), {32}},
-      {mlir::Float8E4M3FNUZType::get(&context), {32}},
-      {mlir::IntegerType::get(&context, 32), {2}},
-      {mlir::IntegerType::get(&context, 32), {4096}},
-      {mlir::IntegerType::get(&context, 32), {1, 32}},
-      {mlir::IntegerType::get(&context, 32), {4, 2}},
-      {mlir::IntegerType::get(&context, 32), {2, 2, 2, 2, 2, 2}}};
+  const llvm::SmallVector<std::pair<mlir::Type, llvm::SmallVector<int64_t>>>
+      cases = {{mlir::Float64Type::get(&context), {32}},
+               {mlir::IntegerType::get(&context, 1), {32}},
+               {mlir::Float8E4M3FNUZType::get(&context), {32}},
+               {mlir::IntegerType::get(&context, 32), {2}},
+               {mlir::IntegerType::get(&context, 32), {4096}},
+               {mlir::IntegerType::get(&context, 32), {1, 32}},
+               {mlir::IntegerType::get(&context, 32), {4, 2}},
+               {mlir::IntegerType::get(&context, 32), {2, 2, 2, 2, 2, 2}}};
   for (const auto &test : cases) {
     auto type = mlir::RankedTensorType::get(test.second, test.first);
     mlir::Block input;
@@ -423,12 +437,14 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitRejectsUnvalidatedDomains) {
     state.addOperands(ptr);
     state.addTypes(type);
     auto *op = mlir::Operation::create(state);
-    auto stage = logicalStage("fallback", StageCostModelKind::IndirectGatherMemory);
+    auto stage =
+        logicalStage("fallback", StageCostModelKind::IndirectGatherMemory);
     stage.operations = {op};
     auto &work = stage.workload;
     work.loadBytes = work.indirectLoadBytes =
         (type.getNumElements() * test.first.getIntOrFloatBitWidth() + 7) / 8;
-    work.loadWarpInstructions = work.indirectLoadTransactions = type.getNumElements();
+    work.loadWarpInstructions = work.indirectLoadTransactions =
+        type.getNumElements();
     mlir::ascend::AddressPatternSummary pattern;
     pattern.memoryOp = "tt.load";
     pattern.stageId = stage.id;
@@ -472,7 +488,8 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitAcceptsPartitionedTritonLoad) {
         tt.return
       }
     }
-  )mlir", &context);
+  )mlir",
+                                                        &context);
   ASSERT_TRUE(module);
   auto partition = StagePartitioner().partition(
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
@@ -482,9 +499,11 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitAcceptsPartitionedTritonLoad) {
     if (stage.costModelKind == StageCostModelKind::IndirectGatherMemory)
       payload = &stage;
   ASSERT_NE(payload, nullptr);
-  EXPECT_EQ(llvm::count_if(payload->operations, [](mlir::Operation *op) {
-              return op->getName().getStringRef() == "tt.load";
-            }), 1);
+  EXPECT_EQ(llvm::count_if(payload->operations,
+                           [](mlir::Operation *op) {
+                             return op->getName().getStringRef() == "tt.load";
+                           }),
+            1);
   auto profile = hardwareProfile();
   profile.target = "Ascend950PR/dav-c310";
   profile.simdIndirectLoadModel = "random_dtype_matched_ab_20261008";
@@ -500,21 +519,27 @@ TEST(SimdSimtCostModelTest, SimdDtypeRankFitAcceptsPartitionedTritonLoad) {
   const auto &simt = simtResult->stages.front().implementations[1];
   EXPECT_EQ(simt.indirectLoadPricing, profile.simtIndirectLoadModel);
   EXPECT_NEAR(simt.resources.load,
-              12.456944150614481 + 1.6732132663368477 * 32 +
-                  95.13859585355112 + 0.11214618741568584 * 32,
+              12.456944150614481 + 1.6732132663368477 * 32 + 95.13859585355112 +
+                  0.11214618741568584 * 32,
               1e-10);
 }
 
-TEST(SimdSimtCostModelTest, SimtDtypeRankFitUsesStorageWidthAndPreservesResources) {
+TEST(SimdSimtCostModelTest,
+     SimtDtypeRankFitUsesStorageWidthAndPreservesResources) {
   mlir::MLIRContext context;
   context.allowUnregisteredDialects();
   const llvm::SmallVector<mlir::Type> types = {
-      mlir::IntegerType::get(&context, 8), mlir::IntegerType::get(&context, 16),
-      mlir::IntegerType::get(&context, 32), mlir::IntegerType::get(&context, 64),
+      mlir::IntegerType::get(&context, 8),
+      mlir::IntegerType::get(&context, 16),
+      mlir::IntegerType::get(&context, 32),
+      mlir::IntegerType::get(&context, 64),
       mlir::IntegerType::get(&context, 32, mlir::IntegerType::Unsigned),
-      mlir::Float16Type::get(&context), mlir::BFloat16Type::get(&context),
-      mlir::Float32Type::get(&context), mlir::Float64Type::get(&context),
-      mlir::Float8E4M3FNType::get(&context), mlir::Float8E5M2Type::get(&context)};
+      mlir::Float16Type::get(&context),
+      mlir::BFloat16Type::get(&context),
+      mlir::Float32Type::get(&context),
+      mlir::Float64Type::get(&context),
+      mlir::Float8E4M3FNType::get(&context),
+      mlir::Float8E5M2Type::get(&context)};
   // Ordering: alpha, beta, sigma, phi, gamma, nu (same as the frozen model).
   const double coefficients[][6] = {
       {7.617911783542814, 1.5780971099377332, 92.18952965944916,
@@ -541,8 +566,7 @@ TEST(SimdSimtCostModelTest, SimtDtypeRankFitUsesStorageWidthAndPreservesResource
           } else {
             shape.back() =
                 std::min<int64_t>(32, elements / (1LL << (rank - 1)));
-            shape[rank - 2] =
-                elements / (shape.back() * (1LL << (rank - 2)));
+            shape[rank - 2] = elements / (shape.back() * (1LL << (rank - 2)));
           }
           SCOPED_TRACE(element.getIntOrFloatBitWidth());
           SCOPED_TRACE(warps);
@@ -551,16 +575,17 @@ TEST(SimdSimtCostModelTest, SimtDtypeRankFitUsesStorageWidthAndPreservesResource
           mlir::Block input;
           auto ptr = input.addArgument(mlir::IndexType::get(&context),
                                        mlir::UnknownLoc::get(&context));
-          mlir::OperationState state(mlir::UnknownLoc::get(&context), "tt.load");
+          mlir::OperationState state(mlir::UnknownLoc::get(&context),
+                                     "tt.load");
           state.addOperands(ptr);
           state.addTypes(mlir::RankedTensorType::get(shape, element));
           auto *load = mlir::Operation::create(state);
           mlir::OperationState helperState(mlir::UnknownLoc::get(&context),
                                            "test.address");
           auto *helper = mlir::Operation::create(helperState);
-          auto stage = logicalStage(
-              "simt-width", StageCostModelKind::IndirectGatherMemory,
-              StageScheduleKind::StraightLine, 3);
+          auto stage = logicalStage("simt-width",
+                                    StageCostModelKind::IndirectGatherMemory,
+                                    StageScheduleKind::StraightLine, 3);
           stage.operations = {helper, load};
           mlir::Operation *regionOwner = nullptr;
           if (rank >= 3) {
@@ -604,8 +629,8 @@ TEST(SimdSimtCostModelTest, SimtDtypeRankFitUsesStorageWidthAndPreservesResource
           const auto &legacy = old->stages.front().implementations[1];
           const double columns = rank == 1 ? 32 : shape.back();
           const double expected =
-              beta[0] + beta[1] * elements +
-              beta[2] * (elements <= 128) + beta[3] * elements * (rank == 1) +
+              beta[0] + beta[1] * elements + beta[2] * (elements <= 128) +
+              beta[3] * elements * (rank == 1) +
               beta[4] * std::max(4.0 * q / columns - 2, 0.0) +
               beta[5] * elements * std::max(std::log2(32.0 / columns), 0.0);
           EXPECT_EQ(fit.indirectLoadPricing, profile.simtIndirectLoadModel);
@@ -618,8 +643,7 @@ TEST(SimdSimtCostModelTest, SimtDtypeRankFitUsesStorageWidthAndPreservesResource
                            legacy.resources.loopControl);
           EXPECT_DOUBLE_EQ(fit.resources.issue, legacy.resources.issue);
           EXPECT_NEAR(fit.totalCycles - legacy.totalCycles,
-                      3 * (expected - legacy.resources.load),
-                      1e-8);
+                      3 * (expected - legacy.resources.load), 1e-8);
           EXPECT_DOUBLE_EQ(
               result->stages.front().implementations[0].totalCycles,
               old->stages.front().implementations[0].totalCycles);
@@ -656,7 +680,8 @@ TEST(SimdSimtCostModelTest, SimtDtypeRankFitRejectsUnvalidatedDomains) {
     state.addOperands(ptr);
     state.addTypes(type);
     auto *load = mlir::Operation::create(state);
-    auto stage = logicalStage("guard", StageCostModelKind::IndirectGatherMemory);
+    auto stage =
+        logicalStage("guard", StageCostModelKind::IndirectGatherMemory);
     stage.operations = {load};
     stage.workload.loadBytes = stage.workload.indirectLoadBytes =
         type.getNumElements() * 4;
@@ -680,7 +705,8 @@ TEST(SimdSimtCostModelTest, SimtDtypeRankFitRejectsUnvalidatedDomains) {
     auto result = evaluateOneStage(stage, profile);
     ASSERT_TRUE(bool(result));
     EXPECT_EQ(result->stages.front().implementations[1].indirectLoadPricing,
-              index == 0 ? profile.simtIndirectLoadModel : "legacy_transactions");
+              index == 0 ? profile.simtIndirectLoadModel
+                         : "legacy_transactions");
     if (index == 0) {
       for (unsigned guard = 0; guard < 8; ++guard) {
         auto invalid = stage;
@@ -695,7 +721,8 @@ TEST(SimdSimtCostModelTest, SimtDtypeRankFitRejectsUnvalidatedDomains) {
           invalid.workload.storeBytes = invalid.workload.indirectStoreBytes = 4;
         }
         if (guard == 4)
-          invalid.workload.addressPatterns[0].axes[0].regularity = "fixed_stride";
+          invalid.workload.addressPatterns[0].axes[0].regularity =
+              "fixed_stride";
         if (guard == 5)
           invalid.workload.addressPatterns[0].dependsOnLoadedValue = false;
         if (guard == 6) {
@@ -730,10 +757,12 @@ TEST(SimdSimtCostModelTest, RandomIndirectFitReplacesOnlyLoadResource) {
         return
       }
     }
-  )mlir", &context);
+  )mlir",
+                                                        &context);
   ASSERT_TRUE(module);
-  auto stage = logicalStage("indirect", StageCostModelKind::IndirectGatherMemory,
-                            StageScheduleKind::StraightLine, 3);
+  auto stage =
+      logicalStage("indirect", StageCostModelKind::IndirectGatherMemory,
+                   StageScheduleKind::StraightLine, 3);
   module->walk([&](mlir::triton::LoadOp load) {
     stage.operations.push_back(load.getOperation());
   });
@@ -763,12 +792,13 @@ TEST(SimdSimtCostModelTest, RandomIndirectFitReplacesOnlyLoadResource) {
   const auto &oldCosts = legacy->stages.front().implementations;
   const auto &newCosts = calibrated->stages.front().implementations;
   EXPECT_DOUBLE_EQ(newCosts[0].totalCycles, oldCosts[0].totalCycles);
-  const double fitted = 62.930686069640686 + 1.5502588407166296 * 256 +
-                        0.19338028618547126 * 256;
+  const double fitted =
+      62.930686069640686 + 1.5502588407166296 * 256 + 0.19338028618547126 * 256;
   EXPECT_DOUBLE_EQ(newCosts[1].resources.load, fitted);
   EXPECT_DOUBLE_EQ(newCosts[1].resources.scalar, oldCosts[1].resources.scalar);
   EXPECT_DOUBLE_EQ(newCosts[1].resources.store, oldCosts[1].resources.store);
-  EXPECT_DOUBLE_EQ(newCosts[1].resources.compute, oldCosts[1].resources.compute);
+  EXPECT_DOUBLE_EQ(newCosts[1].resources.compute,
+                   oldCosts[1].resources.compute);
   EXPECT_NEAR(newCosts[1].totalCycles - oldCosts[1].totalCycles,
               3 * (fitted - oldCosts[1].resources.load), 1e-9);
   // Changing the old dependency latency cannot affect a fitted load.
@@ -2115,12 +2145,10 @@ static std::string partialContinuousTileIR(int64_t rows, int64_t columns,
   replace("@STEP@", std::to_string(columnStep));
   replace("@PAYLOAD@",
           storePayload
-              ? "tt.store %pointer, %data : tensor<" +
-                    std::to_string(rows) + "x" + std::to_string(columns) +
-                    "x!tt.ptr<f32>>"
-              : "%payload = tt.load %pointer : tensor<" +
-                    std::to_string(rows) + "x" + std::to_string(columns) +
-                    "x!tt.ptr<f32>>");
+              ? "tt.store %pointer, %data : tensor<" + std::to_string(rows) +
+                    "x" + std::to_string(columns) + "x!tt.ptr<f32>>"
+              : "%payload = tt.load %pointer : tensor<" + std::to_string(rows) +
+                    "x" + std::to_string(columns) + "x!tt.ptr<f32>>");
   return source;
 }
 
@@ -2196,9 +2224,8 @@ TEST(SimdSimtCostModelTest, PartialStructuredStoreAndNonunitStride) {
                          8.0);
         EXPECT_DOUBLE_EQ(stage.workload.indirectStoreTransactions, 0.0);
       }
-      if (!store &&
-          stage.costModelKind ==
-              StageCostModelKind::PartialContinuousTileMemory) {
+      if (!store && stage.costModelKind ==
+                        StageCostModelKind::PartialContinuousTileMemory) {
         sawExpectedKind = true;
         EXPECT_DOUBLE_EQ(stage.workload.partialContinuousLoadRows, 8.0);
         EXPECT_DOUBLE_EQ(stage.workload.indirectLoadTransactions, 0.0);
@@ -2232,10 +2259,12 @@ TEST(SimdSimtCostModelTest, PartialStructuredStoreAndNonunitStride) {
   if (!partition)
     FAIL() << llvm::toString(partition.takeError());
   for (const LogicalStage &stage : partition->stages)
-    EXPECT_NE(stage.costModelKind, StageCostModelKind::PartialContinuousTileMemory);
+    EXPECT_NE(stage.costModelKind,
+              StageCostModelKind::PartialContinuousTileMemory);
 }
 
-TEST(SimdSimtCostModelTest, PartialUnstructuredPrefixDoesNotRequireLoadedIndex) {
+TEST(SimdSimtCostModelTest,
+     PartialUnstructuredPrefixDoesNotRequireLoadedIndex) {
   for (bool store : {false, true}) {
     std::string source = partialContinuousTileIR(8, 8, 2, store);
     size_t begin = source.find("        %index = tt.load");
@@ -2270,7 +2299,8 @@ TEST(SimdSimtCostModelTest, PartialUnstructuredPrefixDoesNotRequireLoadedIndex) 
   }
 }
 
-TEST(SimdSimtCostModelTest, PartialStructuredTailRequiresAllPrefixAxesUnstructured) {
+TEST(SimdSimtCostModelTest,
+     PartialStructuredTailRequiresAllPrefixAxesUnstructured) {
   mlir::MLIRContext context;
   context.getOrLoadDialect<mlir::arith::ArithDialect>();
   context.getOrLoadDialect<mlir::triton::TritonDialect>();
@@ -2330,8 +2360,8 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
   if (!partition)
     FAIL() << llvm::toString(partition.takeError());
-  auto findPayload = [](const StagePartition &partition)
-      -> const LogicalStage * {
+  auto findPayload =
+      [](const StagePartition &partition) -> const LogicalStage * {
     for (const LogicalStage &stage : partition.stages)
       for (mlir::Operation *operation : stage.operations) {
         if (operation->getName().getStringRef() != "tt.load" ||
@@ -2358,7 +2388,8 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
     ASSERT_NE(position, std::string::npos);
     source.replace(position, oldText.size(), newText.str());
   };
-  replaceOnce("  %row_stride =", R"mlir(  %outer_2d = tt.expand_dims %rows {axis = 1 : i32}
+  replaceOnce("  %row_stride =",
+              R"mlir(  %outer_2d = tt.expand_dims %rows {axis = 1 : i32}
     : tensor<2xi32> -> tensor<2x1xi32>
   %outer_3d = tt.expand_dims %outer_2d {axis = 2 : i32}
     : tensor<2x1xi32> -> tensor<2x1x1xi32>
@@ -2367,7 +2398,8 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
   %row_stride =)mlir");
   replaceOnce("arith.muli %index_broadcast, %row_stride",
               "arith.muli %outer_broadcast, %row_stride");
-  replaceOnce("  %middle_stride =", R"mlir(  %middle_idx_base = tt.splat %indices
+  replaceOnce("  %middle_stride =",
+              R"mlir(  %middle_idx_base = tt.splat %indices
     : !tt.ptr<i32> -> tensor<4x!tt.ptr<i32>>
   %middle_idx_ptr = tt.addptr %middle_idx_base, %middle
     : tensor<4x!tt.ptr<i32>>, tensor<4xi32>
@@ -2381,10 +2413,12 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
   %middle_stride =)mlir");
   replaceOnce("arith.muli %middle_broadcast, %middle_stride",
               "arith.muli %middle_idx_broadcast, %middle_stride");
-  auto crossedModule = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+  auto crossedModule =
+      mlir::parseSourceString<mlir::ModuleOp>(source, &context);
   ASSERT_TRUE(crossedModule);
-  auto crossed = StagePartitioner().partition(
-      *crossedModule, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
+  auto crossed = StagePartitioner().partition(*crossedModule,
+                                              mlir::ascend::SimtAnchorPlan{},
+                                              StagePartitionerOptions{});
   if (!crossed)
     FAIL() << llvm::toString(crossed.takeError());
   payload = findPayload(*crossed);
@@ -2413,7 +2447,8 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
   EXPECT_TRUE(payload->features.hasPartialContinuousMemory);
   EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 8.0);
   EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadBytes, 256.0);
-  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadWarpInstructions, 8.0);
+  EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadWarpInstructions,
+                   8.0);
   EXPECT_DOUBLE_EQ(payload->workload.indirectLoadTransactions, 0.0);
 }
 
@@ -2451,7 +2486,8 @@ TEST(SimdSimtCostModelTest, LoadedScalarIndexRemainsIndirect) {
           continue;
         sawPayload = true;
         EXPECT_TRUE(mlir::ascend::isLoadedIndexDependentMemoryOp(operation));
-        EXPECT_EQ(stage.costModelKind, StageCostModelKind::IndirectGatherMemory);
+        EXPECT_EQ(stage.costModelKind,
+                  StageCostModelKind::IndirectGatherMemory);
         EXPECT_TRUE(stage.features.hasIndirectMemory);
         EXPECT_FALSE(stage.features.hasPartialContinuousMemory);
         EXPECT_DOUBLE_EQ(store ? stage.workload.indirectStoreBytes
@@ -2466,9 +2502,9 @@ TEST(SimdSimtCostModelTest, LoadedScalarIndexRemainsIndirect) {
 }
 
 TEST(SimdSimtCostModelTest, PartialContinuousStageAlwaysUsesSerialCost) {
-  LogicalStage stage = logicalStage(
-      "partial", StageCostModelKind::PartialContinuousTileMemory,
-      StageScheduleKind::IndependentPipelined);
+  LogicalStage stage =
+      logicalStage("partial", StageCostModelKind::PartialContinuousTileMemory,
+                   StageScheduleKind::IndependentPipelined);
   stage.features.hasPartialContinuousMemory = true;
   stage.features.hasIndirectMemory = true;
   stage.workload.operationElements.clear();
@@ -2924,7 +2960,8 @@ TEST(SimdSimtCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
         tt.return
       }
     }
-  )mlir", &context);
+  )mlir",
+                                                        &context);
   ASSERT_TRUE(module);
   auto partition = StagePartitioner().partition(
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
@@ -2944,10 +2981,9 @@ TEST(SimdSimtCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
       "random_store_no_fill_first_20261008";
   auto fit = evaluateOneStage(*payload, profile);
   ASSERT_TRUE(bool(fit));
-  const double expected[] = {
-      125.41805018354371 + 162.87111975882544 * 128,
-      382.1012717872757 + 1.3935292896269613 * 128 -
-          19.191779247532597 * 4};
+  const double expected[] = {125.41805018354371 + 162.87111975882544 * 128,
+                             382.1012717872757 + 1.3935292896269613 * 128 -
+                                 19.191779247532597 * 4};
   for (unsigned i = 0; i < 2; ++i) {
     const auto &cost = fit->stages.front().implementations[i];
     const auto &before = old->stages.front().implementations[i];
@@ -2957,7 +2993,8 @@ TEST(SimdSimtCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
     EXPECT_DOUBLE_EQ(cost.resources.compute, before.resources.compute);
     EXPECT_DOUBLE_EQ(cost.resources.scalar, before.resources.scalar);
     EXPECT_DOUBLE_EQ(cost.resources.issue, before.resources.issue);
-    EXPECT_DOUBLE_EQ(cost.resources.synchronization, before.resources.synchronization);
+    EXPECT_DOUBLE_EQ(cost.resources.synchronization,
+                     before.resources.synchronization);
     EXPECT_NEAR(cost.totalCycles - before.totalCycles,
                 expected[i] - before.resources.store, 1e-8);
   }
@@ -2978,7 +3015,8 @@ TEST(SimdSimtCostModelTest, RandomStoreDtypeRankStateAndDomain) {
     StagePartition partition;
     partition.stages.push_back(s);
     auto result = StageCostEvaluator().evaluate(partition, profile);
-    if (!result) llvm::report_fatal_error(llvm::Twine(llvm::toString(result.takeError())));
+    if (!result)
+      llvm::report_fatal_error(llvm::Twine(llvm::toString(result.takeError())));
     return result->stages.front().implementations;
   };
   for (int bits : {1, 8, 16, 32, 64}) {
@@ -2988,9 +3026,9 @@ TEST(SimdSimtCostModelTest, RandomStoreDtypeRankStateAndDomain) {
           // Rank 1, 3 and 8 exercise shape-independent pricing. High ranks
           // rely on per-axis loaded evidence, not the legacy rank-5 predicate.
           for (bool rank3 : {false, true}) {
-            llvm::SmallVector<int64_t> shape = rank3
-                ? llvm::SmallVector<int64_t>{2, 2, e / 4}
-                : llvm::SmallVector<int64_t>{e};
+            llvm::SmallVector<int64_t> shape =
+                rank3 ? llvm::SmallVector<int64_t>{2, 2, e / 4}
+                      : llvm::SmallVector<int64_t>{e};
             if (rank3 && e >= 256)
               shape = {2, 2, 2, 2, 2, 2, 2, e / 128};
             auto type = mlir::RankedTensorType::get(
@@ -3024,37 +3062,45 @@ TEST(SimdSimtCostModelTest, RandomStoreDtypeRankStateAndDomain) {
             }
             a.addressPatterns = {pattern};
             p.logicalWarpGroupCount = w;
-            p.simdIndirectStoreModel = p.simtIndirectStoreModel = reuse
-                ? "random_store_no_fill_reuse_20261008"
-                : "random_store_no_fill_first_20261008";
+            p.simdIndirectStoreModel = p.simtIndirectStoreModel =
+                reuse ? "random_store_no_fill_reuse_20261008"
+                      : "random_store_no_fill_first_20261008";
             auto fit = evaluate(s, p);
             int g = bits <= 16 ? 0 : (bits == 32 ? 1 : 2);
-            const double beta[2][3] = {{152.8758408085307,162.87111975882544,161.07674811788297},
-                                      {68.58965840703893,69.21236829277788,64.45492494749357}};
-            const double b[2][3] = {{4.664669494263474,1.3935292896269613,2.0019961511928295},
-                                   {4.4638287665056,1.1754145133075695,2.076648173015399}};
-            const double d[2][3] = {{-25.526112727120946,-19.191779247532597,-35.604138981973364},
-                                   {-9.072748388478542,-20.88472709201174,-38.4225252759396}};
-            bool supported[] = {w == 1, e <= 512*w && (w == 1 || e >= 32*w)};
-            double expected[] = {(reuse ? 0 : 125.41805018354371) + beta[reuse][g]*e,
-              (reuse ? 70.0956884939018 : 382.1012717872757) + b[reuse][g]*e +
-              (reuse ? .8774560851959086 : .6797627278581438)*std::max(e-(reuse?128:256),0) +
-              d[reuse][g]*e/(32.0*w)};
-            for (unsigned i=0; i<2; ++i) {
+            const double beta[2][3] = {
+                {152.8758408085307, 162.87111975882544, 161.07674811788297},
+                {68.58965840703893, 69.21236829277788, 64.45492494749357}};
+            const double b[2][3] = {
+                {4.664669494263474, 1.3935292896269613, 2.0019961511928295},
+                {4.4638287665056, 1.1754145133075695, 2.076648173015399}};
+            const double d[2][3] = {
+                {-25.526112727120946, -19.191779247532597, -35.604138981973364},
+                {-9.072748388478542, -20.88472709201174, -38.4225252759396}};
+            bool supported[] = {w == 1,
+                                e <= 512 * w && (w == 1 || e >= 32 * w)};
+            double expected[] = {
+                (reuse ? 0 : 125.41805018354371) + beta[reuse][g] * e,
+                (reuse ? 70.0956884939018 : 382.1012717872757) +
+                    b[reuse][g] * e +
+                    (reuse ? .8774560851959086 : .6797627278581438) *
+                        std::max(e - (reuse ? 128 : 256), 0) +
+                    d[reuse][g] * e / (32.0 * w)};
+            for (unsigned i = 0; i < 2; ++i) {
               if (supported[i]) {
-                EXPECT_EQ(fit[i].indirectStorePricing, p.simdIndirectStoreModel);
-                EXPECT_NEAR(fit[i].resources.store,
-                    expected[i], 1e-7);
-              } else EXPECT_EQ(fit[i].indirectStorePricing, "legacy_transactions");
+                EXPECT_EQ(fit[i].indirectStorePricing,
+                          p.simdIndirectStoreModel);
+                EXPECT_NEAR(fit[i].resources.store, expected[i], 1e-7);
+              } else
+                EXPECT_EQ(fit[i].indirectStorePricing, "legacy_transactions");
             }
             if (reuse) {
               a.hasProvenIndirectStoreReuse = false;
-              for (const auto &cost : evaluate(s,p))
+              for (const auto &cost : evaluate(s, p))
                 EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
               a.hasProvenIndirectStoreReuse = true;
             }
             a.addressPatterns[0].axes[0].regularity = "fixed_stride";
-            for (const auto &cost : evaluate(s,p))
+            for (const auto &cost : evaluate(s, p))
               EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
             op->destroy();
           }

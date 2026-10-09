@@ -51,9 +51,9 @@ public:
 /// a route and never reads a hardware throughput profile.
 class StageFeatureAnalysis {
 public:
-  llvm::Error analyze(
-      StagePartition &partition,
-      const StageMemoryPatternAnalysis *memoryPatterns = nullptr) const;
+  llvm::Error
+  analyze(StagePartition &partition,
+          const StageMemoryPatternAnalysis *memoryPatterns = nullptr) const;
 };
 
 /// Verifies/classifies the one dominant resource semantics of every Stage.
@@ -70,9 +70,9 @@ public:
 /// using per-kind weights.
 class StageWorkloadAnalysis {
 public:
-  llvm::Error analyze(
-      StagePartition &partition,
-      const StageMemoryPatternAnalysis *memoryPatterns = nullptr) const;
+  llvm::Error
+  analyze(StagePartition &partition,
+          const StageMemoryPatternAnalysis *memoryPatterns = nullptr) const;
 };
 
 /// Derives legal SIMD/SIMT implementations from structural Stage facts.

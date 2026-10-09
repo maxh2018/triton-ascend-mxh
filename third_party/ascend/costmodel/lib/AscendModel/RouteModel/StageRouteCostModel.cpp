@@ -224,10 +224,12 @@ llvm::json::Object AddressAxisSummary::toJSON() const {
   result["regularity"] = regularity;
   result["provenance"] = provenance;
   result["known_stride_elements"] = knownStride
-      ? llvm::json::Value(*knownStride) : llvm::json::Value(nullptr);
+                                        ? llvm::json::Value(*knownStride)
+                                        : llvm::json::Value(nullptr);
   result["has_unknown_component"] = hasUnknownComponent;
   result["alignment_bytes"] = alignmentBytes
-      ? llvm::json::Value(*alignmentBytes) : llvm::json::Value(nullptr);
+                                  ? llvm::json::Value(*alignmentBytes)
+                                  : llvm::json::Value(nullptr);
   result["reason"] = reason;
   return result;
 }
@@ -422,12 +424,11 @@ bool StageImplementationCost::isValid() const {
 }
 
 llvm::json::Object StageImplementationCost::toJSON() const {
-  return llvm::json::Object{
-      {"implementation", implementation.toJSON()},
-      {"indirect_load_pricing", indirectLoadPricing},
-      {"indirect_store_pricing", indirectStorePricing},
-      {"total_system_cycles", totalCycles},
-      {"resource_system_cycles", resources.toJSON()}};
+  return llvm::json::Object{{"implementation", implementation.toJSON()},
+                            {"indirect_load_pricing", indirectLoadPricing},
+                            {"indirect_store_pricing", indirectStorePricing},
+                            {"total_system_cycles", totalCycles},
+                            {"resource_system_cycles", resources.toJSON()}};
 }
 
 llvm::json::Object LogicalStageCost::toJSON() const {

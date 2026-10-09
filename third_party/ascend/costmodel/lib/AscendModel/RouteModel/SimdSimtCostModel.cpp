@@ -414,9 +414,12 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
   if (root->get("simt_indirect_store_model")) {
     hardware.simtIndirectStoreModel =
         reader.string(*root, "simt_indirect_store_model", "profile");
-    if (hardware.simtIndirectStoreModel != "random_f32_store_fill_ab_20261007" &&
-        hardware.simtIndirectStoreModel != "random_store_no_fill_first_20261008" &&
-        hardware.simtIndirectStoreModel != "random_store_no_fill_reuse_20261008")
+    if (hardware.simtIndirectStoreModel !=
+            "random_f32_store_fill_ab_20261007" &&
+        hardware.simtIndirectStoreModel !=
+            "random_store_no_fill_first_20261008" &&
+        hardware.simtIndirectStoreModel !=
+            "random_store_no_fill_reuse_20261008")
       reader.setError("unsupported simt_indirect_store_model");
   }
   if (root->get("simd_indirect_store_model")) {
@@ -426,8 +429,10 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
             "random_f32_store_no_fill_first_20261007" &&
         hardware.simdIndirectStoreModel !=
             "random_f32_store_no_fill_reuse_20261007" &&
-        hardware.simdIndirectStoreModel != "random_store_no_fill_first_20261008" &&
-        hardware.simdIndirectStoreModel != "random_store_no_fill_reuse_20261008")
+        hardware.simdIndirectStoreModel !=
+            "random_store_no_fill_first_20261008" &&
+        hardware.simdIndirectStoreModel !=
+            "random_store_no_fill_reuse_20261008")
       reader.setError("unsupported simd_indirect_store_model");
   }
   if (microbench && llvm::StringRef(hardware.target) != microbench->getTarget())
