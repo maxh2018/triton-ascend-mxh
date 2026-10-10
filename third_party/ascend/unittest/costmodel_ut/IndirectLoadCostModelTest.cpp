@@ -24,6 +24,13 @@ TEST(IndirectLoadCostModelTest,
   auto fit = indirectCosts(stage, profile);
   const auto &a = old;
   const auto &b = fit;
+  const IndirectGatherMemoryCostModel memoryModel;
+  const StageCostModel &model = memoryModel;
+  const auto increment =
+      model.cost(stage, profile, {StageMode::SIMD, 1, false});
+  ASSERT_TRUE(increment.load);
+  EXPECT_DOUBLE_EQ(*increment.load, 83.56748010753823 * 32);
+  EXPECT_FALSE(increment.store);
   EXPECT_DOUBLE_EQ(b[0].resources.load, 83.56748010753823 * 32);
   expectOnlyMemoryChanged(a[0], b[0], false, 1);
   EXPECT_DOUBLE_EQ(b[1].totalCycles, a[1].totalCycles);

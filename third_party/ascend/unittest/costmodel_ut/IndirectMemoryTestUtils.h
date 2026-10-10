@@ -4,6 +4,7 @@
 #include "AscendModel/RouteModel/Models/IndirectGatherMemoryCostModel.h"
 #include "CostModelTestUtils.h"
 #include "StageIRTestUtils.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 
 namespace mlir::ascend::test {
@@ -16,9 +17,10 @@ inline HardwareProfile calibrationProfile() {
 
 inline std::vector<StageImplementationCost>
 indirectCosts(const LogicalStage &stage, const HardwareProfile &profile) {
-  IndirectGatherMemoryCostModel model;
-  return {model.cost(stage, profile, {StageMode::SIMD, 1, false}),
-          model.cost(stage, profile, {StageMode::SIMT, 1, false})};
+  auto result = evaluateOneStage(stage, profile);
+  if (!result)
+    llvm::report_fatal_error(llvm::Twine(llvm::toString(result.takeError())));
+  return result->stages.front().implementations;
 }
 
 /// Construct the same per-axis evidence for load/store domain checks.

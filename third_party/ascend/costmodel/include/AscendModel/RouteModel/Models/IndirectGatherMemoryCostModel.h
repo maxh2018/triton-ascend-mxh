@@ -5,10 +5,10 @@
 
 namespace mlir::ascend {
 
-/// Owns indirect load/store calibration, applicability guards and fallback.
+/// Owns the new indirect load/store formulas and applicability guards only.
 class IndirectGatherMemoryCostModel final : public StageCostModel {
 public:
-  StageImplementationCost
+  StageMemoryCost
   cost(const LogicalStage &stage, const HardwareProfile &profile,
        const StageImplementation &implementation) const override;
 };

@@ -1,7 +1,6 @@
 #include "AscendModel/RouteModel/SimdSimtCostModel.h"
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "AscendModel/RouteModel/StageCostModels.h"
-#include "CostModelTestUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -49,9 +48,9 @@ SimdSimtFeatureSummary triangularBt16StageFeatures() {
 
 } // namespace
 
-namespace mlir::ascend::test {
+namespace {
 
-HardwareProfile hardwareProfile(StageTransitionCost transition) {
+HardwareProfile hardwareProfile(StageTransitionCost transition = {}) {
   HardwareProfile profile;
   profile.profileVersion = "unit-test-profile-v1";
   profile.target = "Ascend950PR_9579";
@@ -95,8 +94,8 @@ HardwareProfile hardwareProfile(StageTransitionCost transition) {
 
 LogicalStage
 logicalStage(llvm::StringRef id, StageCostModelKind kind,
-             StageScheduleKind schedule,
-             int64_t iterations) {
+             StageScheduleKind schedule = StageScheduleKind::StraightLine,
+             int64_t iterations = 1) {
   LogicalStage stage;
   stage.id = id.str();
   stage.costModelKind = kind;
@@ -113,15 +112,13 @@ logicalStage(llvm::StringRef id, StageCostModelKind kind,
 
 llvm::Expected<StageCostTable>
 evaluateOneStage(LogicalStage stage,
-                 HardwareProfile profile) {
+                 HardwareProfile profile = hardwareProfile()) {
   StagePartition partition;
   partition.stages.push_back(std::move(stage));
   return StageCostEvaluator().evaluate(partition, profile);
 }
 
 } // namespace
-
-using namespace mlir::ascend::test;
 
 TEST(SimdSimtCostModelTest, StageHasOnlySimdOrSimtImplementations) {
   LogicalStage stage = logicalStage("scalar", StageCostModelKind::ScalarIssue);

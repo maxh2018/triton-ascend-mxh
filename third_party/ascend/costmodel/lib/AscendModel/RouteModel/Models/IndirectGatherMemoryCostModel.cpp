@@ -477,24 +477,9 @@ calibratedIndirectStore(const LogicalStage &stage,
 
 } // namespace
 
-StageImplementationCost IndirectGatherMemoryCostModel::cost(
+StageMemoryCost IndirectGatherMemoryCostModel::cost(
     const LogicalStage &stage, const HardwareProfile &profile,
     const StageImplementation &implementation) const {
-  const auto fittedLoad =
-      calibratedIndirectLoad(stage, profile, implementation);
-  const auto fittedStore =
-      calibratedIndirectStore(stage, profile, implementation);
-  const auto mode = implementation.mode;
-  const auto r = mapWorkload(stage, profile, mode, fittedLoad, fittedStore);
-  auto result = finishCost(stage, profile, implementation, r,
-                           genericLatency(stage, mode, r));
-  if (fittedLoad)
-    result.indirectLoadPricing = mode == StageMode::SIMD
-                                     ? profile.simdIndirectLoadModel
-                                     : profile.simtIndirectLoadModel;
-  if (fittedStore)
-    result.indirectStorePricing = mode == StageMode::SIMD
-                                      ? profile.simdIndirectStoreModel
-                                      : profile.simtIndirectStoreModel;
-  return result;
+  return {calibratedIndirectLoad(stage, profile, implementation),
+          calibratedIndirectStore(stage, profile, implementation)};
 }

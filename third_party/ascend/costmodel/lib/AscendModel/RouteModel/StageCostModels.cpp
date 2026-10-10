@@ -2,7 +2,6 @@
 
 #include "AscendModel/RouteModel/StageCostModels.h"
 #include "AscendModel/RouteModel/Models/IndirectGatherMemoryCostModel.h"
-#include "AscendModel/RouteModel/StageCostModel.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
@@ -12,21 +11,40 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <initializer_list>
 #include <system_error>
 
 using namespace mlir;
 using namespace mlir::ascend;
 
-double StageCostModel::iterations(const LogicalStage &stage) {
+namespace {
+
+static double iterations(const LogicalStage &stage) {
   return static_cast<double>(std::max<int64_t>(1, stage.iterationCount));
 }
 
-double StageCostModel::controlBody(const StageResourceCycles &resources) {
+static std::vector<std::string>
+collectSourceLocations(const LogicalStage &stage) {
+  std::vector<std::string> result;
+  llvm::StringSet<> seen;
+  for (Operation *operation : stage.operations) {
+    std::string location;
+    llvm::raw_string_ostream stream(location);
+    operation->getLoc().print(stream);
+    stream.flush();
+    if (location.empty() || !seen.insert(location).second)
+      continue;
+    result.push_back(std::move(location));
+  }
+  return result;
+}
+
+static double controlBody(const StageResourceCycles &resources) {
   return resources.loopControl + resources.branchControl +
          resources.divergence + resources.synchronization;
 }
 
-double StageCostModel::serialBody(const StageResourceCycles &resources) {
+static double serialBody(const StageResourceCycles &resources) {
   const double execution =
       resources.scalar + resources.load + resources.store + resources.atomic +
       resources.compute + resources.predicate + resources.shuffle +
@@ -36,12 +54,11 @@ double StageCostModel::serialBody(const StageResourceCycles &resources) {
   return std::max(execution, resources.issue);
 }
 
-bool StageCostModel::permitsSimdOverlap(const LogicalStage &stage) {
+static bool permitsSimdOverlap(const LogicalStage &stage) {
   return stage.scheduleKind == StageScheduleKind::IndependentPipelined &&
          stage.features.permitsSimdRoofline();
 }
 
-namespace {
 // Scalar white-box terms, already in the profile's SYS_CNT cycle domain.
 static double mainScalarLoadCycles(double count,
                                    const StageModeProfile &profile) {
@@ -91,13 +108,11 @@ materializeControlFlow(const LogicalStage &stage, StageMode mode,
   return resources;
 }
 
-} // namespace
-
-StageResourceCycles StageCostModel::mapWorkload(
-    const LogicalStage &stage, const HardwareProfile &hardware, StageMode mode,
-    std::optional<double> fittedLoad, std::optional<double> fittedStore) {
-  const StageModeProfile &profile =
-      mode == StageMode::SIMD ? hardware.simd : hardware.simt;
+static StageResourceCycles mapWorkload(const LogicalStage &stage,
+                                       const StageModeProfile &profile,
+                                       StageMode mode,
+                                       std::optional<double> fittedLoad,
+                                       std::optional<double> fittedStore) {
   StageResourceCycles resources;
   const StageWorkload &work = stage.workload;
   const bool simd = mode == StageMode::SIMD;
@@ -238,10 +253,11 @@ StageResourceCycles StageCostModel::mapWorkload(
   return materializeControlFlow(stage, mode, resources, profile.controlFlow);
 }
 
-double StageCostModel::applySuperBlock(
-    const LogicalStage &stage, const StageResourceCycles &resources,
-    const StageImplementation &implementation, const HardwareProfile &profile,
-    double stageCycles, SuperBlockPolicy policy) {
+static double applySuperBlock(const LogicalStage &stage,
+                              const StageResourceCycles &resources,
+                              const StageImplementation &implementation,
+                              const HardwareProfile &profile,
+                              double stageCycles) {
   if (implementation.mode != StageMode::SIMT ||
       implementation.superblockFactor == 1)
     return stageCycles;
@@ -285,7 +301,7 @@ double StageCostModel::applySuperBlock(
   // bandwidth.
   // This applies equally to whole-kernel and scope-local SuperBlock because
   // both materializers batch complete logical programs around the Stage.
-  if (policy == SuperBlockPolicy::IndependentRecurrences) {
+  if (stage.costModelKind == StageCostModelKind::LoopCarriedRecurrence) {
     const double recurrenceBody = std::max(0.0, stageCycles - fixed);
     return std::max(issueFloor, fixed + recurrenceBody + pressure) +
            persistentStatePressure;
@@ -299,111 +315,44 @@ double StageCostModel::applySuperBlock(
          persistentStatePressure;
 }
 
-namespace {
-class GenericStageCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const auto mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    return finishCost(stage, profile, implementation, r,
-                      genericLatency(stage, mode, r));
+static double estimateStage(const LogicalStage &stage,
+                            const HardwareProfile &profile, StageMode mode,
+                            const StageResourceCycles &r) {
+  const double count = iterations(stage);
+  const double serial = r.setup + count * serialBody(r);
+  switch (stage.costModelKind) {
+  case StageCostModelKind::AutoBlockifyDispatch:
+  case StageCostModelKind::AutoBlockifyLoop: {
+    const double dispatchCount =
+        stage.costModelKind == StageCostModelKind::AutoBlockifyLoop ? count
+                                                                    : 1.0;
+    return r.setup +
+           dispatchCount * std::max(r.scalar + controlBody(r), r.issue);
   }
-};
-
-class IndependentPipelinedLoopCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const StageMode mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    const double count = iterations(stage);
-    const double serial = r.setup + count * serialBody(r);
-    double cycles = serial;
+  case StageCostModelKind::PartialContinuousTileMemory:
+    // Slices expanded along unstructured axes are billed serially. Structured
+    // axes may have nonunit strides; they do not imply contiguous addresses.
+    return serial;
+  case StageCostModelKind::ContinuousTileMemory:
+  case StageCostModelKind::ContinuousTileStore:
+  case StageCostModelKind::ContinuousShortLoad:
+  case StageCostModelKind::CachePolicyStore:
+  case StageCostModelKind::AtomicMemory:
     if (mode == StageMode::SIMD && permitsSimdOverlap(stage))
-      cycles =
-          r.setup + count * (std::max({r.load, r.store, r.atomic,
-                                       r.compute + r.dot + r.shuffle,
-                                       r.scalar + r.predicate + controlBody(r),
-                                       r.issue}) +
-                             r.spill);
-    return finishCost(stage, profile, implementation, r, cycles);
-  }
-};
-
-class CubeRooflineCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const StageMode mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    const double count = iterations(stage);
-    const double serial = r.setup + count * serialBody(r);
-    double cycles = serial;
+      return r.setup +
+             count * (r.scalar + r.predicate + controlBody(r) + r.spill +
+                      std::max({r.load, r.store, r.atomic, r.issue}));
+    return serial;
+  case StageCostModelKind::IndependentPipelinedLoop:
     if (mode == StageMode::SIMD && permitsSimdOverlap(stage))
-      cycles = r.setup + count * (r.scalar + r.predicate + controlBody(r) +
-                                  r.shuffle + r.spill +
-                                  std::max({r.load, r.compute + r.dot, r.store,
-                                            r.atomic, r.issue}));
-    return finishCost(stage, profile, implementation, r, cycles);
-  }
-};
-
-class ConversionPackCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const StageMode mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    const double count = iterations(stage);
-    const double serial = r.setup + count * serialBody(r);
-    double cycles = serial;
-    if (mode == StageMode::SIMD && permitsSimdOverlap(stage))
-      cycles = r.setup + count * (r.predicate + controlBody(r) + r.spill +
-                                  std::max({r.scalar + r.compute, r.load,
-                                            r.store, r.atomic, r.issue}));
-    return finishCost(stage, profile, implementation, r, cycles);
-  }
-};
-
-class AutoBlockifyCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const auto mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    const double count =
-        stage.costModelKind == StageCostModelKind::AutoBlockifyLoop
-            ? iterations(stage)
-            : 1.0;
-    return finishCost(stage, profile, implementation, r,
-                      r.setup +
-                          count * std::max(r.scalar + controlBody(r), r.issue));
-  }
-};
-
-class LoopCarriedRecurrenceCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const auto mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    return finishCost(stage, profile, implementation, r,
-                      latency(stage, profile, mode, r),
-                      SuperBlockPolicy::IndependentRecurrences);
-  }
-
-private:
-  static double latency(const LogicalStage &stage,
-                        const HardwareProfile &profile, StageMode mode,
-                        const StageResourceCycles &r) {
-    const double count = iterations(stage);
+      return r.setup +
+             count *
+                 (std::max({r.load, r.store, r.atomic,
+                            r.compute + r.dot + r.shuffle,
+                            r.scalar + r.predicate + controlBody(r), r.issue}) +
+                  r.spill);
+    return serial;
+  case StageCostModelKind::LoopCarriedRecurrence: {
     // A prefix scan nested inside a recurrence keeps its lane dependency
     // chain: each scan level must complete before the next starts, so the
     // scan's shuffle traffic cannot reach the ideal vector throughput.
@@ -446,125 +395,47 @@ private:
            std::max(std::ceil(count / static_cast<double>(groups)) * critical,
                     count * r.issue);
   }
-};
-
-class ContinuousMemoryCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const StageMode mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    const double count = iterations(stage);
-    const double serial = r.setup + count * serialBody(r);
-    double cycles = serial;
-    if (mode == StageMode::SIMD && permitsSimdOverlap(stage))
-      cycles =
-          r.setup + count * (r.scalar + r.predicate + controlBody(r) + r.spill +
-                             std::max({r.load, r.store, r.atomic, r.issue}));
-    return finishCost(stage, profile, implementation, r, cycles);
-  }
-};
-
-class PartialContinuousMemoryCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const auto mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    // Unstructured slices are serial, even when the Stage permits SIMD overlap.
-    return finishCost(stage, profile, implementation, r,
-                      r.setup + iterations(stage) * serialBody(r));
-  }
-};
-
-class RowwiseReductionCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const auto mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    return finishCost(stage, profile, implementation, r,
-                      r.setup + iterations(stage) *
-                                    std::max(r.scalar + r.load + r.store +
-                                                 r.atomic + r.criticalPath +
-                                                 controlBody(r) + r.spill,
-                                             r.issue));
-  }
-};
-
-class PrefixScanCostModel final : public StageCostModel {
-public:
-  StageImplementationCost
-  cost(const LogicalStage &stage, const HardwareProfile &profile,
-       const StageImplementation &implementation) const override {
-    const auto mode = implementation.mode;
-    const auto r = mapWorkload(stage, profile, mode);
-    const auto &modeProfile =
-        mode == StageMode::SIMD ? profile.simd : profile.simt;
+  case StageCostModelKind::RowwiseReduction:
+    return r.setup +
+           count * std::max(r.scalar + r.load + r.store + r.atomic +
+                                r.criticalPath + controlBody(r) + r.spill,
+                            r.issue);
+  case StageCostModelKind::PrefixScan: {
     const double scanCritical =
         r.compute + r.predicate +
-        r.shuffle * modeProfile.prefixScanDependencyFactor;
-    return finishCost(stage, profile, implementation, r,
-                      r.setup + iterations(stage) *
-                                    std::max(r.scalar + r.load + r.store +
-                                                 r.atomic + scanCritical +
-                                                 controlBody(r) + r.spill,
-                                             r.issue));
-  }
-};
-
-template <typename Model> const StageCostModel &model() {
-  static const Model instance;
-  return instance;
-}
-} // namespace
-
-double StageCostModel::genericLatency(const LogicalStage &stage, StageMode mode,
-                                      const StageResourceCycles &r) {
-  if (mode == StageMode::SIMD)
+        r.shuffle * (mode == StageMode::SIMD
+                         ? profile.simd.prefixScanDependencyFactor
+                         : profile.simt.prefixScanDependencyFactor);
     return r.setup +
-           iterations(stage) *
-               (std::max({r.load, r.store, r.atomic,
-                          r.compute + r.dot + r.shuffle,
-                          r.scalar + r.predicate + controlBody(r), r.issue}) +
-                r.spill);
-  return r.setup + iterations(stage) * serialBody(r);
-}
-
-StageImplementationCost
-StageCostModel::finishCost(const LogicalStage &stage,
-                           const HardwareProfile &profile,
-                           const StageImplementation &implementation,
-                           const StageResourceCycles &resources,
-                           double stageCycles, SuperBlockPolicy policy) {
-  StageImplementationCost result;
-  result.implementation = implementation;
-  result.resources = resources;
-  result.totalCycles = applySuperBlock(stage, resources, implementation,
-                                       profile, stageCycles, policy);
-  return result;
-}
-
-namespace {
-static std::vector<std::string>
-collectSourceLocations(const LogicalStage &stage) {
-  std::vector<std::string> result;
-  llvm::StringSet<> seen;
-  for (Operation *operation : stage.operations) {
-    std::string location;
-    llvm::raw_string_ostream stream(location);
-    operation->getLoc().print(stream);
-    stream.flush();
-    if (location.empty() || !seen.insert(location).second)
-      continue;
-    result.push_back(std::move(location));
+           count * std::max(r.scalar + r.load + r.store + r.atomic +
+                                scanCritical + controlBody(r) + r.spill,
+                            r.issue);
   }
-  return result;
+  case StageCostModelKind::CubeRoofline:
+  case StageCostModelKind::TinyCubeRoofline:
+    if (mode == StageMode::SIMD && permitsSimdOverlap(stage))
+      return r.setup + count * (r.scalar + r.predicate + controlBody(r) +
+                                r.shuffle + r.spill +
+                                std::max({r.load, r.compute + r.dot, r.store,
+                                          r.atomic, r.issue}));
+    return serial;
+  case StageCostModelKind::ConversionPack:
+    if (mode == StageMode::SIMD && permitsSimdOverlap(stage))
+      return r.setup + count * (r.predicate + controlBody(r) + r.spill +
+                                std::max({r.scalar + r.compute, r.load, r.store,
+                                          r.atomic, r.issue}));
+    return serial;
+  default:
+    if (mode == StageMode::SIMD)
+      return r.setup +
+             count *
+                 (std::max({r.load, r.store, r.atomic,
+                            r.compute + r.dot + r.shuffle,
+                            r.scalar + r.predicate + controlBody(r), r.issue}) +
+                  r.spill);
+    return serial;
+  }
 }
-
 static bool isDeclaredLegal(const LogicalStage &stage,
                             const StageImplementation &implementation) {
   if (!implementation.isValid())
@@ -583,48 +454,6 @@ static bool isDeclaredLegal(const LogicalStage &stage,
 }
 
 } // namespace
-
-const StageCostModel &mlir::ascend::getStageCostModel(StageCostModelKind kind) {
-  switch (kind) {
-  case StageCostModelKind::AutoBlockifyDispatch:
-  case StageCostModelKind::AutoBlockifyLoop:
-    return model<AutoBlockifyCostModel>();
-  case StageCostModelKind::PartialContinuousTileMemory:
-    return model<PartialContinuousMemoryCostModel>();
-  case StageCostModelKind::ContinuousTileMemory:
-  case StageCostModelKind::ContinuousTileStore:
-  case StageCostModelKind::ContinuousShortLoad:
-  case StageCostModelKind::CachePolicyStore:
-  case StageCostModelKind::AtomicMemory:
-    return model<ContinuousMemoryCostModel>();
-  case StageCostModelKind::IndirectGatherMemory:
-    return model<IndirectGatherMemoryCostModel>();
-  case StageCostModelKind::IndependentPipelinedLoop:
-    return model<IndependentPipelinedLoopCostModel>();
-  case StageCostModelKind::LoopCarriedRecurrence:
-    return model<LoopCarriedRecurrenceCostModel>();
-  case StageCostModelKind::RowwiseReduction:
-    return model<RowwiseReductionCostModel>();
-  case StageCostModelKind::PrefixScan:
-    return model<PrefixScanCostModel>();
-  case StageCostModelKind::CubeRoofline:
-  case StageCostModelKind::TinyCubeRoofline:
-    return model<CubeRooflineCostModel>();
-  case StageCostModelKind::ConversionPack:
-    return model<ConversionPackCostModel>();
-  case StageCostModelKind::ScalarIssue:
-  case StageCostModelKind::ScalarControl:
-  case StageCostModelKind::ScalarMath:
-  case StageCostModelKind::ScalarLoad:
-  case StageCostModelKind::ScalarStore:
-  case StageCostModelKind::IndexGeneration:
-  case StageCostModelKind::PredicateMask:
-  case StageCostModelKind::LoopPredicate:
-  case StageCostModelKind::IndirectScalarMemory:
-    return model<GenericStageCostModel>();
-  }
-  llvm_unreachable("unknown StageCostModelKind");
-}
 
 llvm::StringRef mlir::ascend::stringifyStageCostModel(StageCostModelKind kind) {
   switch (kind) {
@@ -845,13 +674,32 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       for (int64_t factor : stage.localSimtFactors)
         implementations.push_back({StageMode::SIMT, factor, true});
 
-    const StageCostModel &model = getStageCostModel(stage.costModelKind);
     for (const StageImplementation &implementation : implementations) {
       if (!isDeclaredLegal(stage, implementation))
         return llvm::createStringError(std::errc::invalid_argument,
                                        "Stage '%s' has an illegal candidate",
                                        stage.id.c_str());
-      StageImplementationCost cost = model.cost(stage, profile, implementation);
+      const auto fitted =
+          IndirectGatherMemoryCostModel().cost(stage, profile, implementation);
+      // Fits already describe the full W-warp increment; do not divide by W.
+      StageResourceCycles resources = mapWorkload(
+          stage,
+          implementation.mode == StageMode::SIMD ? profile.simd : profile.simt,
+          implementation.mode, fitted.load, fitted.store);
+      StageImplementationCost cost;
+      cost.implementation = implementation;
+      if (fitted.load)
+        cost.indirectLoadPricing = implementation.mode == StageMode::SIMD
+                                       ? profile.simdIndirectLoadModel
+                                       : profile.simtIndirectLoadModel;
+      if (fitted.store)
+        cost.indirectStorePricing = implementation.mode == StageMode::SIMD
+                                        ? profile.simdIndirectStoreModel
+                                        : profile.simtIndirectStoreModel;
+      cost.resources = resources;
+      cost.totalCycles = applySuperBlock(
+          stage, resources, implementation, profile,
+          estimateStage(stage, profile, implementation.mode, resources));
       if (!cost.isValid())
         return llvm::createStringError(std::errc::invalid_argument,
                                        "Stage '%s' produced an invalid cost",

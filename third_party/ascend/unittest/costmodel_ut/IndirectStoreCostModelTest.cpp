@@ -24,6 +24,13 @@ TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
   auto fit = indirectCosts(stage, profile);
   const auto &a = old;
   const auto &b = fit;
+  const IndirectGatherMemoryCostModel memoryModel;
+  const StageCostModel &model = memoryModel;
+  const auto increment =
+      model.cost(stage, profile, {StageMode::SIMD, 1, false});
+  ASSERT_TRUE(increment.store);
+  EXPECT_DOUBLE_EQ(*increment.store, 150.13769870695648 * 32);
+  EXPECT_FALSE(increment.load);
   EXPECT_DOUBLE_EQ(b[0].resources.store, 150.13769870695648 * 32);
   EXPECT_NEAR(b[1].resources.store, 145.04451206999323, 1e-9);
   for (unsigned i = 0; i < 2; ++i) {
