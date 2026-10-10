@@ -1,70 +1,48 @@
 // Tests for IndirectStoreCostModel responsibilities.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "IndirectMemoryTestUtils.h"
-#include "StageIRTestUtils.h"
 
+using namespace mlir;
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
 TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
-  IRTestContext context(true, false);
-  auto module = context.parse(R"mlir(
-    module {
-      func.func @probe(%p: tensor<32x!tt.ptr<f32>>, %v: tensor<32xf32>) {
-        tt.store %p, %v : tensor<32x!tt.ptr<f32>>
-        return
-      }
-    }
-  )mlir");
-  ASSERT_TRUE(module);
-  auto stage = logicalStage("store", StageCostModelKind::IndirectGatherMemory);
-  module->walk([&](mlir::triton::StoreOp op) {
-    stage.operations.push_back(op.getOperation());
-  });
+  IRTestContext context(false, true);
+  MemoryCase memory(context, Float32Type::get(&context), {32}, true);
+  auto &stage = memory.stage;
+  stage.iterationCount = 1;
   auto &work = stage.workload;
   work.storeBytes = work.indirectStoreBytes = 128;
   work.storeWarpInstructions = work.indirectStoreTransactions = 1;
   work.scalarOperations = 7;
   work.loadBytes = 16;
-  work.addressPatterns.push_back(loadedAddressPattern(stage, "tt.store", {32}));
-  auto profile = hardwareProfile();
-  profile.target = "Ascend950PR/dav-c310";
-  auto old = evaluateOneStage(stage, profile);
-  ASSERT_TRUE(bool(old));
+  work.addressPatterns = {loadedAddressPattern(stage, "tt.store", {32})};
+  auto profile = calibrationProfile();
+  auto old = indirectCosts(stage, profile);
   profile.simdIndirectStoreModel = "random_f32_store_no_fill_first_20261007";
   profile.simtIndirectStoreModel = "random_f32_store_fill_ab_20261007";
-  auto fit = evaluateOneStage(stage, profile);
-  ASSERT_TRUE(bool(fit));
-  const auto &a = old->stages.front().implementations;
-  const auto &b = fit->stages.front().implementations;
+  auto fit = indirectCosts(stage, profile);
+  const auto &a = old;
+  const auto &b = fit;
   EXPECT_DOUBLE_EQ(b[0].resources.store, 150.13769870695648 * 32);
   EXPECT_NEAR(b[1].resources.store, 145.04451206999323, 1e-9);
   for (unsigned i = 0; i < 2; ++i) {
-    EXPECT_DOUBLE_EQ(b[i].resources.load, a[i].resources.load);
-    EXPECT_DOUBLE_EQ(b[i].resources.scalar, a[i].resources.scalar);
-    EXPECT_DOUBLE_EQ(b[i].resources.compute, a[i].resources.compute);
+    expectOnlyMemoryChanged(a[i], b[i], true, 1);
     EXPECT_EQ(b[i].indirectLoadPricing, "legacy_transactions");
     EXPECT_NE(b[i].indirectStorePricing, "legacy_transactions");
   }
   profile.simd.indirectDependencyLatencyCycles = 10000;
-  auto changed = evaluateOneStage(stage, profile);
-  ASSERT_TRUE(bool(changed));
-  EXPECT_DOUBLE_EQ(changed->stages.front().implementations[0].totalCycles,
-                   b[0].totalCycles);
+  auto changed = indirectCosts(stage, profile);
+  EXPECT_DOUBLE_EQ(changed[0].totalCycles, b[0].totalCycles);
   profile.simdIndirectStoreModel = "random_f32_store_no_fill_reuse_20261007";
-  changed = evaluateOneStage(stage, profile);
-  ASSERT_TRUE(bool(changed));
-  EXPECT_EQ(changed->stages.front().implementations[0].indirectStorePricing,
-            "legacy_transactions");
+  changed = indirectCosts(stage, profile);
+  EXPECT_EQ(changed[0].indirectStorePricing, "legacy_transactions");
   work.hasProvenIndirectStoreReuse = true;
-  changed = evaluateOneStage(stage, profile);
-  ASSERT_TRUE(bool(changed));
-  EXPECT_DOUBLE_EQ(changed->stages.front().implementations[0].resources.store,
-                   65.26772542192847 * 32);
+  changed = indirectCosts(stage, profile);
+  EXPECT_DOUBLE_EQ(changed[0].resources.store, 65.26772542192847 * 32);
   work.predicateElements = 1;
-  changed = evaluateOneStage(stage, profile);
-  ASSERT_TRUE(bool(changed));
-  for (const auto &cost : changed->stages.front().implementations)
+  changed = indirectCosts(stage, profile);
+  for (const auto &cost : changed)
     EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
   profile.simdIndirectStoreModel = "unknown";
   EXPECT_FALSE(profile.isValid());
@@ -103,44 +81,32 @@ TEST(IndirectStoreCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
       payload = &stage;
   ASSERT_NE(payload, nullptr);
   ASSERT_EQ(payload->operations.size(), 3u);
-  auto profile = hardwareProfile();
-  profile.target = "Ascend950PR/dav-c310";
+  auto profile = calibrationProfile();
   profile.logicalWarpGroupCount = 1;
-  auto old = evaluateOneStage(*payload, profile);
-  ASSERT_TRUE(bool(old));
+  auto old = indirectCosts(*payload, profile);
   profile.simdIndirectStoreModel = profile.simtIndirectStoreModel =
       "random_store_no_fill_first_20261008";
-  auto fit = evaluateOneStage(*payload, profile);
-  ASSERT_TRUE(bool(fit));
+  auto fit = indirectCosts(*payload, profile);
   const double expected[] = {125.41805018354371 + 162.87111975882544 * 128,
                              382.1012717872757 + 1.3935292896269613 * 128 -
                                  19.191779247532597 * 4};
   for (unsigned i = 0; i < 2; ++i) {
-    const auto &cost = fit->stages.front().implementations[i];
-    const auto &before = old->stages.front().implementations[i];
+    const auto &cost = fit[i];
+    const auto &before = old[i];
     EXPECT_EQ(cost.indirectStorePricing, profile.simdIndirectStoreModel);
     EXPECT_NEAR(cost.resources.store, expected[i], 1e-8);
-    EXPECT_DOUBLE_EQ(cost.resources.load, before.resources.load);
-    EXPECT_DOUBLE_EQ(cost.resources.compute, before.resources.compute);
-    EXPECT_DOUBLE_EQ(cost.resources.scalar, before.resources.scalar);
-    EXPECT_DOUBLE_EQ(cost.resources.issue, before.resources.issue);
-    EXPECT_DOUBLE_EQ(cost.resources.synchronization,
-                     before.resources.synchronization);
-    EXPECT_NEAR(cost.totalCycles - before.totalCycles,
-                expected[i] - before.resources.store, 1e-8);
+    expectOnlyMemoryChanged(before, cost, true, 1);
   }
   auto multiple = *payload;
   multiple.operations.push_back(payload->operations.back());
-  auto rejected = evaluateOneStage(multiple, profile);
-  ASSERT_TRUE(bool(rejected));
-  for (const auto &cost : rejected->stages.front().implementations)
+  auto rejected = indirectCosts(multiple, profile);
+  for (const auto &cost : rejected)
     EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
 }
 
 TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
   IRTestContext context(false, true);
-  auto p = hardwareProfile();
-  p.target = "Ascend950PR/dav-c310";
+  auto p = calibrationProfile();
   for (int bits : {1, 8, 16, 32, 64}) {
     for (int e : {8, 128, 256, 512, 2048}) {
       for (int w : {1, 2, 4, 8, 16, 32, 64}) {
@@ -153,32 +119,17 @@ TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
                       : llvm::SmallVector<int64_t>{e};
             if (rank3 && e >= 256)
               shape = {2, 2, 2, 2, 2, 2, 2, e / 128};
-            auto type = mlir::RankedTensorType::get(
-                shape, mlir::IntegerType::get(&context, bits));
-            mlir::Block block;
-            auto loc = mlir::UnknownLoc::get(&context);
-            auto ptr = block.addArgument(mlir::IndexType::get(&context), loc);
-            auto value = block.addArgument(type, loc);
-            mlir::OperationState state(loc, "tt.store");
-            state.addOperands({ptr, value});
-            auto *op = mlir::Operation::create(state);
-            LogicalStage s;
-            s.id = "random-store";
-            s.costModelKind = StageCostModelKind::IndirectGatherMemory;
-            s.simdLegal = s.simtLegal = true;
-            s.legalSimtFactors = {1};
-            s.operations = {op};
+            MemoryCase memory(context, IntegerType::get(&context, bits), shape,
+                              true);
+            auto &s = memory.stage;
             auto &a = s.workload;
-            a.storeBytes = a.indirectStoreBytes = std::max(1, bits / 8) * e;
-            a.storeWarpInstructions = a.indirectStoreTransactions = 1;
             a.hasProvenIndirectStoreReuse = reuse;
-            a.addressPatterns = {loadedAddressPattern(
-                s, "tt.store", shape, "opaque_loaded", type.getRank() <= 5)};
+            a.addressPatterns[0].dependsOnLoadedValue = shape.size() <= 5;
             p.logicalWarpGroupCount = w;
             p.simdIndirectStoreModel = p.simtIndirectStoreModel =
                 reuse ? "random_store_no_fill_reuse_20261008"
                       : "random_store_no_fill_first_20261008";
-            auto fit = evaluateImplementations(s, p);
+            auto fit = indirectCosts(s, p);
             int g = bits <= 16 ? 0 : (bits == 32 ? 1 : 2);
             const double beta[2][3] = {
                 {152.8758408085307, 162.87111975882544, 161.07674811788297},
@@ -208,14 +159,13 @@ TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
             }
             if (reuse) {
               a.hasProvenIndirectStoreReuse = false;
-              for (const auto &cost : evaluateImplementations(s, p))
+              for (const auto &cost : indirectCosts(s, p))
                 EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
               a.hasProvenIndirectStoreReuse = true;
             }
             a.addressPatterns[0].axes[0].regularity = "fixed_stride";
-            for (const auto &cost : evaluateImplementations(s, p))
+            for (const auto &cost : indirectCosts(s, p))
               EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
-            op->destroy();
           }
         }
       }
