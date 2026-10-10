@@ -1,11 +1,7 @@
 // Tests for StageAddressPattern responsibilities.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "CostModelTestUtils.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Parser/Parser.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "StageIRTestUtils.h"
 
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
@@ -89,18 +85,12 @@ static std::string partialContinuousTileIR(int64_t rows, int64_t columns,
 
 TEST(StageAddressPatternTest, PartialContinuousRowsUseDirectMemoryPerRow) {
   for (int64_t columns : {32, 8, 1}) {
-    mlir::MLIRContext context;
-    context.getOrLoadDialect<mlir::arith::ArithDialect>();
-    context.getOrLoadDialect<mlir::func::FuncDialect>();
-    context.getOrLoadDialect<mlir::triton::TritonDialect>();
-    context.allowUnregisteredDialects();
-    auto module = mlir::parseSourceString<mlir::ModuleOp>(
-        partialContinuousTileIR(8, columns, 1), &context);
+    IRTestContext context(true, true);
+    auto module = context.parse(partialContinuousTileIR(8, columns, 1));
     ASSERT_TRUE(module);
     auto partition = StagePartitioner().partition(
         *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
-    if (!partition)
-      FAIL() << llvm::toString(partition.takeError());
+    ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
     const LogicalStage *payload = nullptr;
     for (const LogicalStage &stage : partition->stages)
       if (stage.costModelKind ==
@@ -127,8 +117,7 @@ TEST(StageAddressPatternTest, PartialContinuousRowsUseDirectMemoryPerRow) {
                      8.0 * std::ceil(columns / 32.0));
     EXPECT_DOUBLE_EQ(payload->workload.indirectLoadTransactions, 0.0);
     auto table = evaluateOneStage(*payload);
-    if (!table)
-      FAIL() << llvm::toString(table.takeError());
+    ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
     ASSERT_GE(table->stages.front().implementations.size(), 2u);
     EXPECT_DOUBLE_EQ(table->stages.front().implementations[0].resources.load,
                      8.0 * columns * 4.0 / 32.0);
@@ -137,18 +126,12 @@ TEST(StageAddressPatternTest, PartialContinuousRowsUseDirectMemoryPerRow) {
 
 TEST(StageAddressPatternTest, PartialStructuredStoreAndNonunitStride) {
   for (bool store : {false, true}) {
-    mlir::MLIRContext context;
-    context.getOrLoadDialect<mlir::arith::ArithDialect>();
-    context.getOrLoadDialect<mlir::func::FuncDialect>();
-    context.getOrLoadDialect<mlir::triton::TritonDialect>();
-    context.allowUnregisteredDialects();
-    auto module = mlir::parseSourceString<mlir::ModuleOp>(
-        partialContinuousTileIR(8, 8, 2, store), &context);
+    IRTestContext context(true, true);
+    auto module = context.parse(partialContinuousTileIR(8, 8, 2, store));
     ASSERT_TRUE(module);
     auto partition = StagePartitioner().partition(
         *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
-    if (!partition)
-      FAIL() << llvm::toString(partition.takeError());
+    ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
     bool sawExpectedKind = false;
     for (const LogicalStage &stage : partition->stages) {
       if (store && stage.costModelKind ==
@@ -183,16 +166,12 @@ TEST(StageAddressPatternTest, PartialStructuredStoreAndNonunitStride) {
   unsupported.replace(begin, end - begin,
                       "        %index = tt.load %indices : "
                       "tensor<8x!tt.ptr<i32>>\n");
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(unsupported, &context);
+  IRTestContext context(true, false);
+  auto module = context.parse(unsupported);
   ASSERT_TRUE(module);
   auto partition = StagePartitioner().partition(
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
-  if (!partition)
-    FAIL() << llvm::toString(partition.takeError());
+  ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
   for (const LogicalStage &stage : partition->stages)
     EXPECT_NE(stage.costModelKind,
               StageCostModelKind::PartialContinuousTileMemory);
@@ -209,16 +188,12 @@ TEST(StageAddressPatternTest,
     source.replace(begin, end - begin,
                    "        %index = arith.muli %indexRange, %indexRange : "
                    "tensor<8xi32>\n");
-    mlir::MLIRContext context;
-    context.getOrLoadDialect<mlir::arith::ArithDialect>();
-    context.getOrLoadDialect<mlir::func::FuncDialect>();
-    context.getOrLoadDialect<mlir::triton::TritonDialect>();
-    auto module = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+    IRTestContext context(true, false);
+    auto module = context.parse(source);
     ASSERT_TRUE(module);
     auto partition = StagePartitioner().partition(
         *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
-    if (!partition)
-      FAIL() << llvm::toString(partition.takeError());
+    ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
     bool sawPayload = false;
     for (const LogicalStage &stage : partition->stages) {
       const double rows = store ? stage.workload.partialContinuousStoreRows
@@ -236,9 +211,7 @@ TEST(StageAddressPatternTest,
 
 TEST(StageAddressPatternTest,
      PartialStructuredTailRequiresAllPrefixAxesUnstructured) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
+  IRTestContext context(true, false);
   std::string source = R"mlir(
 module {
 tt.func public @partial_3d(%src: !tt.ptr<f32>,
@@ -289,12 +262,11 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
 }
 }
 )mlir";
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+  auto module = context.parse(source);
   ASSERT_TRUE(module);
   auto partition = StagePartitioner().partition(
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
-  if (!partition)
-    FAIL() << llvm::toString(partition.takeError());
+  ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
   auto findPayload =
       [](const StagePartition &partition) -> const LogicalStage * {
     for (const LogicalStage &stage : partition.stages)
@@ -348,14 +320,12 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
   %middle_stride =)mlir");
   replaceOnce("arith.muli %middle_broadcast, %middle_stride",
               "arith.muli %middle_idx_broadcast, %middle_stride");
-  auto crossedModule =
-      mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+  auto crossedModule = context.parse(source);
   ASSERT_TRUE(crossedModule);
   auto crossed = StagePartitioner().partition(*crossedModule,
                                               mlir::ascend::SimtAnchorPlan{},
                                               StagePartitionerOptions{});
-  if (!crossed)
-    FAIL() << llvm::toString(crossed.takeError());
+  ASSERT_TRUE(bool(crossed)) << llvm::toString(crossed.takeError());
   payload = findPayload(*crossed);
   ASSERT_NE(payload, nullptr);
   EXPECT_EQ(payload->costModelKind, StageCostModelKind::IndirectGatherMemory);
@@ -367,14 +337,13 @@ tt.func public @partial_3d(%src: !tt.ptr<f32>,
   // slice contains the final 8 elements.
   replaceOnce("arith.muli %outer_broadcast, %row_stride",
               "arith.muli %index_broadcast, %row_stride");
-  auto twoIndirectAxes =
-      mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+  auto twoIndirectAxes = context.parse(source);
   ASSERT_TRUE(twoIndirectAxes);
   auto twoAxisPartition = StagePartitioner().partition(
       *twoIndirectAxes, mlir::ascend::SimtAnchorPlan{},
       StagePartitionerOptions{});
-  if (!twoAxisPartition)
-    FAIL() << llvm::toString(twoAxisPartition.takeError());
+  ASSERT_TRUE(bool(twoAxisPartition))
+      << llvm::toString(twoAxisPartition.takeError());
   payload = findPayload(*twoAxisPartition);
   ASSERT_NE(payload, nullptr);
   EXPECT_EQ(payload->costModelKind,
@@ -399,16 +368,12 @@ TEST(StageAddressPatternTest, LoadedScalarIndexRemainsIndirect) {
     source.replace(begin, end - begin,
                    "        %shift = tt.load %indices : !tt.ptr<i32>\n"
                    "        %index = tt.splat %shift : i32 -> tensor<8xi32>\n");
-    mlir::MLIRContext context;
-    context.getOrLoadDialect<mlir::arith::ArithDialect>();
-    context.getOrLoadDialect<mlir::func::FuncDialect>();
-    context.getOrLoadDialect<mlir::triton::TritonDialect>();
-    auto module = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+    IRTestContext context(true, false);
+    auto module = context.parse(source);
     ASSERT_TRUE(module);
     auto partition = StagePartitioner().partition(
         *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
-    if (!partition)
-      FAIL() << llvm::toString(partition.takeError());
+    ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
     bool sawPayload = false;
     for (const LogicalStage &stage : partition->stages)
       for (mlir::Operation *operation : stage.operations) {

@@ -1,29 +1,22 @@
 // Tests for IndirectLoadCostModel responsibilities.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "IndirectMemoryTestUtils.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Parser/Parser.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "StageIRTestUtils.h"
 
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
 TEST(IndirectLoadCostModelTest,
      SimdMatchedIndirectFitReplacesOnlyLoadResource) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(true, false);
+  auto module = context.parse(R"mlir(
     module {
       func.func @probe(%p: tensor<32x!tt.ptr<f32>>) {
         %x = tt.load %p : tensor<32x!tt.ptr<f32>>
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   auto stage =
       logicalStage("indirect", StageCostModelKind::IndirectGatherMemory);
@@ -58,18 +51,15 @@ TEST(IndirectLoadCostModelTest,
 }
 
 TEST(IndirectLoadCostModelTest, SimdMatchedIndirectNarrowRankTwoDomain) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(true, false);
+  auto module = context.parse(R"mlir(
     module {
       func.func @probe(%p: tensor<4x8x!tt.ptr<f32>>) {
         %x = tt.load %p : tensor<4x8x!tt.ptr<f32>>
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   auto stage = logicalStage("rank2", StageCostModelKind::IndirectGatherMemory);
   module->walk([&](mlir::triton::LoadOp load) {
@@ -108,8 +98,7 @@ TEST(IndirectLoadCostModelTest, SimdMatchedIndirectNarrowRankTwoDomain) {
 }
 
 TEST(IndirectLoadCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
-  mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
+  IRTestContext context(false, true);
   const llvm::SmallVector<mlir::Type> types = {
       mlir::IntegerType::get(&context, 8),
       mlir::IntegerType::get(&context, 16),
@@ -197,8 +186,7 @@ TEST(IndirectLoadCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
 }
 
 TEST(IndirectLoadCostModelTest, SimdDtypeRankFitRejectsUnvalidatedDomains) {
-  mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
+  IRTestContext context(false, true);
   const llvm::SmallVector<std::pair<mlir::Type, llvm::SmallVector<int64_t>>>
       cases = {{mlir::Float64Type::get(&context), {32}},
                {mlir::IntegerType::get(&context, 1), {32}},
@@ -239,11 +227,8 @@ TEST(IndirectLoadCostModelTest, SimdDtypeRankFitRejectsUnvalidatedDomains) {
 }
 
 TEST(IndirectLoadCostModelTest, SimdDtypeRankFitAcceptsPartitionedTritonLoad) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(true, false);
+  auto module = context.parse(R"mlir(
     module {
       tt.func public @probe(%x: !tt.ptr<i16>, %idx: !tt.ptr<i32>, %out: !tt.ptr<i16>) {
         %r = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
@@ -259,8 +244,7 @@ TEST(IndirectLoadCostModelTest, SimdDtypeRankFitAcceptsPartitionedTritonLoad) {
         tt.return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   auto partition = StagePartitioner().partition(
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
@@ -297,8 +281,7 @@ TEST(IndirectLoadCostModelTest, SimdDtypeRankFitAcceptsPartitionedTritonLoad) {
 
 TEST(IndirectLoadCostModelTest,
      SimtDtypeRankFitUsesStorageWidthAndPreservesResources) {
-  mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
+  IRTestContext context(false, true);
   const llvm::SmallVector<mlir::Type> types = {
       mlir::IntegerType::get(&context, 8),
       mlir::IntegerType::get(&context, 16),
@@ -428,8 +411,7 @@ TEST(IndirectLoadCostModelTest,
 }
 
 TEST(IndirectLoadCostModelTest, SimtDtypeRankFitRejectsUnvalidatedDomains) {
-  mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
+  IRTestContext context(false, true);
   const llvm::SmallVector<llvm::SmallVector<int64_t>> shapes = {
       {32}, {16}, {2, 128, 2}, {2, 2, 2, 2, 2, 2}, {1, 32}, {2, 256}};
   for (size_t index = 0; index < shapes.size(); ++index) {
@@ -500,18 +482,15 @@ TEST(IndirectLoadCostModelTest, SimtDtypeRankFitRejectsUnvalidatedDomains) {
 }
 
 TEST(IndirectLoadCostModelTest, RandomIndirectFitReplacesOnlyLoadResource) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(true, false);
+  auto module = context.parse(R"mlir(
     module {
       func.func @probe(%p: tensor<256x!tt.ptr<i32>>) {
         %x = tt.load %p : tensor<256x!tt.ptr<i32>>
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   auto stage =
       logicalStage("indirect", StageCostModelKind::IndirectGatherMemory,
@@ -578,8 +557,7 @@ TEST(IndirectLoadCostModelTest, IndirectMemoryUsesDependencyProfile) {
   profile.simt.indirectLoadTransactionsPerCycle = 1.0;
   profile.simt.indirectDependencyLatencyCycles = 20.0;
   auto table = evaluateOneStage(stage, profile);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   const auto &costs = table->stages.front().implementations;
   ASSERT_EQ(costs.size(), 2u);
   EXPECT_DOUBLE_EQ(costs[0].resources.load, 112.0);

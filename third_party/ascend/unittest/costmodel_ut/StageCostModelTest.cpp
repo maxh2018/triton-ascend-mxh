@@ -1,57 +1,20 @@
 // Tests for StageCostModel responsibilities.
-#include "AscendModel/RouteModel/Models/ComputeStageCostModels.h"
-#include "AscendModel/RouteModel/Models/ControlStageCostModels.h"
-#include "AscendModel/RouteModel/Models/IndirectGatherMemoryCostModel.h"
-#include "AscendModel/RouteModel/Models/MemoryStageCostModels.h"
-#include "AscendModel/RouteModel/Models/ReductionStageCostModels.h"
+#include "AscendModel/RouteModel/StageCostModel.h"
 #include "CostModelTestUtils.h"
 #include "llvm/Support/FormatVariadic.h"
 
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
-TEST(StageCostModelTest, RegistryDispatchMatchesIndependentModels) {
-  const GenericStageCostModel generic;
-  const AutoBlockifyCostModel blockify;
-  const ContinuousMemoryCostModel continuous;
-  const PartialContinuousMemoryCostModel partial;
-  const IndirectGatherMemoryCostModel indirect;
-  const IndependentPipelinedLoopCostModel loop;
-  const LoopCarriedRecurrenceCostModel recurrence;
-  const RowwiseReductionCostModel reduction;
-  const PrefixScanCostModel scan;
-  const CubeRooflineCostModel cube;
-  const ConversionPackCostModel conversion;
-  const std::pair<StageCostModelKind, const StageCostModel *> models[] = {
-      {StageCostModelKind::AutoBlockifyDispatch, &blockify},
-      {StageCostModelKind::AutoBlockifyLoop, &blockify},
-      {StageCostModelKind::ScalarIssue, &generic},
-      {StageCostModelKind::ScalarControl, &generic},
-      {StageCostModelKind::ScalarMath, &generic},
-      {StageCostModelKind::ScalarLoad, &generic},
-      {StageCostModelKind::ScalarStore, &generic},
-      {StageCostModelKind::IndexGeneration, &generic},
-      {StageCostModelKind::PredicateMask, &generic},
-      {StageCostModelKind::LoopPredicate, &generic},
-      {StageCostModelKind::ContinuousTileMemory, &continuous},
-      {StageCostModelKind::PartialContinuousTileMemory, &partial},
-      {StageCostModelKind::ContinuousTileStore, &continuous},
-      {StageCostModelKind::ContinuousShortLoad, &continuous},
-      {StageCostModelKind::CachePolicyStore, &continuous},
-      {StageCostModelKind::IndirectScalarMemory, &generic},
-      {StageCostModelKind::IndirectGatherMemory, &indirect},
-      {StageCostModelKind::AtomicMemory, &continuous},
-      {StageCostModelKind::IndependentPipelinedLoop, &loop},
-      {StageCostModelKind::LoopCarriedRecurrence, &recurrence},
-      {StageCostModelKind::RowwiseReduction, &reduction},
-      {StageCostModelKind::PrefixScan, &scan},
-      {StageCostModelKind::CubeRoofline, &cube},
-      {StageCostModelKind::TinyCubeRoofline, &cube},
-      {StageCostModelKind::ConversionPack, &conversion}};
+TEST(StageCostModelTest, RegistryDispatchMatchesDirectModelCosts) {
   auto profile = hardwareProfile();
   profile.logicalWarpGroupCount = 4;
   profile.simd.prefixScanDependencyFactor = 2.5;
-  for (const auto &[kind, model] : models) {
+  // StageCostModelKind is a contiguous enum; exercise every registered kind.
+  for (int value = int(StageCostModelKind::AutoBlockifyDispatch);
+       value <= int(StageCostModelKind::ConversionPack); ++value) {
+    const auto kind = static_cast<StageCostModelKind>(value);
+    const auto &model = getStageCostModel(kind);
     SCOPED_TRACE(stringifyStageCostModel(kind).str());
     for (bool dependent : {false, true}) {
       auto stage = logicalStage("direct-model", kind,
@@ -80,21 +43,17 @@ TEST(StageCostModelTest, RegistryDispatchMatchesIndependentModels) {
       work.dotFlops = 128;
       work.estimatedSpillTransactions = 2;
       auto table = evaluateOneStage(stage, profile);
-      if (!table)
-        FAIL() << llvm::toString(table.takeError());
+      ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
       const auto &costs = table->stages.front().implementations;
       ASSERT_EQ(costs.size(), 4u);
       for (const auto &evaluated : costs) {
         const auto expected =
-            model->cost(stage, profile, evaluated.implementation);
-        const auto dispatched = getStageCostModel(kind).cost(
-            stage, profile, evaluated.implementation);
+            model.cost(stage, profile, evaluated.implementation);
         EXPECT_TRUE(expected.isValid());
         const auto json = [](const StageImplementationCost &cost) {
           return llvm::formatv("{0}", llvm::json::Value(cost.toJSON())).str();
         };
         // Includes all resource fields, pricing labels and SuperBlock cost.
-        EXPECT_EQ(json(dispatched), json(expected));
         EXPECT_EQ(json(evaluated), json(expected));
       }
     }
@@ -109,20 +68,24 @@ TEST(StageCostModelTest, DirectModelsPreserveSerialAndPipelinedMemoryPolicies) {
   stage.workload.storeBytes = 320;
   auto profile = hardwareProfile();
   const StageImplementation simd{StageMode::SIMD, 1, false};
-  auto pipelined = ContinuousMemoryCostModel().cost(stage, profile, simd);
+  auto pipelined = getStageCostModel(StageCostModelKind::ContinuousTileMemory)
+                       .cost(stage, profile, simd);
   // setup + iterations * (scalar + max(load, store, atomic, issue)).
   EXPECT_DOUBLE_EQ(pipelined.totalCycles, 10 + 3 * (7 + 20));
   stage.costModelKind = StageCostModelKind::PartialContinuousTileMemory;
-  auto serial = PartialContinuousMemoryCostModel().cost(stage, profile, simd);
+  auto serial =
+      getStageCostModel(StageCostModelKind::PartialContinuousTileMemory)
+          .cost(stage, profile, simd);
   EXPECT_DOUBLE_EQ(serial.totalCycles, 10 + 3 * (7 + 20 + 20 + 1));
   EXPECT_DOUBLE_EQ(serial.resources.load, pipelined.resources.load);
   EXPECT_DOUBLE_EQ(serial.resources.store, pipelined.resources.store);
   stage.costModelKind = StageCostModelKind::ContinuousTileMemory;
   stage.features.hasLoop = true;
   stage.features.hasLoopCarriedDataDependency = true;
-  EXPECT_DOUBLE_EQ(
-      ContinuousMemoryCostModel().cost(stage, profile, simd).totalCycles,
-      serial.totalCycles);
+  EXPECT_DOUBLE_EQ(getStageCostModel(StageCostModelKind::ContinuousTileMemory)
+                       .cost(stage, profile, simd)
+                       .totalCycles,
+                   serial.totalCycles);
 }
 
 TEST(StageCostModelTest, SimdPricesShortAxesPerSegmentAndElementWidth) {
@@ -180,8 +143,7 @@ TEST(StageCostModelTest, PrefixScanUsesModeSpecificDependencyFactor) {
   profile.simd.prefixScanDependencyFactor = 2.5;
   profile.simt.prefixScanDependencyFactor = 1.0;
   auto table = evaluateOneStage(std::move(stage), profile);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
 
   const auto &implementations = table->stages.front().implementations;
   ASSERT_EQ(implementations.size(), 2u);
@@ -213,16 +175,14 @@ TEST(StageCostModelTest, LoopCarriedRecurrenceAppliesScanDependencyFactor) {
   baselineProfile.simd.prefixScanDependencyFactor = 1.0;
   baselineProfile.simt.prefixScanDependencyFactor = 1.0;
   auto baseline = evaluateOneStage(buildStage(), baselineProfile);
-  if (!baseline)
-    FAIL() << llvm::toString(baseline.takeError());
+  ASSERT_TRUE(bool(baseline)) << llvm::toString(baseline.takeError());
   ASSERT_EQ(baseline->stages.front().implementations.size(), 2u);
 
   // Scan factors: SIMD 2.5 / SIMT 1.0 (production profile shape).
   HardwareProfile scanProfile = baselineProfile;
   scanProfile.simd.prefixScanDependencyFactor = 2.5;
   auto scaled = evaluateOneStage(buildStage(), scanProfile);
-  if (!scaled)
-    FAIL() << llvm::toString(scaled.takeError());
+  ASSERT_TRUE(bool(scaled)) << llvm::toString(scaled.takeError());
   ASSERT_EQ(scaled->stages.front().implementations.size(), 2u);
 
   // Only the scan-class half is scaled: SIMD scan-shuffle cycles grow from
@@ -243,8 +203,8 @@ TEST(StageCostModelTest, LoopCarriedRecurrenceAppliesScanDependencyFactor) {
   reduceOnlyStage.workload.scanShuffleLaneSteps = 0.0;
   auto reduceOnlyScaled =
       evaluateOneStage(std::move(reduceOnlyStage), scanProfile);
-  if (!reduceOnlyScaled)
-    FAIL() << llvm::toString(reduceOnlyScaled.takeError());
+  ASSERT_TRUE(bool(reduceOnlyScaled))
+      << llvm::toString(reduceOnlyScaled.takeError());
   EXPECT_DOUBLE_EQ(
       reduceOnlyScaled->stages.front().implementations[0].totalCycles,
       baseline->stages.front().implementations[0].totalCycles);
@@ -253,8 +213,7 @@ TEST(StageCostModelTest, LoopCarriedRecurrenceAppliesScanDependencyFactor) {
   LogicalStage plainStage = buildStage();
   plainStage.features.hasPrefixScan = false;
   auto plainScaled = evaluateOneStage(std::move(plainStage), scanProfile);
-  if (!plainScaled)
-    FAIL() << llvm::toString(plainScaled.takeError());
+  ASSERT_TRUE(bool(plainScaled)) << llvm::toString(plainScaled.takeError());
   EXPECT_DOUBLE_EQ(plainScaled->stages.front().implementations[0].totalCycles,
                    baseline->stages.front().implementations[0].totalCycles);
 }
@@ -272,8 +231,7 @@ TEST(StageCostModelTest, IndependentLoopUsesSimdRooflineAndSerialSimtCost) {
   stage.workload.storeWarpInstructions = 10.0;
   stage.workload.dotFlops = 512.0;
   auto table = evaluateOneStage(stage);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   EXPECT_TRUE(stage.features.permitsSimdRoofline());
   EXPECT_LT(table->stages[0].implementations[0].totalCycles,
             table->stages[0].implementations[1].totalCycles);
@@ -293,8 +251,7 @@ TEST(StageCostModelTest, SimdCubeStageUsesCvPipelineCriticalPath) {
   stage.workload.issueElements = 128.0;
 
   auto table = evaluateOneStage(stage);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
 
   const StageImplementationCost &simd = table->stages[0].implementations[0];
   ASSERT_EQ(simd.implementation.mode, StageMode::SIMD);
@@ -321,8 +278,7 @@ TEST(StageCostModelTest, TrueLoopCarriedDependencyDisablesSimdRoofline) {
   stage.workload.dotFlops = 512.0;
 
   auto table = evaluateOneStage(stage);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   EXPECT_FALSE(stage.features.permitsSimdRoofline());
   EXPECT_GT(table->stages[0].implementations[0].totalCycles, 0.0);
 }
@@ -342,8 +298,7 @@ TEST(StageCostModelTest, ControlFlowUsesCountsRatesAndLaneActivity) {
   stage.workload.scalarOperations = 1.0;
 
   auto table = evaluateOneStage(stage);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   const auto &cost = table->stages[0].implementations[0];
   EXPECT_DOUBLE_EQ(cost.resources.loopControl, 2.0);
   EXPECT_DOUBLE_EQ(cost.resources.branchControl, 9.0);
@@ -365,8 +320,7 @@ TEST(StageCostModelTest, RecurrenceAccumulatesCriticalPathAndTraffic) {
   stage.workload.estimatedSpillTransactions = 7.0;
 
   auto table = evaluateOneStage(stage);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   EXPECT_GT(table->stages[0].implementations[0].totalCycles, 100.0);
   EXPECT_GT(table->stages[0].implementations[0].resources.criticalPath, 0.0);
 }
@@ -383,10 +337,8 @@ TEST(StageCostModelTest, SimdRecurrenceChargesPersistentLiveStateBytes) {
 
   auto baselineTable = evaluateOneStage(baseline);
   auto stateTable = evaluateOneStage(withState);
-  if (!baselineTable)
-    FAIL() << llvm::toString(baselineTable.takeError());
-  if (!stateTable)
-    FAIL() << llvm::toString(stateTable.takeError());
+  ASSERT_TRUE(bool(baselineTable)) << llvm::toString(baselineTable.takeError());
+  ASSERT_TRUE(bool(stateTable)) << llvm::toString(stateTable.takeError());
   const double baselineSimd =
       baselineTable->stages[0].implementations[0].totalCycles;
   const double stateSimd = stateTable->stages[0].implementations[0].totalCycles;
@@ -408,8 +360,7 @@ TEST(StageCostModelTest,
   stage.workload.issueElements = 64.0;
 
   auto table = evaluateOneStage(stage);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   const auto &costs = table->stages.front().implementations;
   ASSERT_EQ(costs.size(), 3u);
   EXPECT_LE(costs[1].totalCycles, costs[0].totalCycles);
@@ -419,8 +370,7 @@ TEST(StageCostModelTest,
 
   stage.workload.estimatedSpillTransactions = 32.0;
   auto spillingTable = evaluateOneStage(stage);
-  if (!spillingTable)
-    FAIL() << llvm::toString(spillingTable.takeError());
+  ASSERT_TRUE(bool(spillingTable)) << llvm::toString(spillingTable.takeError());
   const auto &spillingCosts = spillingTable->stages.front().implementations;
   ASSERT_EQ(spillingCosts.size(), 3u);
   EXPECT_GT(spillingCosts[2].totalCycles, spillingCosts[1].totalCycles);
@@ -442,8 +392,7 @@ TEST(StageCostModelTest,
   stage.workload.issueElements = 64.0;
 
   auto table = evaluateOneStage(stage, hardwareProfile());
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   const auto &costs = table->stages.front().implementations;
   ASSERT_EQ(costs.size(), 4u);
   EXPECT_FALSE(costs[0].implementation.localScope);
@@ -478,8 +427,7 @@ TEST(StageCostModelTest,
   HardwareProfile profile = hardwareProfile();
   profile.simd.atomicRates["fadd.f32"] = {8.0, 2.0, 5.0, 3.0};
   auto table = evaluateOneStage(stage, profile);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   const auto &simd = table->stages.front().implementations.front();
   EXPECT_DOUBLE_EQ(simd.resources.load, 32.0);
   EXPECT_DOUBLE_EQ(simd.resources.store, 0.0);
@@ -496,13 +444,11 @@ TEST(StageCostModelTest, SuperBlockLatencyHidingStopsAtUsefulFactorLimit) {
   cappedProfile.superblockUsefulFactorLimit = 2;
   cappedProfile.superblockPersistentStatePressureFreeFactor = 2;
   auto table = evaluateOneStage(stage, cappedProfile);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   table->logicalProgramCountHint = 64;
   table->physicalCoreCountHint = 32;
   auto routes = solveStageRoutes(*table, cappedProfile.transition);
-  if (!routes)
-    FAIL() << llvm::toString(routes.takeError());
+  ASSERT_TRUE(bool(routes)) << llvm::toString(routes.takeError());
   EXPECT_TRUE(routes->allSimt.legal);
   EXPECT_EQ(routes->allSimt.routeSuperblockFactor, 2);
   EXPECT_LT(routes->allSimt.totalCycles,
@@ -527,8 +473,7 @@ TEST(StageCostModelTest, PartialContinuousStageAlwaysUsesSerialCost) {
   stage.workload.partialContinuousLoadWarpInstructions = 10.0;
   stage.workload.partialContinuousStoreWarpInstructions = 10.0;
   auto table = evaluateOneStage(stage);
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   ASSERT_EQ(table->stages.front().implementations.size(), 2u);
   for (const StageImplementationCost &implementation :
        table->stages.front().implementations) {

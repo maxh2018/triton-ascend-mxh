@@ -13,6 +13,16 @@
 
 namespace mlir::ascend::test {
 
+inline StageImplementationCost
+implementationCost(StageImplementation implementation, double cycles,
+                   double setup = 0) {
+  StageImplementationCost cost;
+  cost.implementation = implementation;
+  cost.totalCycles = cycles;
+  cost.resources.setup = setup;
+  return cost;
+}
+
 inline HardwareProfile hardwareProfile(StageTransitionCost transition = {}) {
   HardwareProfile profile;
   profile.profileVersion = "unit-test-profile-v1";

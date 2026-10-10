@@ -1,21 +1,15 @@
 // Tests for StageWorkloadAnalysis responsibilities.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "CostModelTestUtils.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Parser/Parser.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "StageIRTestUtils.h"
 
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
 TEST(StageWorkloadAnalysisTest,
      WorkloadDoesNotInferSegmentsOrScalarFallbackFromLogicalRows) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context;
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%a4x16: tensor<4x16xf32>,
                         %b4x16: tensor<4x16xf32>,
@@ -29,8 +23,7 @@ TEST(StageWorkloadAnalysisTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   StagePartition partition;
@@ -57,11 +50,8 @@ TEST(StageWorkloadAnalysisTest,
 
 TEST(StageWorkloadAnalysisTest,
      WorkloadRetainsRowBroadcastAndComparisonInputWidth) {
-  mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%a: tensor<8x8xf32>, %row: tensor<8x1xf32>,
                         %a3: tensor<2x4x8xf32>, %row3: tensor<2x4x1xf32>) {
@@ -73,8 +63,7 @@ TEST(StageWorkloadAnalysisTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   StagePartition partition;
   partition.operationOwnershipComplete = true;
@@ -105,11 +94,8 @@ TEST(StageWorkloadAnalysisTest,
 }
 
 TEST(StageWorkloadAnalysisTest, WorkloadUsesPostFlattenBroadcastSuffix) {
-  mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%x: tensor<2x4x8xf32>,
                         %leading: tensor<1x4x8xf32>,
@@ -132,8 +118,7 @@ TEST(StageWorkloadAnalysisTest, WorkloadUsesPostFlattenBroadcastSuffix) {
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   StagePartition partition;
   partition.operationOwnershipComplete = true;
@@ -162,11 +147,8 @@ TEST(StageWorkloadAnalysisTest, WorkloadUsesPostFlattenBroadcastSuffix) {
 
 TEST(StageWorkloadAnalysisTest,
      WorkloadPreservesAtomicSemanticsWithoutCountingAStore) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%load_pointer: tensor<64x!tt.ptr<f32>>,
                         %index_pointer: tensor<64x!tt.ptr<i64>>,
@@ -187,8 +169,7 @@ TEST(StageWorkloadAnalysisTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   StagePartition partition;

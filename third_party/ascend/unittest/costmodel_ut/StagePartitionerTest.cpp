@@ -1,11 +1,7 @@
 // Tests for StagePartitioner responsibilities.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "CostModelTestUtils.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Parser/Parser.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "StageIRTestUtils.h"
 
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
@@ -63,8 +59,8 @@ TEST(StagePartitionerTest,
   EXPECT_EQ(mixedOnly.stages[0].legalSimtFactors, (std::vector<int64_t>{1}));
   EXPECT_EQ(mixedOnly.stages[0].localSimtFactors, (std::vector<int64_t>{1}));
   auto mixedOnlyCosts = evaluateOneStage(mixedOnly.stages[0]);
-  if (!mixedOnlyCosts)
-    FAIL() << llvm::toString(mixedOnlyCosts.takeError());
+  ASSERT_TRUE(bool(mixedOnlyCosts))
+      << llvm::toString(mixedOnlyCosts.takeError());
   ASSERT_EQ(mixedOnlyCosts->stages[0].implementations.size(), 3u);
   EXPECT_EQ(mixedOnlyCosts->stages[0].legalSimtFactors,
             (std::vector<int64_t>{1}));
@@ -94,12 +90,8 @@ TEST(StagePartitionerTest, LocalScopeFactorsHonorKernelResourceMaximum) {
 
 TEST(StagePartitionerTest,
      OperationGraphBoundaryOwnsEveryRootAndDerivesLiveValues) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::scf::SCFDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%pointer: i64) {
         %c1 = arith.constant 1 : index
@@ -115,8 +107,7 @@ TEST(StagePartitionerTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   mlir::Operation *recurrence = nullptr;
@@ -137,14 +128,12 @@ TEST(StagePartitionerTest,
 
   auto structure =
       mlir::ascend::ProgramStructureAnalysis().analyze(*module, anchorPlan);
-  if (!structure)
-    FAIL() << llvm::toString(structure.takeError());
+  ASSERT_TRUE(bool(structure)) << llvm::toString(structure.takeError());
   EXPECT_EQ(structure->rootOperations.size(), 6u);
 
   auto result = StagePartitioner().partition(*module, anchorPlan,
                                              StagePartitionerOptions{});
-  if (!result)
-    FAIL() << llvm::toString(result.takeError());
+  ASSERT_TRUE(bool(result)) << llvm::toString(result.takeError());
   const StagePartition &partition = *result;
   EXPECT_TRUE(partition.operationOwnershipComplete);
 
@@ -172,11 +161,8 @@ TEST(StagePartitionerTest,
 
 TEST(StagePartitionerTest,
      SameStatementSupportOperationsJoinTheDominantResourceStage) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%pointer: i64) {
         %index = arith.constant 0 : i64
@@ -186,8 +172,7 @@ TEST(StagePartitionerTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   llvm::SmallVector<mlir::Operation *> roots;
@@ -206,8 +191,7 @@ TEST(StagePartitionerTest,
   structure.rootOperations.assign(roots.begin(), roots.end());
   auto result = mlir::ascend::StageBoundaryAnalysis().analyze(
       structure, mlir::ascend::SimtAnchorPlan{});
-  if (!result)
-    FAIL() << llvm::toString(result.takeError());
+  ASSERT_TRUE(bool(result)) << llvm::toString(result.takeError());
   ASSERT_EQ(result->stages.size(), 2u);
   EXPECT_EQ(result->stages.front().operations.size(), 3u);
   EXPECT_EQ(result->stages.front().costModelKind,
@@ -218,12 +202,8 @@ TEST(StagePartitionerTest,
 
 TEST(StagePartitionerTest,
      CompoundScopeOrderIsNormalizedBeforeStagePartitioning) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::scf::SCFDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%pointer: i64) {
         %c1 = arith.constant 1 : index
@@ -240,8 +220,7 @@ TEST(StagePartitionerTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   mlir::Operation *setup = nullptr;
@@ -271,8 +250,7 @@ TEST(StagePartitionerTest,
 
   auto structure =
       mlir::ascend::ProgramStructureAnalysis().analyze(*module, anchorPlan);
-  if (!structure)
-    FAIL() << llvm::toString(structure.takeError());
+  ASSERT_TRUE(bool(structure)) << llvm::toString(structure.takeError());
   auto setupPosition = llvm::find(structure->rootOperations, setup);
   auto recurrencePosition = llvm::find(structure->rootOperations, recurrence);
   ASSERT_NE(setupPosition, structure->rootOperations.end());
@@ -281,8 +259,7 @@ TEST(StagePartitionerTest,
 
   auto partition = StagePartitioner().partition(*module, anchorPlan,
                                                 StagePartitionerOptions{});
-  if (!partition)
-    FAIL() << llvm::toString(partition.takeError());
+  ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
   const LogicalStage *loadStage = nullptr;
   const LogicalStage *recurrenceStage = nullptr;
   for (const LogicalStage &stage : partition->stages) {
@@ -302,12 +279,8 @@ TEST(StagePartitionerTest,
 
 TEST(StagePartitionerTest,
      NestedLocalScopeDoesNotAdvertiseUnsupportedSuperBlockFactors) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::scf::SCFDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%pointer: i64, %condition: i1) {
         %c0 = arith.constant 0 : index
@@ -321,8 +294,7 @@ TEST(StagePartitionerTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   mlir::scf::ForOp v1Loop;
@@ -351,8 +323,7 @@ TEST(StagePartitionerTest,
   options.maximumSuperblockFactor = 4;
   options.scopeSuperblockMaterializable = true;
   auto result = StagePartitioner().partition(*module, anchorPlan, options);
-  if (!result)
-    FAIL() << llvm::toString(result.takeError());
+  ASSERT_TRUE(bool(result)) << llvm::toString(result.takeError());
 
   const LogicalStage *nestedStage = nullptr;
   for (const LogicalStage &stage : result->stages)
@@ -365,8 +336,7 @@ TEST(StagePartitionerTest,
   EXPECT_EQ(nestedStage->localSimtFactors, (std::vector<int64_t>{1}));
 
   auto costs = StageCostEvaluator().evaluate(*result, hardwareProfile());
-  if (!costs)
-    FAIL() << llvm::toString(costs.takeError());
+  ASSERT_TRUE(bool(costs)) << llvm::toString(costs.takeError());
   auto nestedCost = llvm::find_if(costs->stages, [&](const auto &stage) {
     return stage.id == nestedStage->id;
   });
@@ -375,10 +345,7 @@ TEST(StagePartitionerTest,
 }
 
 TEST(StagePartitionerTest, ClippedDynamicLoopUsesStaticTripCountCap) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::scf::SCFDialect>();
+  IRTestContext context;
   for (bool capped : {false, true}) {
     std::string source = R"mlir(
       module {
@@ -404,13 +371,12 @@ TEST(StagePartitionerTest, ClippedDynamicLoopUsesStaticTripCountCap) {
     source.replace(source.find("UPPER"), 5, capped ? "%cap" : "%limit");
     if (!capped)
       source.replace(source.find("to %cap"), 7, "to %limit");
-    auto module = mlir::parseSourceString<mlir::ModuleOp>(source, &context);
+    auto module = context.parse(source);
     ASSERT_TRUE(module);
     mlir::ascend::SimtAnchorPlan anchors;
     auto partition = StagePartitioner().partition(*module, anchors,
                                                   StagePartitionerOptions{});
-    if (!partition)
-      FAIL() << llvm::toString(partition.takeError());
+    ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
     if (llvm::Error error = StageFeatureAnalysis().analyze(*partition))
       FAIL() << llvm::toString(std::move(error));
     int64_t maximumIterations = 1;
@@ -423,12 +389,8 @@ TEST(StagePartitionerTest, ClippedDynamicLoopUsesStaticTripCountCap) {
 }
 
 TEST(StagePartitionerTest, AdjacentStructuredLoopsRemainSerialStages) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::scf::SCFDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @two_serial_loops(%pointer: i64) {
         %c0 = arith.constant 0 : index
@@ -443,15 +405,13 @@ TEST(StagePartitionerTest, AdjacentStructuredLoopsRemainSerialStages) {
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   mlir::ascend::SimtAnchorPlan anchorPlan;
   auto partition = StagePartitioner().partition(*module, anchorPlan,
                                                 StagePartitionerOptions{});
-  if (!partition)
-    FAIL() << llvm::toString(partition.takeError());
+  ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
 
   llvm::SmallVector<const LogicalStage *> loopStages;
   for (const LogicalStage &stage : partition->stages)
@@ -464,11 +424,8 @@ TEST(StagePartitionerTest, AdjacentStructuredLoopsRemainSerialStages) {
 
 TEST(StagePartitionerTest,
      LocalScopeReturningPointerTensorIsRejectedBeforeScoring) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%base: !tt.ptr<f16>) {
         %indices = arith.constant dense<0> : tensor<16xi32>
@@ -481,8 +438,7 @@ TEST(StagePartitionerTest,
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   llvm::SmallVector<mlir::Operation *> roots;
@@ -507,8 +463,7 @@ TEST(StagePartitionerTest,
   structure.rootOperations.assign(roots.begin(), roots.end());
   auto result =
       mlir::ascend::StageBoundaryAnalysis().analyze(structure, anchorPlan);
-  if (!result)
-    FAIL() << llvm::toString(result.takeError());
+  ASSERT_TRUE(bool(result)) << llvm::toString(result.takeError());
 
   const LogicalStage *gather = nullptr;
   for (const LogicalStage &stage : result->stages)
@@ -521,12 +476,8 @@ TEST(StagePartitionerTest,
 }
 
 TEST(StagePartitionerTest, PointerInductionLoopIsNotADataRecurrence) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::scf::SCFDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @kernel(%start: i64) {
         %c0 = arith.constant 0 : index
@@ -542,8 +493,7 @@ TEST(StagePartitionerTest, PointerInductionLoopIsNotADataRecurrence) {
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   mlir::Operation *loop = nullptr;
   module->walk([&](mlir::scf::ForOp operation) { loop = operation; });

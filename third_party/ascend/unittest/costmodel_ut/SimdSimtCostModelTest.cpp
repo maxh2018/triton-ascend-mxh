@@ -1,11 +1,7 @@
 // Tests for SimdSimtCostModel responsibilities.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "CostModelTestUtils.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Parser/Parser.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "StageIRTestUtils.h"
 
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
@@ -13,8 +9,7 @@ using namespace mlir::ascend::test;
 TEST(SimdSimtCostModelTest, StageHasOnlySimdOrSimtImplementations) {
   LogicalStage stage = logicalStage("scalar", StageCostModelKind::ScalarIssue);
   auto table = evaluateOneStage(std::move(stage));
-  if (!table)
-    FAIL() << llvm::toString(table.takeError());
+  ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
   ASSERT_EQ(table->stages.front().implementations.size(), 2u);
   EXPECT_EQ(table->stages.front().implementations[0].implementation.mode,
             StageMode::SIMD);
@@ -23,11 +18,8 @@ TEST(SimdSimtCostModelTest, StageHasOnlySimdOrSimtImplementations) {
 }
 
 TEST(SimdSimtCostModelTest, GenericSemanticStagesDoNotRequireAWorkloadDomain) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.allowUnregisteredDialects();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(false, true);
+  auto module = context.parse(R"mlir(
     module {
       func.func @unrelated_kernel(%pointer: i64) {
         %zero = arith.constant dense<0.0> : tensor<16xf32>
@@ -37,15 +29,13 @@ TEST(SimdSimtCostModelTest, GenericSemanticStagesDoNotRequireAWorkloadDomain) {
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
 
   mlir::ascend::SimtAnchorPlan anchorPlan;
   auto partition = StagePartitioner().partition(*module, anchorPlan,
                                                 StagePartitionerOptions{});
-  if (!partition)
-    FAIL() << llvm::toString(partition.takeError());
+  ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
 
   ASSERT_TRUE(partition->operationOwnershipComplete);
   EXPECT_EQ(partition->modeledOperationCount, 4);

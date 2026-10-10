@@ -1,28 +1,21 @@
 // Tests for IndirectStoreCostModel responsibilities.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "IndirectMemoryTestUtils.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Parser/Parser.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "StageIRTestUtils.h"
 
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
 TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::func::FuncDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(true, false);
+  auto module = context.parse(R"mlir(
     module {
       func.func @probe(%p: tensor<32x!tt.ptr<f32>>, %v: tensor<32xf32>) {
         tt.store %p, %v : tensor<32x!tt.ptr<f32>>
         return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   auto stage = logicalStage("store", StageCostModelKind::IndirectGatherMemory);
   module->walk([&](mlir::triton::StoreOp op) {
@@ -81,10 +74,8 @@ TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
 }
 
 TEST(IndirectStoreCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
-  mlir::MLIRContext context;
-  context.getOrLoadDialect<mlir::arith::ArithDialect>();
-  context.getOrLoadDialect<mlir::triton::TritonDialect>();
-  auto module = mlir::parseSourceString<mlir::ModuleOp>(R"mlir(
+  IRTestContext context(true, false);
+  auto module = context.parse(R"mlir(
     module {
       tt.func public @scatter(%x: !tt.ptr<f32>, %idx: !tt.ptr<i32>,
                               %values: !tt.ptr<f32>) {
@@ -101,8 +92,7 @@ TEST(IndirectStoreCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
         tt.return
       }
     }
-  )mlir",
-                                                        &context);
+  )mlir");
   ASSERT_TRUE(module);
   auto partition = StagePartitioner().partition(
       *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
@@ -148,8 +138,7 @@ TEST(IndirectStoreCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
 }
 
 TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
-  mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
+  IRTestContext context(false, true);
   auto p = hardwareProfile();
   p.target = "Ascend950PR/dav-c310";
   for (int bits : {1, 8, 16, 32, 64}) {
