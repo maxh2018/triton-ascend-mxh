@@ -2,7 +2,8 @@
 //
 // StagePartitioner, StageCostEvaluator, and KernelRouteSolver are separate
 // components.  This file defines the immutable data passed between them and
-// the mode-specific StageCostModel tree used by StageCostEvaluator.
+// the evaluator. StageCostModel.h defines the per-kind modeling interface;
+// Models/ owns its specialized implementations.
 //
 //===----------------------------------------------------------------------===//
 
