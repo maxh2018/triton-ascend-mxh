@@ -185,6 +185,10 @@ struct HardwareProfile {
   /// an explicit profile prior; reuse additionally requires workload evidence.
   std::string simtIndirectStoreModel;
   std::string simdIndirectStoreModel;
+  /// Versioned static configuration-mean partial-memory fits. SIMD prices a
+  /// native fragment; SIMT prices a matched-baseline increment. Empty keeps
+  /// legacy resource rates. This is not a pure-instruction latency model.
+  std::string partialStructuredMemoryModel;
   /// Logical warp groups available to one SIMT program.  This is a compile
   /// option, not a hardware constant, and bounds cross-group interleaving in
   /// recurrence Stage models.

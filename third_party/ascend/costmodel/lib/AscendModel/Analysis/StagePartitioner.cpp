@@ -32,6 +32,7 @@ namespace mlir::ascend {
 struct PartialContinuousTile {
   double rows = 0.0;
   double elementsPerRow = 0.0;
+  bool legacyRows = true;
 };
 
 // OffsetAnalysis creates helper IR while parsing pointers.  Keep one cloned
@@ -257,6 +258,8 @@ static std::optional<int64_t> getSplatInteger(Value value) {
 // classification used by the partial-tile classifier.
 struct AxisTerm {
   int64_t fixedStride = 0;
+  Value opaqueSource;
+  std::optional<int64_t> opaqueMultiplier;
   bool loaded = false;
   bool nonAffine = false;
   bool runtimeStride = false;
@@ -294,9 +297,16 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
   const size_t rank = result.size();
   if (name == "tt.load" || name == "tt.gather") {
     auto shape = dyn_cast<RankedTensorType>(value.getType());
+    const bool separable =
+        shape &&
+        llvm::count_if(shape.getShape(), [](int64_t n) { return n > 1; }) == 1;
     for (size_t i = 0; i < rank; ++i) {
       result[i].opaque = false;
       result[i].loaded = shape.getDimSize(i) > 1;
+      if (separable && result[i].loaded) {
+        result[i].opaqueSource = value;
+        result[i].opaqueMultiplier = 1;
+      }
       result[i].reason = "loaded_index";
     }
     return result;
@@ -388,6 +398,14 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
           } else {
             dst = other;
             dst.fixedStride *= *constant;
+            if (dst.opaqueMultiplier) {
+              int64_t coefficient;
+              if (__builtin_mul_overflow(*dst.opaqueMultiplier, *constant,
+                                         &coefficient))
+                dst.opaqueMultiplier.reset();
+              else
+                dst.opaqueMultiplier = coefficient;
+            }
             dst.reason = "constant_scale";
           }
         } else {
@@ -412,6 +430,29 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
           }
         }
       } else {
+        const auto &l = left[i];
+        const auto &r = right[i];
+        if (l.opaqueSource && r.opaqueSource) {
+          if (l.opaqueSource == r.opaqueSource && l.opaqueMultiplier &&
+              r.opaqueMultiplier) {
+            int64_t rhs, sum;
+            if (!__builtin_mul_overflow(*r.opaqueMultiplier,
+                                        int64_t(name == "arith.subi" ? -1 : 1),
+                                        &rhs) &&
+                !__builtin_add_overflow(*l.opaqueMultiplier, rhs, &sum)) {
+              dst.opaqueSource = l.opaqueSource;
+              dst.opaqueMultiplier = sum;
+            }
+          }
+        } else if (l.opaqueSource) {
+          dst.opaqueSource = l.opaqueSource;
+          dst.opaqueMultiplier = l.opaqueMultiplier;
+        } else if (r.opaqueSource) {
+          dst.opaqueSource = r.opaqueSource;
+          if (r.opaqueMultiplier && *r.opaqueMultiplier != INT64_MIN)
+            dst.opaqueMultiplier =
+                (name == "arith.subi" ? -1 : 1) * *r.opaqueMultiplier;
+        }
         int64_t signedRight = 0;
         const int64_t sign = name == "arith.subi" ? -1 : 1;
         if (__builtin_mul_overflow(right[i].fixedStride, sign, &signedRight) ||
@@ -465,6 +506,16 @@ makeAddressSummary(Operation *operation, int64_t ordinal,
   auto type = dyn_cast<RankedTensorType>(pointer.getType());
   if (!type || !type.hasStaticShape())
     return summary;
+  Type element = summary.memoryOp == "tt.store"
+                     ? operation->getOperand(1).getType()
+                     : operation->getResult(0).getType();
+  if (auto tensor = dyn_cast<RankedTensorType>(element))
+    element = tensor.getElementType();
+  if (element.isIntOrFloat())
+    summary.elementBitWidth = element.getIntOrFloatBitWidth();
+  summary.floatingPoint = isa<FloatType>(element);
+  summary.masked =
+      operation->getNumOperands() > (summary.memoryOp == "tt.store" ? 2u : 1u);
   auto terms = getAxisTerms(pointer);
   for (size_t axis = 0; axis < static_cast<size_t>(type.getRank()); ++axis) {
     AddressAxisSummary output;
@@ -477,6 +528,7 @@ makeAddressSummary(Operation *operation, int64_t ordinal,
     } else {
       const AxisTerm &term = terms[axis];
       output.knownStride = term.fixedStride;
+      output.opaqueMultiplier = term.opaqueMultiplier;
       output.provenance = term.loaded   ? "loaded_value"
                           : term.opaque ? "unknown"
                                         : "no_loaded_value";
@@ -504,8 +556,9 @@ makeAddressSummary(Operation *operation, int64_t ordinal,
   return summary;
 }
 
-// Require exactly one structured axis at the tail and unstructured axes
-// throughout the prefix. Structured does not imply physical contiguity.
+// A partial tile has both structured and unstructured axes. Retain the old
+// row accounting for the special D...DS case; new mixed patterns keep the
+// indirect fallback until a calibrated model accepts their static geometry.
 static std::optional<PartialContinuousTile>
 classifyPartialContinuousTile(Operation *operation,
                               const triton::PtrOffsetInfo &pointerInfo) {
@@ -513,15 +566,20 @@ classifyPartialContinuousTile(Operation *operation,
   if (!pointer || !pointer.hasStaticShape() || pointer.getRank() < 2 ||
       pointerInfo.getStructured().size() !=
           static_cast<size_t>(pointer.getRank()) ||
-      !pointerInfo.isStructured(pointer.getRank() - 1))
+      !pointerInfo.hasUnstructuredDim())
     return std::nullopt;
 
   const int64_t lastAxis = pointer.getRank() - 1;
   auto unstructuredDims = pointerInfo.getUnstructuredDims();
-  // The tail is already known to be structured, so every other axis must
-  // appear in the unstructured dimension list, including unit-size axes.
-  if (unstructuredDims.size() != static_cast<size_t>(lastAxis))
+  bool hasStructured = false;
+  for (int64_t i = 0; i < pointer.getRank(); ++i)
+    hasStructured |= pointerInfo.isStructured(i);
+  if (!hasStructured)
     return std::nullopt;
+
+  const bool legacyRows =
+      pointerInfo.isStructured(lastAxis) &&
+      unstructuredDims.size() == static_cast<size_t>(lastAxis);
 
   double rows = 1.0;
   for (int64_t axis = 0; axis < pointer.getRank(); ++axis) {
@@ -532,7 +590,7 @@ classifyPartialContinuousTile(Operation *operation,
       rows *= static_cast<double>(extent);
   }
   return PartialContinuousTile{
-      rows, static_cast<double>(pointer.getDimSize(lastAxis))};
+      rows, static_cast<double>(pointer.getDimSize(lastAxis)), legacyRows};
 }
 
 static std::optional<PartialContinuousTile>
@@ -806,11 +864,12 @@ accumulateOneOperation(Operation *operation, StageWorkload &work,
     const double bytes = getValueBytes(result);
     const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
-        partial ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
-                : std::ceil(elements / 32.0);
+        partial && partial->legacyRows
+            ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
+            : std::ceil(elements / 32.0);
     work.loadBytes += bytes;
     work.loadWarpInstructions += logicalMemoryGroups;
-    if (partial) {
+    if (partial && partial->legacyRows) {
       work.partialContinuousLoadRows += partial->rows;
       work.partialContinuousLoadBytes += bytes;
       work.partialContinuousLoadWarpInstructions += logicalMemoryGroups;
@@ -830,11 +889,12 @@ accumulateOneOperation(Operation *operation, StageWorkload &work,
     const double bytes = getValueBytes(value);
     const auto partial = getPartialContinuousTile(operation, memoryPatterns);
     const double logicalMemoryGroups =
-        partial ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
-                : std::ceil(getTypeElementCount(value.getType()) / 32.0);
+        partial && partial->legacyRows
+            ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
+            : std::ceil(getTypeElementCount(value.getType()) / 32.0);
     work.storeBytes += bytes;
     work.storeWarpInstructions += logicalMemoryGroups;
-    if (partial) {
+    if (partial && partial->legacyRows) {
       work.partialContinuousStoreRows += partial->rows;
       work.partialContinuousStoreBytes += bytes;
       work.partialContinuousStoreWarpInstructions += logicalMemoryGroups;

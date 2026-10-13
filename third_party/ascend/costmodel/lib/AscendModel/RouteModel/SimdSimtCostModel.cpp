@@ -397,6 +397,13 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
   HardwareProfile &hardware = profile.hardware;
   hardware.profileVersion = reader.string(*root, "profile_version", "profile");
   hardware.target = reader.string(*root, "target", "profile");
+  if (root->get("partial_structured_memory_model")) {
+    hardware.partialStructuredMemoryModel =
+        reader.string(*root, "partial_structured_memory_model", "profile");
+    if (hardware.partialStructuredMemoryModel !=
+        "ttir_q1_configuration_mean_20261013")
+      reader.setError("unsupported partial_structured_memory_model");
+  }
   if (root->get("simt_indirect_load_model")) {
     hardware.simtIndirectLoadModel =
         reader.string(*root, "simt_indirect_load_model", "profile");
