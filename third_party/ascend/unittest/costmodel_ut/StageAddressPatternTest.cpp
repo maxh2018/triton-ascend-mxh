@@ -135,7 +135,7 @@ TEST(StageAddressPatternTest,
     auto profile = hardwareProfile();
     profile.target = "Ascend950PR/dav-c310";
     profile.partialStructuredMemoryModel =
-        "ttir_q1_configuration_mean_20261013";
+        "ttir_q1_short_formula_20261014";
     auto table = evaluateOneStage(*payload, profile);
     ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
     partial_memory::Geometry g{{{4, 8, true}, {8, 1, false}}, 32, 1, true};
@@ -198,7 +198,7 @@ TEST(StageAddressPatternTest,
   stage.workload.addressPatterns = summary;
   auto profile = hardwareProfile();
   profile.target = "Ascend950PR/dav-c310";
-  profile.partialStructuredMemoryModel = "ttir_q1_configuration_mean_20261013";
+  profile.partialStructuredMemoryModel = "ttir_q1_short_formula_20261014";
   auto table = evaluateOneStage(stage, profile);
   ASSERT_TRUE(bool(table));
   auto &native = table->stages.front().implementations.front();

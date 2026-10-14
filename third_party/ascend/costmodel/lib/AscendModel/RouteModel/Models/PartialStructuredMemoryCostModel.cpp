@@ -15,7 +15,7 @@ PartialStructuredMemoryCostModel::cost(const LogicalStage &stage,
                                        const StageImplementation &impl) const {
   StageMemoryCost result;
   if (profile.partialStructuredMemoryModel !=
-          "ttir_q1_configuration_mean_20261013" ||
+          "ttir_q1_short_formula_20261014" ||
       profile.target != "Ascend950PR/dav-c310" || impl.superblockFactor != 1 ||
       impl.localScope || stage.features.hasLoop ||
       stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1 ||
@@ -133,6 +133,6 @@ PartialStructuredMemoryCostModel::cost(const LogicalStage &stage,
   result.includesAddressWork = simd;
   result.pricing = std::string(simd ? "partial_simd_" : "partial_simt_") +
                    (store ? "store_first_" : "load_") +
-                   "configuration_mean_20261013";
+                   "short_formula_20261014";
   return result;
 }

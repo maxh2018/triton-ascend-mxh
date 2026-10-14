@@ -401,7 +401,7 @@ loadCandidateProfile(llvm::StringRef requestedPath) {
     hardware.partialStructuredMemoryModel =
         reader.string(*root, "partial_structured_memory_model", "profile");
     if (hardware.partialStructuredMemoryModel !=
-        "ttir_q1_configuration_mean_20261013")
+        "ttir_q1_short_formula_20261014")
       reader.setError("unsupported partial_structured_memory_model");
   }
   if (root->get("simt_indirect_load_model")) {

@@ -3,13 +3,13 @@
 
 using namespace mlir::ascend::partial_memory;
 
-TEST(PartialStructuredMemoryModelTest, FrozenReferencePredictions) {
+TEST(PartialStructuredMemoryModelTest, ShortFormulaReferencePredictions) {
   // References from frozen Python inference; asymmetric shape and large odd
-  // stride exercise byte geometry and histogram threshold equality.
+  // stride exercise byte geometry and affine formula selection.
   Geometry ds{{{2, 15346, true}, {16, 1023, false}}, 32, 1, true};
-  for (auto item : {std::pair{Model::SimtLoad, 184.28974087203204},
-                    std::pair{Model::SimtStore, 206.82532932691726},
-                    std::pair{Model::SimdLoad, 157.83632226295097}}) {
+  for (auto item : {std::pair{Model::SimtLoad, 170.99446226275214},
+                    std::pair{Model::SimtStore, 180.61070864903908},
+                    std::pair{Model::SimdLoad, 166.24302465065506}}) {
     auto result = predict(ds, item.first);
     ASSERT_TRUE(result);
     EXPECT_NEAR(*result, item.second, 1e-8);
@@ -17,7 +17,7 @@ TEST(PartialStructuredMemoryModelTest, FrozenReferencePredictions) {
   Geometry sd{{{2, 49088, false}, {16, 1, true}}, 32, 1, true};
   auto result = predict(sd, Model::SimdStore);
   ASSERT_TRUE(result);
-  EXPECT_NEAR(*result, 2976.733291731354, 1e-8);
+  EXPECT_NEAR(*result, 2895.7006393137017, 1e-8);
 }
 
 TEST(PartialStructuredMemoryModelTest, UnsupportedDomainFallsBack) {
@@ -44,15 +44,22 @@ TEST(PartialStructuredMemoryModelTest, UnsupportedDomainFallsBack) {
   auto nonPower = valid;
   nonPower.warps = 3;
   EXPECT_FALSE(predict(nonPower, Model::SimtStore));
+  EXPECT_FALSE(predict(valid, static_cast<Model>(4)));
 }
 
 TEST(PartialStructuredMemoryModelTest,
      DiscretePitchIsNotRuntimeAddressCoverage) {
   Geometry g{{{4, 32, true}, {8, 4, false}}, 16, 1, true};
   auto f = extractFeatures(g);
-  EXPECT_DOUBLE_EQ(f.at("log_max_D_pitch"), 5);
-  EXPECT_DOUBLE_EQ(f.at("log_tail_step_bytes"), 3);
+  EXPECT_DOUBLE_EQ(f.at("log_D_pitch"), 5);
+  EXPECT_DOUBLE_EQ(f.at("log_step"), 3);
   EXPECT_DOUBLE_EQ(f.at("static_work"), 32);
   EXPECT_EQ(f.count("U"), 0u);
   EXPECT_EQ(f.count("V"), 0u);
+  // D coordinates here are counterfactual logical positions 0..3. These
+  // counts describe known coefficients and do not estimate random occupancy.
+  EXPECT_DOUBLE_EQ(f.at("basis_bins128"), 2);
+  EXPECT_DOUBLE_EQ(f.at("S_basis_bins128"), 1);
+  EXPECT_DOUBLE_EQ(f.at("S_basis_work128"), 4);
+  EXPECT_DOUBLE_EQ(f.at("basis_waves128"), 2);
 }
