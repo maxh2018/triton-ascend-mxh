@@ -18,6 +18,10 @@
     "simt"
   ],
   "properties": {
+    "partial_structured_memory_model": {
+      "enum": ["ttir_q1_short_formula_20261014"],
+      "description": "Optional Ascend950PR short affine fits to individual-input relative error from TTIR geometry. Three retained-verification models meet 20% MAPE; SIMT load remains 23.253%. Rank 1 discrete and ranks 2-5 mixed structured/discrete axes, widths 8/16/32/64, E=32W and W=1..64 powers of two, unmasked default-cache accesses. SIMD prices the native memory fragment including owned address work; SIMT prices the matched-baseline increment and retains auxiliary work. No runtime sampling. Store assumes first logical write without fill. Unsupported cases keep legacy pricing. These different measurement boundaries are selection priors, not validated pure instruction times or production route accuracy."
+    },
     "simt_indirect_store_model": {
       "enum": [
         "random_f32_store_fill_ab_20261007",

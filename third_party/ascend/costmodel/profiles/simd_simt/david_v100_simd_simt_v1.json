@@ -1,7 +1,8 @@
 {
   "$schema": "./simd_simt_profile_schema.json",
   "schema_version": 12,
-  "profile_version": "david-v100-simd-simt-20261009-v32-simt-load-widths",
+  "profile_version": "david-v100-simd-simt-20261014-v34-partial-memory-short",
+  "partial_structured_memory_model": "ttir_q1_short_formula_20261014",
   "simt_indirect_store_model": "random_store_no_fill_first_20261008",
   "simd_indirect_store_model": "random_store_no_fill_first_20261008",
   "simt_indirect_load_model": "random_dtype_six_term_20261008",

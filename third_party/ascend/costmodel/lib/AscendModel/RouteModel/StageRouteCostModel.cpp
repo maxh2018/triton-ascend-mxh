@@ -227,6 +227,9 @@ llvm::json::Object AddressAxisSummary::toJSON() const {
                                         ? llvm::json::Value(*knownStride)
                                         : llvm::json::Value(nullptr);
   result["has_unknown_component"] = hasUnknownComponent;
+  result["opaque_multiplier_elements"] =
+      opaqueMultiplier ? llvm::json::Value(*opaqueMultiplier)
+                       : llvm::json::Value(nullptr);
   result["alignment_bytes"] = alignmentBytes
                                   ? llvm::json::Value(*alignmentBytes)
                                   : llvm::json::Value(nullptr);
@@ -242,6 +245,9 @@ llvm::json::Object AddressPatternSummary::toJSON() const {
   result["memory_op"] = memoryOp;
   result["pattern_class"] = patternClass;
   result["depends_on_loaded_value"] = dependsOnLoadedValue;
+  result["element_bit_width"] = elementBitWidth;
+  result["floating_point"] = floatingPoint;
+  result["masked"] = masked;
   llvm::json::Array axisValues;
   for (const AddressAxisSummary &axis : axes)
     axisValues.push_back(axis.toJSON());
@@ -426,6 +432,7 @@ bool StageImplementationCost::isValid() const {
 llvm::json::Object StageImplementationCost::toJSON() const {
   return llvm::json::Object{{"implementation", implementation.toJSON()},
                             {"indirect_load_pricing", indirectLoadPricing},
+                            {"memory_pricing_boundary", memoryPricingBoundary},
                             {"indirect_store_pricing", indirectStorePricing},
                             {"total_system_cycles", totalCycles},
                             {"resource_system_cycles", resources.toJSON()}};

@@ -9,6 +9,8 @@ add_mlir_library(AscendModelRouteModel
   ../Analysis/StagePartitioner.cpp
   StageCostModels.cpp
   Models/IndirectGatherMemoryCostModel.cpp
+  Models/PartialStructuredMemoryCostModel.cpp
+  Models/PartialStructuredMemoryModel.cpp
   StageRouteCostModel.cpp
   SimdSimtCostModel.cpp
   ../Transforms/SelectSimdSimtCostModel.cpp

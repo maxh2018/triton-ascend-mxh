@@ -2,6 +2,7 @@
 
 #include "AscendModel/RouteModel/StageCostModels.h"
 #include "AscendModel/RouteModel/Models/IndirectGatherMemoryCostModel.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredMemoryCostModel.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
@@ -108,13 +109,13 @@ materializeControlFlow(const LogicalStage &stage, StageMode mode,
   return resources;
 }
 
-static StageResourceCycles mapWorkload(const LogicalStage &stage,
-                                       const StageModeProfile &profile,
-                                       StageMode mode,
-                                       std::optional<double> fittedLoad,
-                                       std::optional<double> fittedStore) {
+static StageResourceCycles
+mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
+            StageMode mode, std::optional<double> fittedLoad,
+            std::optional<double> fittedStore, const StageMemoryCost &fit) {
   StageResourceCycles resources;
-  const StageWorkload &work = stage.workload;
+  const StageWorkload &work =
+      fit.remainingWorkload ? *fit.remainingWorkload : stage.workload;
   const bool simd = mode == StageMode::SIMD;
   resources.setup = work.paysKernelSetup ? profile.setupCycles : 0.0;
   llvm::StringMap<double> describedElements;
@@ -168,18 +169,27 @@ static StageResourceCycles mapWorkload(const LogicalStage &stage,
     resources.store =
         directStoreInstructions / profile.storeWarpInstructionsPerCycle;
   }
-  resources.load += fittedLoad.value_or(
-      work.indirectLoadTransactions / profile.indirectLoadTransactionsPerCycle);
-  resources.store +=
-      fittedStore.value_or(work.indirectStoreTransactions /
-                           profile.indirectStoreTransactionsPerCycle);
+  if (fit.replacesTensorMemory) {
+    // The guard proves a single tensor memory target. Replace its direct or
+    // indirect price exactly once, preserving separately owned index stages.
+    resources.load = fittedLoad.value_or(0.0);
+    resources.store = fittedStore.value_or(0.0);
+  } else {
+    resources.load +=
+        fittedLoad.value_or(work.indirectLoadTransactions /
+                            profile.indirectLoadTransactionsPerCycle);
+    resources.store +=
+        fittedStore.value_or(work.indirectStoreTransactions /
+                             profile.indirectStoreTransactionsPerCycle);
+  }
   // Preserve one uncovered loaded-index dependency latency per Stage
   // iteration, but charge it only when an actual indirect access exists.
-  if (work.indirectLoadTransactions > 0.0) {
+  if (!fit.replacesTensorMemory && work.indirectLoadTransactions > 0.0) {
     // Matched-load difference already includes the induced index wait.
     if (!fittedLoad)
       resources.load += profile.indirectDependencyLatencyCycles;
-  } else if (work.indirectStoreTransactions > 0.0 && !fittedStore)
+  } else if (!fit.replacesTensorMemory &&
+             work.indirectStoreTransactions > 0.0 && !fittedStore)
     // The matched-store increment replaces the legacy write/wait estimate.
     resources.store += profile.indirectDependencyLatencyCycles;
 
@@ -679,20 +689,32 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
         return llvm::createStringError(std::errc::invalid_argument,
                                        "Stage '%s' has an illegal candidate",
                                        stage.id.c_str());
-      const auto fitted =
-          IndirectGatherMemoryCostModel().cost(stage, profile, implementation);
+      auto fitted = PartialStructuredMemoryCostModel().cost(stage, profile,
+                                                            implementation);
+      if (!fitted.load && !fitted.store)
+        fitted = IndirectGatherMemoryCostModel().cost(stage, profile,
+                                                      implementation);
       // Fits already describe the full W-warp increment; do not divide by W.
       StageResourceCycles resources = mapWorkload(
           stage,
           implementation.mode == StageMode::SIMD ? profile.simd : profile.simt,
-          implementation.mode, fitted.load, fitted.store);
+          implementation.mode, fitted.load, fitted.store, fitted);
       StageImplementationCost cost;
       cost.implementation = implementation;
-      if (fitted.load)
+      if (fitted.replacesTensorMemory)
+        cost.memoryPricingBoundary =
+            fitted.includesAddressWork
+                ? "simd_native_fragment_with_completion_barrier"
+                : "simt_matched_baseline_increment";
+      if (fitted.load && !fitted.pricing.empty())
+        cost.indirectLoadPricing = fitted.pricing;
+      else if (fitted.load)
         cost.indirectLoadPricing = implementation.mode == StageMode::SIMD
                                        ? profile.simdIndirectLoadModel
                                        : profile.simtIndirectLoadModel;
-      if (fitted.store)
+      if (fitted.store && !fitted.pricing.empty())
+        cost.indirectStorePricing = fitted.pricing;
+      else if (fitted.store)
         cost.indirectStorePricing = implementation.mode == StageMode::SIMD
                                         ? profile.simdIndirectStoreModel
                                         : profile.simtIndirectStoreModel;
