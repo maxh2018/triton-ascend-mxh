@@ -121,7 +121,7 @@ TEST(StageAddressPatternTest, PartialContinuousStageAlwaysUsesSerialCost) {
                    StageScheduleKind::IndependentPipelined);
   stage.features.hasPartialContinuousMemory = true;
   stage.features.hasIndirectMemory = true;
-  stage.workload.operationElements.clear();
+  stage.workload.operationCounts.clear();
   stage.workload.loadBytes = 320.0;
   stage.workload.storeBytes = 160.0;
   stage.workload.loadWarpInstructions = 10.0;
@@ -263,7 +263,7 @@ TEST(StageAddressPatternTest,
   }
 }
 
-TEST(StageAddressPatternTest, LoadedScalarIndexRemainsIndirect) {
+TEST(StageAddressPatternTest, LoadedScalarIndexRemainsUniform) {
   for (bool store : {false, true}) {
     IRTestContext context(true);
     auto module = addressModule(
@@ -277,15 +277,17 @@ TEST(StageAddressPatternTest, LoadedScalarIndexRemainsIndirect) {
     for (auto *op : payload->operations)
       if (op->getName().getStringRef() == (store ? "tt.store" : "tt.load")) {
         sawPayload = true;
-        EXPECT_TRUE(isLoadedIndexDependentMemoryOp(op));
+        // #2528 treats a uniform scalar offset as base-address selection,
+        // not a per-lane gather; the tensor's fixed-stride run is preserved.
+        EXPECT_FALSE(isLoadedIndexDependentMemoryOp(op));
       }
     EXPECT_TRUE(sawPayload);
-    EXPECT_EQ(payload->costModelKind, StageCostModelKind::IndirectGatherMemory);
-    EXPECT_TRUE(payload->features.hasIndirectMemory);
+    EXPECT_NE(payload->costModelKind, StageCostModelKind::IndirectGatherMemory);
+    EXPECT_FALSE(payload->features.hasIndirectMemory);
     EXPECT_FALSE(payload->features.hasPartialContinuousMemory);
     EXPECT_DOUBLE_EQ(store ? payload->workload.indirectStoreBytes
                            : payload->workload.indirectLoadBytes,
-                     256);
+                     0);
     EXPECT_DOUBLE_EQ(store ? payload->workload.partialContinuousStoreRows
                            : payload->workload.partialContinuousLoadRows,
                      0);

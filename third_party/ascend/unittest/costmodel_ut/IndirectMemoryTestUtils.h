@@ -105,12 +105,32 @@ inline void expectOnlyMemoryChanged(const StageImplementationCost &before,
   auto adjusted = before;
   auto &oldMemory = store ? adjusted.resources.store : adjusted.resources.load;
   const double newMemory = store ? after.resources.store : after.resources.load;
-  EXPECT_NEAR(after.totalCycles - before.totalCycles,
-              iterations * (newMemory - oldMemory), 1e-7);
+  // #2528 uses a competing SIMD resource envelope and serial SIMT service,
+  // with issue as a floor and control/completion costs paid outside it.
+  auto expectedCost = [iterations, &before](const StageResourceCycles &r) {
+    const double execution = r.scalar + r.load + r.store + r.atomic +
+                             r.indirectLoadGroup + r.sharedLayout + r.compute +
+                             r.predicate + r.reduction + r.shuffle + r.dot;
+    const double body =
+        before.implementation.mode == StageMode::SIMD
+            ? std::max({r.load + r.indirectLoadGroup + r.sharedLayout, r.store,
+                        r.atomic, r.compute + r.dot + r.reduction + r.shuffle,
+                        r.scalar + r.predicate, r.issue})
+            : std::max(execution, r.issue);
+    const double completion =
+        r.loopControl + r.branchControl + r.divergence + r.synchronization +
+        r.spill + r.operationCompletion + r.privateStackCombinedFloor;
+    return r.setup + iterations * (body + completion);
+  };
+  EXPECT_NEAR(before.totalCycles, expectedCost(before.resources), 1e-7);
+  EXPECT_NEAR(after.totalCycles, expectedCost(after.resources), 1e-7);
   oldMemory = newMemory;
   (store ? adjusted.indirectStorePricing : adjusted.indirectLoadPricing) =
       store ? after.indirectStorePricing : after.indirectLoadPricing;
   adjusted.totalCycles = after.totalCycles;
+  adjusted.formulaEvidence = after.formulaEvidence;
+  adjusted.resources.indirectMemoryAnalyticalFallback =
+      after.resources.indirectMemoryAnalyticalFallback;
   EXPECT_EQ(llvm::formatv("{0}", llvm::json::Value(adjusted.toJSON())).str(),
             llvm::formatv("{0}", llvm::json::Value(after.toJSON())).str());
 }

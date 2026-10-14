@@ -35,22 +35,22 @@ TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
   EXPECT_NEAR(b[1].resources.store, 145.04451206999323, 1e-9);
   for (unsigned i = 0; i < 2; ++i) {
     expectOnlyMemoryChanged(a[i], b[i], true, 1);
-    EXPECT_EQ(b[i].indirectLoadPricing, "legacy_transactions");
-    EXPECT_NE(b[i].indirectStorePricing, "legacy_transactions");
+    EXPECT_EQ(b[i].indirectLoadPricing, "generic_resource_model");
+    EXPECT_NE(b[i].indirectStorePricing, "generic_resource_model");
   }
   profile.simd.indirectDependencyLatencyCycles = 10000;
   auto changed = indirectCosts(stage, profile);
   EXPECT_DOUBLE_EQ(changed[0].totalCycles, b[0].totalCycles);
   profile.simdIndirectStoreModel = "random_f32_store_no_fill_reuse_20261007";
   changed = indirectCosts(stage, profile);
-  EXPECT_EQ(changed[0].indirectStorePricing, "legacy_transactions");
+  EXPECT_EQ(changed[0].indirectStorePricing, "generic_resource_model");
   work.hasProvenIndirectStoreReuse = true;
   changed = indirectCosts(stage, profile);
   EXPECT_DOUBLE_EQ(changed[0].resources.store, 65.26772542192847 * 32);
-  work.predicateElements = 1;
+  work.predicateCounts[1] = 1;
   changed = indirectCosts(stage, profile);
   for (const auto &cost : changed)
-    EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
+    EXPECT_EQ(cost.indirectStorePricing, "generic_resource_model");
   profile.simdIndirectStoreModel = "unknown";
   EXPECT_FALSE(profile.isValid());
   profile.simdIndirectStoreModel.clear();
@@ -89,7 +89,7 @@ TEST(IndirectStoreCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
   ASSERT_NE(payload, nullptr);
   ASSERT_EQ(payload->operations.size(), 3u);
   auto profile = calibrationProfile();
-  profile.logicalWarpGroupCount = 1;
+  profile.baseSimtWarpCount = 1;
   auto old = indirectCosts(*payload, profile);
   profile.simdIndirectStoreModel = profile.simtIndirectStoreModel =
       "random_store_no_fill_first_20261008";
@@ -108,7 +108,7 @@ TEST(IndirectStoreCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
   multiple.operations.push_back(payload->operations.back());
   auto rejected = indirectCosts(multiple, profile);
   for (const auto &cost : rejected)
-    EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
+    EXPECT_EQ(cost.indirectStorePricing, "generic_resource_model");
 }
 
 TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
@@ -132,7 +132,7 @@ TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
             auto &a = s.workload;
             a.hasProvenIndirectStoreReuse = reuse;
             a.addressPatterns[0].dependsOnLoadedValue = shape.size() <= 5;
-            p.logicalWarpGroupCount = w;
+            p.baseSimtWarpCount = w;
             p.simdIndirectStoreModel = p.simtIndirectStoreModel =
                 reuse ? "random_store_no_fill_reuse_20261008"
                       : "random_store_no_fill_first_20261008";
@@ -162,17 +162,18 @@ TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
                           p.simdIndirectStoreModel);
                 EXPECT_NEAR(fit[i].resources.store, expected[i], 1e-7);
               } else
-                EXPECT_EQ(fit[i].indirectStorePricing, "legacy_transactions");
+                EXPECT_EQ(fit[i].indirectStorePricing,
+                          "generic_resource_model");
             }
             if (reuse) {
               a.hasProvenIndirectStoreReuse = false;
               for (const auto &cost : indirectCosts(s, p))
-                EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
+                EXPECT_EQ(cost.indirectStorePricing, "generic_resource_model");
               a.hasProvenIndirectStoreReuse = true;
             }
             a.addressPatterns[0].axes[0].regularity = "fixed_stride";
             for (const auto &cost : indirectCosts(s, p))
-              EXPECT_EQ(cost.indirectStorePricing, "legacy_transactions");
+              EXPECT_EQ(cost.indirectStorePricing, "generic_resource_model");
           }
         }
       }

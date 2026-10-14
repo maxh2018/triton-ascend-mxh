@@ -19,13 +19,16 @@ add_triton_ut(
   NAME CostModelPasses
   SRCS PassesTest.cpp
   DEFS
-    TRITON_ASCEND_DAVID_TEST_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../costmodel/configs/ascend_davidv100.json"
-    TRITON_ASCEND_SIMD_SIMT_TEST_PROFILE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../costmodel/profiles/simd_simt/david_v100_simd_simt_v1.json"
+    TRITON_ASCEND_950PR_TEST_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../costmodel/configs/ascend_950pr.json"
+    TRITON_ASCEND_SIMD_SIMT_TEST_PROFILE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../costmodel/profiles/simd_simt/ascend_950pr_simd_simt_v1.json"
   LIBS
     AscendModelTransforms
     AscendModelAnalysis
     AscendModelIR
     BiShengIRScopeDialect
+    TritonAnalysis
+    TritonGPUTransforms
+    TritonNvidiaGPUTransforms
     MLIRArithDialect
     MLIRFuncDialect
     MLIRIR
@@ -43,9 +46,12 @@ add_triton_ut(
     IndirectStoreCostModelTest.cpp
     StageAddressPatternTest.cpp
   DEFS
-    TRITON_ASCEND_SIMD_SIMT_TEST_PROFILE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../costmodel/profiles/simd_simt/david_v100_simd_simt_v1.json"
+    TRITON_ASCEND_SIMD_SIMT_TEST_PROFILE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../../costmodel/profiles/simd_simt/ascend_950pr_simd_simt_v1.json"
   LIBS
     AscendModelRouteModel
+    TritonAnalysis
+    TritonGPUTransforms
+    TritonNvidiaGPUTransforms
     MLIRArithDialect
     MLIRFuncDialect
     MLIRParser

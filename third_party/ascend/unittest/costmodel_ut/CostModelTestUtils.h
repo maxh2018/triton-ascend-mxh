@@ -8,7 +8,7 @@
 
 namespace mlir::ascend::test {
 
-inline HardwareProfile hardwareProfile(StageTransitionCost transition = {}) {
+inline HardwareProfile hardwareProfile() {
   HardwareProfile profile;
   profile.profileVersion = "unit-test-profile-v1";
   profile.target = "Ascend950PR_9579";
@@ -29,11 +29,12 @@ inline HardwareProfile hardwareProfile(StageTransitionCost transition = {}) {
     mode.loadWarpInstructionsPerCycle = 1.0;
     mode.storeWarpInstructionsPerCycle = 1.0;
     mode.predicateOperationsPerCycle = 1.0;
+    mode.reductionLaneStepsPerCycle = 1.0;
     mode.shuffleLanesPerCycle = 32.0;
     mode.dotSetupCycles = 8.0;
     mode.dotFlopsPerCycle = 64.0;
-    mode.scalarOperationsPerCycle = 1.0;
     mode.issueOperationsPerCycle = 4.0;
+    mode.prefixScanStepLatencyCycles = 2.0;
     mode.spillTransactionsPerCycle = 1.0;
     mode.indirectLoadTransactionsPerCycle = 0.5;
     mode.indirectStoreTransactionsPerCycle = 0.5;
@@ -46,7 +47,6 @@ inline HardwareProfile hardwareProfile(StageTransitionCost transition = {}) {
   profile.simt.vectorWidth = 1;
   profile.simt.vectorWidthBits = 1;
   profile.simt.issueWidth = 32;
-  profile.transition = std::move(transition);
   return profile;
 }
 
@@ -63,7 +63,7 @@ logicalStage(llvm::StringRef id, StageCostModelKind kind,
   stage.simtLegal = true;
   stage.legalSimtFactors = {1};
   stage.workload.paysKernelSetup = true;
-  stage.workload.operationElements["f32.add"] = 64.0;
+  stage.workload.operationCounts["f32.add"][64] = 1.0;
   stage.workload.issueElements = 4.0;
   return stage;
 }

@@ -26,8 +26,9 @@ calibratedSimdIndirectLoad(const LogicalStage &stage,
       stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
       (!dtypeRankModel && stage.operations.size() != 1) ||
       work.addressPatterns.size() != 1 ||
-      work.estimatedSpillTransactions != 0 || work.predicateElements != 0 ||
-      stage.features.activeLaneRatio != 1.0 ||
+      (work.privateStackLoadInstructions +
+       work.privateStackStoreInstructions) != 0 ||
+      !work.predicateCounts.empty() || stage.features.activeLaneRatio != 1.0 ||
       work.partialContinuousLoadBytes != 0 || work.indirectStoreBytes != 0)
     return std::nullopt;
   // Real Stage partitioning owns the payload's splat/addptr/reshape producers
@@ -136,8 +137,10 @@ calibratedSimtDtypeIndirectLoad(const LogicalStage &stage,
       implementation.superblockFactor != 1 ||
       stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
       work.addressPatterns.size() != 1 ||
-      work.estimatedSpillTransactions != 0 || work.predicateElements != 0 ||
-      stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1.0 ||
+      (work.privateStackLoadInstructions +
+       work.privateStackStoreInstructions) != 0 ||
+      !work.predicateCounts.empty() || stage.features.hasAtomicMemory ||
+      stage.features.activeLaneRatio != 1.0 ||
       work.partialContinuousLoadBytes != 0 || work.indirectStoreBytes != 0)
     return std::nullopt;
   // Partitioned Stages also own address/shape producers. Their resources stay
@@ -185,7 +188,7 @@ calibratedSimtDtypeIndirectLoad(const LogicalStage &stage,
         (!opaque && !fixedOuter))
       return std::nullopt;
   }
-  const int64_t warps = hardware.logicalWarpGroupCount;
+  const int64_t warps = hardware.baseSimtWarpCount;
   if (warps < 1 || warps > 64 || (warps & (warps - 1)))
     return std::nullopt;
   const double elements = type.getNumElements();
@@ -243,8 +246,9 @@ calibratedIndirectLoad(const LogicalStage &stage,
       implementation.superblockFactor != 1 ||
       stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
       stage.operations.size() != 1 || work.addressPatterns.size() != 1 ||
-      work.estimatedSpillTransactions != 0 || work.predicateElements != 0 ||
-      stage.features.activeLaneRatio != 1.0 ||
+      (work.privateStackLoadInstructions +
+       work.privateStackStoreInstructions) != 0 ||
+      !work.predicateCounts.empty() || stage.features.activeLaneRatio != 1.0 ||
       work.partialContinuousLoadBytes != 0 || work.indirectStoreBytes != 0)
     return std::nullopt;
   Operation *op = stage.operations.front();
@@ -270,7 +274,7 @@ calibratedIndirectLoad(const LogicalStage &stage,
       !(pattern.axes.front().regularity == "fixed_stride" &&
         pattern.axes.front().knownStride == 4096))
     return std::nullopt;
-  const int64_t warps = hardware.logicalWarpGroupCount;
+  const int64_t warps = hardware.baseSimtWarpCount;
   if (warps < 1 || warps > 64 || (warps & (warps - 1)))
     return std::nullopt;
   const double elements = type.getNumElements();
@@ -326,7 +330,7 @@ randomDtypeIndirectStore(const LogicalStage &stage,
     return std::nullopt;
   const auto &pattern = work.addressPatterns.front();
   const int64_t elements = type.getNumElements();
-  const int64_t warps = hardware.logicalWarpGroupCount;
+  const int64_t warps = hardware.baseSimtWarpCount;
   if (elements < 8 || elements > (simd ? 4096 : 16384) ||
       (elements & (elements - 1)) || warps < 1 || warps > 64 ||
       (warps & (warps - 1)) || (simd && warps != 1) ||
@@ -387,8 +391,10 @@ calibratedIndirectStore(const LogicalStage &stage,
       implementation.superblockFactor != 1 ||
       stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
       work.addressPatterns.size() != 1 ||
-      work.estimatedSpillTransactions != 0 || work.predicateElements != 0 ||
-      stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1.0 ||
+      (work.privateStackLoadInstructions +
+       work.privateStackStoreInstructions) != 0 ||
+      !work.predicateCounts.empty() || stage.features.hasAtomicMemory ||
+      stage.features.activeLaneRatio != 1.0 ||
       work.partialContinuousStoreBytes != 0 || work.indirectLoadBytes != 0)
     return std::nullopt;
   const auto &model =
@@ -406,7 +412,7 @@ calibratedIndirectStore(const LogicalStage &stage,
              "random_f32_store_no_fill_first_20261007" &&
          hardware.simdIndirectStoreModel !=
              "random_f32_store_no_fill_reuse_20261007") ||
-        hardware.logicalWarpGroupCount != 1)
+        hardware.baseSimtWarpCount != 1)
       return std::nullopt;
   } else if (implementation.mode != StageMode::SIMT ||
              hardware.simtIndirectStoreModel !=
@@ -459,7 +465,7 @@ calibratedIndirectStore(const LogicalStage &stage,
                            ? 65.26772542192847
                            : 150.13769870695648);
   }
-  const int64_t warps = hardware.logicalWarpGroupCount;
+  const int64_t warps = hardware.baseSimtWarpCount;
   if (warps < 1 || warps > 64 || (warps & (warps - 1)))
     return std::nullopt;
   const double q = elements / (32.0 * warps);
@@ -480,6 +486,10 @@ calibratedIndirectStore(const LogicalStage &stage,
 StageMemoryCost IndirectGatherMemoryCostModel::cost(
     const LogicalStage &stage, const HardwareProfile &profile,
     const StageImplementation &implementation) const {
+  // The calibration used one AIV and the original unsliced TTIR tensor.
+  // CV partitioned implementations retain the generic resource model.
+  if (implementation.aivSubblocks != 1)
+    return {};
   return {calibratedIndirectLoad(stage, profile, implementation),
           calibratedIndirectStore(stage, profile, implementation)};
 }

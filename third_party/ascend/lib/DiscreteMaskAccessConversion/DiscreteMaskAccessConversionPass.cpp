@@ -60,6 +60,11 @@ static bool enableSyncBlockLockFlag = true;
 static constexpr const char *routeDiscreteMaskToSimtAttrName =
     "route_discrete_mask_to_simt";
 
+static void markSyncBlockLockUnordered(Operation *op) {
+  op->setAttr(hivm::SyncBlockLockUnorderedAttr::name,
+              UnitAttr::get(op->getContext()));
+}
+
 static bool traceUserToTargetOp(Value val) {
   llvm::SmallVector<Value, 32> worklist;
   llvm::SmallPtrSet<Value, 32> visited;
@@ -322,10 +327,17 @@ struct DiscreteMaskStoreConversion : OpRewritePattern<triton::StoreOp> {
     // unguarded full-load from reading past the tail-block boundary.
     auto [contMask, discMask] = decomposeAndMask(op, mask, loc, rewriter);
     if (contMask && discMask) {
-      // insert sync_block_lock
+      // A discrete masked store may be skipped by some logical programs.
+      // Use the arrival-order lock so later participants do not wait forever
+      // for a program that never enters this read-modify-write region.
       auto lockVar = MemOpConverter::createSyncBlockLockVar(rewriter, loc);
+      markSyncBlockLockUnordered(lockVar.getOperation());
       if (enableSyncBlockLockFlag) {
-        rewriter.create<hivm::SyncBlockLockOp>(loc, lockVar);
+        rewriter.create<hivm::PipeBarrierOp>(
+            loc,
+            hivm::PipeAttr::get(rewriter.getContext(), hivm::PIPE::PIPE_ALL));
+        auto lockOp = rewriter.create<hivm::SyncBlockLockOp>(loc, lockVar);
+        markSyncBlockLockUnordered(lockOp.getOperation());
       }
       auto safeLoad = rewriter.create<triton::LoadOp>(
           loc, dst, contMask, op.getCache(), op.getEvict(), false);
@@ -336,7 +348,8 @@ struct DiscreteMaskStoreConversion : OpRewritePattern<triton::StoreOp> {
       newStore->setAttr(ConverterUtils::discreteMaskAttrName,
                         UnitAttr::get(rewriter.getContext()));
       if (enableSyncBlockLockFlag) {
-        rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+        auto unlockOp = rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+        markSyncBlockLockUnordered(unlockOp.getOperation());
       }
       rewriter.replaceOp(op, newStore);
       return success();
@@ -346,8 +359,13 @@ struct DiscreteMaskStoreConversion : OpRewritePattern<triton::StoreOp> {
     // discrete). Has DDR OOB risk but no better option in pure simd mode.
     // insert sync_block_lock to serialize the read-modify-write window.
     auto lockVar = MemOpConverter::createSyncBlockLockVar(rewriter, loc);
+    markSyncBlockLockUnordered(lockVar.getOperation());
     if (enableSyncBlockLockFlag) {
-      rewriter.create<hivm::SyncBlockLockOp>(loc, lockVar);
+      rewriter.create<hivm::PipeBarrierOp>(
+          loc,
+          hivm::PipeAttr::get(rewriter.getContext(), hivm::PIPE::PIPE_ALL));
+      auto lockOp = rewriter.create<hivm::SyncBlockLockOp>(loc, lockVar);
+      markSyncBlockLockUnordered(lockOp.getOperation());
     }
     auto loadFromDstOp = rewriter.create<triton::LoadOp>(
         loc, dst, op.getCache(), op.getEvict(), false);
@@ -358,7 +376,8 @@ struct DiscreteMaskStoreConversion : OpRewritePattern<triton::StoreOp> {
     newStore->setAttr(ConverterUtils::discreteMaskAttrName,
                       UnitAttr::get(rewriter.getContext()));
     if (enableSyncBlockLockFlag) {
-      rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+      auto unlockOp = rewriter.create<hivm::SyncBlockUnlockOp>(loc, lockVar);
+      markSyncBlockLockUnordered(unlockOp.getOperation());
     }
     rewriter.replaceOp(op, newStore);
     return success();

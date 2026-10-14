@@ -6,6 +6,38 @@ using namespace mlir;
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
+TEST(IndirectLoadCostModelTest, FitReplacesUpstreamCurveAndRejectsCvPartition) {
+  IRTestContext context(false, true);
+  MemoryCase test(context, Float32Type::get(&context), {128});
+  auto &work = test.stage.workload;
+  test.stage.iterationCount = 1;
+  work.loadOperations = 1;
+  work.loadWarpInstructions = work.indirectLoadTransactions = 4;
+  work.indirectLoadCounts[{512, 128}] = 1;
+  work.scalarLoadCount = 1;
+  auto profile = calibrationProfile();
+  profile.baseSimtWarpCount = 4;
+  profile.simt.simtUniformLoadPrepCycles = 5;
+  profile.simtIndirectLoadModel = "random_dtype_six_term_20261008";
+  profile.simt.indirectLoadSystemCyclesByElements[128] = 100000;
+  const IndirectGatherMemoryCostModel model;
+  const auto increment = model.cost(test.stage, profile, {StageMode::SIMT, 1});
+  ASSERT_TRUE(increment.load);
+  const auto costs = indirectCosts(test.stage, profile);
+  EXPECT_DOUBLE_EQ(costs[1].resources.indirectLoadGroup, 0);
+  const double loadWithHelper = costs[1].resources.load;
+  work.scalarLoadCount = 0;
+  const auto withoutHelper = indirectCosts(test.stage, profile);
+  EXPECT_DOUBLE_EQ(withoutHelper[1].resources.load, *increment.load);
+  EXPECT_GT(loadWithHelper, withoutHelper[1].resources.load);
+  EXPECT_EQ(withoutHelper[1].indirectLoadPricing,
+            profile.simtIndirectLoadModel);
+  const auto partitioned =
+      model.cost(test.stage, profile, {StageMode::SIMT, 1, true, 2});
+  EXPECT_FALSE(partitioned.load);
+  EXPECT_FALSE(partitioned.store);
+}
+
 TEST(IndirectLoadCostModelTest,
      SimdMatchedIndirectFitReplacesOnlyLoadResource) {
   IRTestContext context(false, true);
@@ -68,7 +100,7 @@ TEST(IndirectLoadCostModelTest, SimdMatchedIndirectNarrowRankTwoDomain) {
   }
   work.addressPatterns[0].axes[0].regularity = "computed_nonaffine";
   auto fallback = indirectCosts(stage, profile);
-  EXPECT_EQ(fallback[0].indirectLoadPricing, "legacy_transactions");
+  EXPECT_EQ(fallback[0].indirectLoadPricing, "generic_resource_model");
 }
 
 TEST(IndirectLoadCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
@@ -116,17 +148,17 @@ TEST(IndirectLoadCostModelTest, SimdDtypeRankFitPreservesIndependentResources) {
       EXPECT_DOUBLE_EQ(fit[1].totalCycles, old[1].totalCycles);
       profile.simd.indirectDependencyLatencyCycles = 10000;
       for (int64_t warps : {1, 2, 4, 8, 16, 32, 64}) {
-        profile.logicalWarpGroupCount = warps;
+        profile.baseSimtWarpCount = warps;
         auto result = indirectCosts(stage, profile);
         EXPECT_DOUBLE_EQ(result[0].totalCycles, fit[0].totalCycles);
       }
-      work.predicateElements = 1;
+      work.predicateCounts[1] = 1;
       auto masked = indirectCosts(stage, profile);
-      EXPECT_EQ(masked[0].indirectLoadPricing, "legacy_transactions");
-      work.predicateElements = 0;
-      work.estimatedSpillTransactions = 1;
+      EXPECT_EQ(masked[0].indirectLoadPricing, "generic_resource_model");
+      work.predicateCounts.clear();
+      work.privateStackLoadInstructions = 1;
       auto spilled = indirectCosts(stage, profile);
-      EXPECT_EQ(spilled[0].indirectLoadPricing, "legacy_transactions");
+      EXPECT_EQ(spilled[0].indirectLoadPricing, "generic_resource_model");
     }
   }
 }
@@ -148,7 +180,7 @@ TEST(IndirectLoadCostModelTest, SimdDtypeRankFitRejectsUnvalidatedDomains) {
     auto profile = calibrationProfile();
     profile.simdIndirectLoadModel = "random_dtype_matched_ab_20261008";
     auto result = indirectCosts(stage, profile);
-    EXPECT_EQ(result[0].indirectLoadPricing, "legacy_transactions");
+    EXPECT_EQ(result[0].indirectLoadPricing, "generic_resource_model");
   }
 }
 
@@ -262,7 +294,7 @@ TEST(IndirectLoadCostModelTest,
           work.addressPatterns = {
               loadedAddressPattern(stage, "tt.load", shape)};
           auto profile = calibrationProfile();
-          profile.logicalWarpGroupCount = warps;
+          profile.baseSimtWarpCount = warps;
           auto old = indirectCosts(stage, profile);
           profile.simtIndirectLoadModel = "random_dtype_six_term_20261008";
           auto result = indirectCosts(stage, profile);
@@ -298,20 +330,20 @@ TEST(IndirectLoadCostModelTest, SimtDtypeRankFitRejectsUnvalidatedDomains) {
     stage.workload.indirectLoadTransactions =
         stage.workload.loadWarpInstructions = 1;
     auto profile = calibrationProfile();
-    profile.logicalWarpGroupCount = (index == 2 || index == 5) ? 4 : 1;
+    profile.baseSimtWarpCount = (index == 2 || index == 5) ? 4 : 1;
     profile.simtIndirectLoadModel = "random_dtype_six_term_20261008";
     auto result = indirectCosts(stage, profile);
     EXPECT_EQ(result[1].indirectLoadPricing, index == 0
                                                  ? profile.simtIndirectLoadModel
-                                                 : "legacy_transactions");
+                                                 : "generic_resource_model");
     if (index == 0) {
       for (unsigned guard = 0; guard < 8; ++guard) {
         auto invalid = stage;
         mlir::Operation *secondLoad = nullptr;
         if (guard == 0)
-          invalid.workload.predicateElements = 1;
+          invalid.workload.predicateCounts[1] = 1;
         if (guard == 1)
-          invalid.workload.estimatedSpillTransactions = 1;
+          invalid.workload.privateStackLoadInstructions = 1;
         if (guard == 2)
           invalid.features.activeLaneRatio = 0.5;
         if (guard == 3) {
@@ -329,7 +361,7 @@ TEST(IndirectLoadCostModelTest, SimtDtypeRankFitRejectsUnvalidatedDomains) {
         if (guard == 7)
           invalid.features.hasAtomicMemory = true;
         auto rejected = indirectCosts(invalid, profile);
-        EXPECT_EQ(rejected[1].indirectLoadPricing, "legacy_transactions");
+        EXPECT_EQ(rejected[1].indirectLoadPricing, "generic_resource_model");
         if (secondLoad)
           secondLoad->destroy();
       }
@@ -351,7 +383,7 @@ TEST(IndirectLoadCostModelTest, RandomIndirectFitReplacesOnlyLoadResource) {
   work.storeBytes = 16;
   work.addressPatterns = {loadedAddressPattern(stage, "tt.load", {256})};
   auto profile = calibrationProfile();
-  profile.logicalWarpGroupCount = 4;
+  profile.baseSimtWarpCount = 4;
   auto legacy = indirectCosts(stage, profile);
   profile.simtIndirectLoadModel = "random_i32_six_term_20261007";
   auto calibrated = indirectCosts(stage, profile);
