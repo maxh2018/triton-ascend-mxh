@@ -715,6 +715,9 @@ llvm::json::Object AddressAxisSummary::toJSON() const {
                                         ? llvm::json::Value(*knownStride)
                                         : llvm::json::Value(nullptr);
   result["has_unknown_component"] = hasUnknownComponent;
+  result["opaque_multiplier_elements"] =
+      opaqueMultiplier ? llvm::json::Value(*opaqueMultiplier)
+                       : llvm::json::Value(nullptr);
   result["alignment_bytes"] = alignmentBytes
                                   ? llvm::json::Value(*alignmentBytes)
                                   : llvm::json::Value(nullptr);
@@ -730,6 +733,9 @@ llvm::json::Object AddressPatternSummary::toJSON() const {
   result["memory_op"] = memoryOp;
   result["pattern_class"] = patternClass;
   result["depends_on_loaded_value"] = dependsOnLoadedValue;
+  result["element_bit_width"] = elementBitWidth;
+  result["floating_point"] = floatingPoint;
+  result["masked"] = masked;
   llvm::json::Array axisValues;
   for (const AddressAxisSummary &axis : axes)
     axisValues.push_back(axis.toJSON());
@@ -1242,6 +1248,7 @@ llvm::json::Object StageImplementationCost::toJSON() const {
       {"implementation", implementation.toJSON()},
       {"indirect_load_pricing", indirectLoadPricing},
       {"indirect_store_pricing", indirectStorePricing},
+      {"memory_pricing_boundary", memoryPricingBoundary},
       {"total_system_cycles", totalCycles},
       {"local_scope_completion_inclusive", localScopeCompletionInclusive},
       {"formula_evidence", formulaEvidence},
@@ -1263,6 +1270,7 @@ llvm::json::Object StageImplementationCost::toCompactJSON() const {
       {"implementation", implementation.toJSON()},
       {"indirect_load_pricing", indirectLoadPricing},
       {"indirect_store_pricing", indirectStorePricing},
+      {"memory_pricing_boundary", memoryPricingBoundary},
       {"total_system_cycles", totalCycles},
       {"formula_evidence", formulaEvidence},
       {"resource_system_cycles", resources.toCompactJSON()}};

@@ -2,6 +2,7 @@
 
 #include "AscendModel/RouteModel/StageCostModels.h"
 #include "AscendModel/RouteModel/Models/IndirectGatherMemoryCostModel.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredMemoryCostModel.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
@@ -988,7 +989,8 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
             StageMode mode, int64_t superblockFactor, bool wholeSimt,
             StageMemoryCost fitted = {}) {
   StageResourceCycles resources;
-  StageWorkload work = stage.workload;
+  StageWorkload work =
+      fitted.remainingWorkload ? *fitted.remainingWorkload : stage.workload;
   if (wholeSimt)
     mapCompositeDotPaths(work, profile, superblockFactor, resources);
   const bool simd = mode == StageMode::SIMD;
@@ -1201,7 +1203,11 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
         count * depth * profile.prefixScanStepLatencyCycles;
   }
   // Unclassified scalar operations have no execution-throughput evidence.
-  if (stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory) {
+  if (fitted.replacesTensorMemory) {
+    // The guard proves one target; keep auxiliary issue and compute work.
+    resources.load += fitted.load.value_or(0.0);
+    resources.store += fitted.store.value_or(0.0);
+  } else if (stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory) {
     // Retain #2489's row-wise fallback; these rows are not scalar gathers.
     if (simd) {
       resources.load +=
@@ -1906,7 +1912,7 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
                                  std::max(0.0, pressureFloor - alreadyOwned));
     }
 
-    if (work.indirectLoadCounts.empty() &&
+    if (!fitted.replacesTensorMemory && work.indirectLoadCounts.empty() &&
         work.segmentedIndirectLoadCounts.empty() &&
         work.continuousLoadCounts.empty() &&
         profile.globalLoadSourceFit.enabled) {
@@ -1919,7 +1925,7 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
                          resources.privateStackLoad;
       }
     }
-    if (work.indirectStoreCounts.empty() &&
+    if (!fitted.replacesTensorMemory && work.indirectStoreCounts.empty() &&
         work.segmentedIndirectStoreCounts.empty() &&
         work.continuousStoreCounts.empty() &&
         profile.globalStoreSourceFit.enabled) {
@@ -3630,8 +3636,11 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
               stage.workload.dotFlops > 0.0);
       const LogicalStage executionStage =
           perAivStage(stage, implementation.aivSubblocks);
-      const StageMemoryCost fitted = IndirectGatherMemoryCostModel().cost(
+      StageMemoryCost fitted = PartialStructuredMemoryCostModel().cost(
           executionStage, profile, implementation);
+      if (!fitted.load && !fitted.store)
+        fitted = IndirectGatherMemoryCostModel().cost(
+            executionStage, profile, implementation);
       std::optional<StageResourceCycles> resources = mapWorkload(
           executionStage, modeProfile, implementation.mode,
           implementation.superblockFactor,
@@ -3642,17 +3651,27 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       StageImplementationCost cost;
       cost.implementation = implementation;
       cost.resources = *resources;
-      if (fitted.load)
+      if (fitted.replacesTensorMemory)
+        cost.memoryPricingBoundary = fitted.includesAddressWork
+            ? "simd_native_fragment_with_completion_barrier"
+            : "simt_matched_baseline_increment";
+      if (fitted.load && !fitted.pricing.empty())
+        cost.indirectLoadPricing = fitted.pricing;
+      else if (fitted.load)
         cost.indirectLoadPricing = implementation.mode == StageMode::SIMD
                                        ? profile.simdIndirectLoadModel
                                        : profile.simtIndirectLoadModel;
-      if (fitted.store)
+      if (fitted.store && !fitted.pricing.empty())
+        cost.indirectStorePricing = fitted.pricing;
+      else if (fitted.store)
         cost.indirectStorePricing = implementation.mode == StageMode::SIMD
                                         ? profile.simdIndirectStoreModel
                                         : profile.simtIndirectStoreModel;
       if (implementation.aivSubblocks > 1)
         cost.perAivWorkload = executionStage.workload;
-      if (resources->recurrenceGroupCriticalPath > 0.0 ||
+      if (fitted.replacesTensorMemory)
+        cost.formulaEvidence = fitted.pricing;
+      else if (resources->recurrenceGroupCriticalPath > 0.0 ||
           resources->recurrenceGroupStartup > 0.0 ||
           resources->multiResultReductionGroupBody > 0.0 ||
           resources->rowwiseReductionGroupBody > 0.0 ||

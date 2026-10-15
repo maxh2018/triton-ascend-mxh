@@ -4399,6 +4399,12 @@
       "type": "string",
       "minLength": 1,
       "description": "Canonical target for this calibration; it must equal the target of the referenced shared microbenchmark profile."
+    },
+    "partial_structured_memory_model": {
+      "enum": [
+        "ttir_q1_short_formula_20261014"
+      ],
+      "description": "Optional Ascend950PR short affine TTIR geometry fits. Unmasked q=1, ranks 1-5, widths 8/16/32/64; store assumes first logical write without fill. SIMD prices the native fragment with owned addressing, SIMT the matched-baseline increment. No runtime sampling. Unsupported cases retain existing pricing. Individual-input MAPE meets 20% for three models; SIMT load is 23.253%."
     }
   },
   "required": [

@@ -156,7 +156,7 @@ struct StageModelFeatures {
   bool hasPointerInduction = false;
   bool hasContiguousMemory = false;
   bool hasIndirectMemory = false;
-  /// Loaded-index outer axes with a proven unit-stride contiguous suffix.
+  /// Mixed structured/unstructured axes; structure need not be contiguous.
   bool hasPartialContinuousMemory = false;
   bool hasAtomicMemory = false;
   bool hasReduction = false;
@@ -283,6 +283,9 @@ struct AddressAxisSummary {
   std::string regularity = "opaque";
   std::string provenance = "unknown";
   std::optional<int64_t> knownStride;
+  /// Coefficient of one separable opaque index, in element addresses.
+  /// Unknown or multiple index sources remain nullopt.
+  std::optional<int64_t> opaqueMultiplier;
   bool hasUnknownComponent = true;
   std::optional<int64_t> alignmentBytes;
   std::string reason;
@@ -297,6 +300,9 @@ struct AddressPatternSummary {
   std::string memoryOp;
   std::string patternClass;
   bool dependsOnLoadedValue = false;
+  int64_t elementBitWidth = 0;
+  bool floatingPoint = false;
+  bool masked = false;
   std::vector<AddressAxisSummary> axes;
 
   llvm::json::Object toJSON() const;
@@ -514,6 +520,7 @@ struct StageImplementationCost {
   StageImplementation implementation;
   std::string indirectLoadPricing = "generic_resource_model";
   std::string indirectStorePricing = "generic_resource_model";
+  std::string memoryPricingBoundary = "legacy_resources";
   double totalCycles = 0.0;
   /// A profiled semantic operation in this implementation already includes
   /// the fixed local-SIMT scope enter/exit completion envelope.

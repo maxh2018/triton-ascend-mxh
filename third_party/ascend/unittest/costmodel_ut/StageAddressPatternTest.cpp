@@ -1,5 +1,6 @@
 // Pointer-analysis coverage for the indirect and partially structured stages.
 #include "AscendModel/Analysis/StagePartitioner.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredMemoryModel.h"
 #include "CostModelTestUtils.h"
 #include "StageIRTestUtils.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -117,6 +118,135 @@ static const LogicalStage *payloadStage(const StagePartition &partition,
   return nullptr;
 }
 } // namespace
+
+TEST(StageAddressPatternTest,
+     PartialFitOwnsOneMemoryPriceAndNativeAddressWork) {
+  for (bool store : {false, true}) {
+    IRTestContext context(true);
+    auto module = addressModule(
+        context, {4, 8}, {IndexKind::Loaded, IndexKind::Range}, 1, store);
+    auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                  StagePartitionerOptions{});
+    ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+    auto *payload = payloadStage(*partition, {4, 8}, store);
+    ASSERT_NE(payload, nullptr);
+    ASSERT_EQ(payload->workload.addressPatterns.size(), 1u);
+    const auto &p = payload->workload.addressPatterns.front();
+    ASSERT_TRUE(p.axes[0].opaqueMultiplier);
+    EXPECT_EQ(*p.axes[0].opaqueMultiplier, 8);
+    EXPECT_EQ(p.elementBitWidth, 32);
+    auto profile = hardwareProfile();
+    profile.target = "Ascend950PR/dav-c310";
+    profile.partialStructuredMemoryModel =
+        "ttir_q1_short_formula_20261014";
+    auto table = evaluateOneStage(*payload, profile);
+    ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
+    partial_memory::Geometry g{{{4, 8, true}, {8, 1, false}}, 32, 1, true};
+    for (const auto &cost : table->stages.front().implementations) {
+      bool simd = cost.implementation.mode == StageMode::SIMD;
+      auto m = simd ? (store ? partial_memory::Model::SimdStore
+                             : partial_memory::Model::SimdLoad)
+                    : (store ? partial_memory::Model::SimtStore
+                             : partial_memory::Model::SimtLoad);
+      auto expected = partial_memory::predict(g, m);
+      ASSERT_TRUE(expected);
+      EXPECT_NEAR(store ? cost.resources.store : cost.resources.load, *expected,
+                  1e-8);
+      EXPECT_TRUE((store ? cost.indirectStorePricing : cost.indirectLoadPricing)
+                      .find("partial_") == 0);
+      if (simd) {
+        EXPECT_DOUBLE_EQ(cost.resources.scalar, 0);
+        EXPECT_DOUBLE_EQ(cost.resources.compute, 0);
+        EXPECT_DOUBLE_EQ(cost.resources.issue, 0);
+      }
+    }
+    profile.partialStructuredMemoryModel.clear();
+    auto legacy = evaluateOneStage(*payload, profile);
+    ASSERT_TRUE(bool(legacy));
+    EXPECT_EQ(
+        legacy->stages.front().implementations.front().indirectLoadPricing,
+        "generic_resource_model");
+  }
+}
+
+TEST(StageAddressPatternTest, PartialFitUsesBaseWarpsAcrossCalibratedRange) {
+  for (int64_t warps : {1, 2, 4, 8, 16, 32, 64}) {
+    IRTestContext context(true);
+    auto module = addressModule(
+        context, {4, 8 * warps}, {IndexKind::Loaded, IndexKind::Range});
+    auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                 StagePartitionerOptions{});
+    ASSERT_TRUE(bool(partition));
+    auto *payload = payloadStage(*partition, {4, 8 * warps});
+    ASSERT_NE(payload, nullptr);
+    auto profile = hardwareProfile();
+    profile.target = "Ascend950PR/dav-c310";
+    profile.baseSimtWarpCount = warps;
+    profile.logicalWarpGroupCount = 1;
+    profile.partialStructuredMemoryModel = "ttir_q1_short_formula_20261014";
+    auto table = evaluateOneStage(*payload, profile);
+    ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
+    partial_memory::Geometry g{
+        {{4, 8 * warps, true}, {8 * warps, 1, false}}, 32, warps, true};
+    for (const auto &cost : table->stages.front().implementations) {
+      auto kind = cost.implementation.mode == StageMode::SIMD
+                      ? partial_memory::Model::SimdLoad
+                      : partial_memory::Model::SimtLoad;
+      auto expected = partial_memory::predict(g, kind);
+      ASSERT_TRUE(expected);
+      EXPECT_NEAR(cost.resources.load, *expected, 1e-8);
+    }
+  }
+}
+
+TEST(StageAddressPatternTest,
+     NativeFitRetainsUnrelatedPreparationAndCacheFallback) {
+  IRTestContext context(true);
+  auto module =
+      addressModule(context, {4, 8}, {IndexKind::Loaded, IndexKind::Range});
+  auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                StagePartitionerOptions{});
+  ASSERT_TRUE(bool(partition));
+  auto *payload = payloadStage(*partition, {4, 8});
+  ASSERT_NE(payload, nullptr);
+  LogicalStage stage = *payload;
+  auto summary = stage.workload.addressPatterns;
+  Operation *memory = nullptr;
+  for (auto *op : stage.operations)
+    if (op->getName().getStringRef() == "tt.load")
+      memory = op;
+  ASSERT_NE(memory, nullptr);
+  OpBuilder builder(memory);
+  OperationState state(builder.getUnknownLoc(), "tt.make_range");
+  state.addTypes(RankedTensorType::get({8}, builder.getI32Type()));
+  state.addAttribute("start", builder.getI32IntegerAttr(0));
+  state.addAttribute("end", builder.getI32IntegerAttr(8));
+  auto *preparation = builder.create(state);
+  stage.operations.push_back(preparation);
+  StagePartition single;
+  single.operationOwnershipComplete = true;
+  single.stages.push_back(stage);
+  ASSERT_FALSE(bool(StageWorkloadAnalysis().analyze(single)));
+  stage = single.stages.front();
+  stage.workload.addressPatterns = summary;
+  auto profile = hardwareProfile();
+  profile.target = "Ascend950PR/dav-c310";
+  profile.partialStructuredMemoryModel = "ttir_q1_short_formula_20261014";
+  auto table = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(table));
+  auto &native = table->stages.front().implementations.front();
+  EXPECT_TRUE(native.indirectLoadPricing.find("partial_simd_") == 0);
+  EXPECT_GT(native.resources.issue, 0);
+  EXPECT_EQ(native.memoryPricingBoundary,
+            "simd_native_fragment_with_completion_barrier");
+  memory->setAttr(
+      "cache", builder.getI32IntegerAttr(int64_t(triton::CacheModifier::CA)));
+  auto fallback = evaluateOneStage(stage, profile);
+  ASSERT_TRUE(bool(fallback));
+  EXPECT_EQ(
+      fallback->stages.front().implementations.front().indirectLoadPricing,
+      "generic_resource_model");
+}
 
 TEST(StageAddressPatternTest, PartialContinuousStageAlwaysUsesSerialCost) {
   LogicalStage stage =
@@ -236,8 +366,7 @@ TEST(StageAddressPatternTest,
   }
 }
 
-TEST(StageAddressPatternTest,
-     PartialStructuredTailRequiresAllPrefixAxesUnstructured) {
+TEST(StageAddressPatternTest, PartialStructuredStageCoversMixedPrefixAxes) {
   IRTestContext context(true);
   for (auto axes : {std::pair{true, false}, std::pair{false, true},
                     std::pair{true, true}}) {
@@ -253,9 +382,8 @@ TEST(StageAddressPatternTest,
     const bool partial = axes.first && axes.second;
     const auto &work = payload->workload;
     EXPECT_EQ(payload->costModelKind,
-              partial ? StageCostModelKind::PartialContinuousTileMemory
-                      : StageCostModelKind::IndirectGatherMemory);
-    EXPECT_EQ(payload->features.hasPartialContinuousMemory, partial);
+              StageCostModelKind::PartialContinuousTileMemory);
+    EXPECT_TRUE(payload->features.hasPartialContinuousMemory);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadRows, partial ? 8 : 0);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadBytes, partial ? 256 : 0);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadWarpInstructions,

@@ -540,6 +540,9 @@ struct HardwareProfile {
   /// an explicit profile prior; reuse additionally requires workload evidence.
   std::string simtIndirectStoreModel;
   std::string simdIndirectStoreModel;
+  /// Versioned short affine partial-memory fits from static TTIR geometry.
+  /// SIMD prices a native fragment; SIMT a matched-baseline increment.
+  std::string partialStructuredMemoryModel;
   /// Base warp count of one logical SIMT program.
   int64_t baseSimtWarpCount = 1;
   /// CV1:2 work partition, applied before local SuperBlock grouping. This is

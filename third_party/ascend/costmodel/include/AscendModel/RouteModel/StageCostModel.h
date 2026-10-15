@@ -12,6 +12,13 @@ namespace mlir::ascend {
 struct StageMemoryCost {
   std::optional<double> load;
   std::optional<double> store;
+  // Partial-memory fits replace the single target's entire tensor-memory
+  // resource. Native SIMD fragments already include owned address helpers.
+  bool replacesTensorMemory = false;
+  bool includesAddressWork = false;
+  /// Auxiliary operations outside a SIMD native fragment, priced normally.
+  std::optional<StageWorkload> remainingWorkload;
+  std::string pricing;
 };
 
 /// Extension point for newly calibrated Stage resources. Existing workload,
