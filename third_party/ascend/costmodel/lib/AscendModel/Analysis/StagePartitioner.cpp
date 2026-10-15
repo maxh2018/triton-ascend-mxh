@@ -5,6 +5,7 @@
 #include "ascend/include/Utils/SuperBlockFactor.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
@@ -255,6 +256,84 @@ analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
 }
 
 using PointerAxisInfo = triton::PtrOffsetInfo::AxisInfo;
+
+// A deliberately small positive proof, independent of AxisTerm's pricing
+// hints. Endpoints describe an exact i32 arithmetic progression. Checking
+// every intermediate endpoint excludes signed wraparound over the whole range.
+static std::optional<std::pair<int64_t, int64_t>>
+constantProgression(Value value, unsigned depth = 0) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (depth > 32 || !type || type.getRank() != 1 ||
+      !type.getElementType().isInteger(32) || type.getDimSize(0) <= 0)
+    return std::nullopt;
+  Operation *op = value.getDefiningOp();
+  if (!op)
+    return std::nullopt;
+  if (auto range = dyn_cast<triton::MakeRangeOp>(op))
+    return std::make_pair(int64_t(range.getStart()), int64_t(range.getEnd()) - 1);
+  if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
+    auto dense = dyn_cast<DenseIntElementsAttr>(constant.getValue());
+    if (dense && dense.isSplat()) {
+      int64_t v = dense.getSplatValue<APInt>().getSExtValue();
+      return std::make_pair(v, v);
+    }
+    return std::nullopt;
+  }
+  if (!isa<arith::AddIOp, arith::SubIOp, arith::MulIOp>(op))
+    return std::nullopt;
+  if (auto flags = op->getAttrOfType<arith::IntegerOverflowFlagsAttr>("overflowFlags"))
+    if (flags.getValue() != arith::IntegerOverflowFlags::none)
+      return std::nullopt;
+  auto a = constantProgression(op->getOperand(0), depth + 1);
+  auto b = constantProgression(op->getOperand(1), depth + 1);
+  if (!a || !b)
+    return std::nullopt;
+  // Multiplication is affine only when one entire operand is constant.
+  if (isa<arith::MulIOp>(op) && a->first != a->second && b->first != b->second)
+    return std::nullopt;
+  auto calculate = [&](int64_t x, int64_t y) {
+    return isa<arith::MulIOp>(op) ? x * y
+           : isa<arith::SubIOp>(op) ? x - y : x + y;
+  };
+  // Operands are signed i32, so these calculations cannot overflow int64.
+  int64_t first = calculate(a->first, b->first);
+  int64_t last = calculate(a->second, b->second);
+  if (!llvm::isInt<32>(first) || !llvm::isInt<32>(last))
+    return std::nullopt;
+  return std::make_pair(first, last);
+}
+
+static bool isProgramUniformScalar(Value value) {
+  if (!isa<IntegerType>(value.getType()))
+    return false;
+  if (auto arg = dyn_cast<BlockArgument>(value))
+    return isa<triton::FuncOp>(arg.getOwner()->getParentOp());
+  return value.getDefiningOp<arith::ConstantOp>() ||
+         value.getDefiningOp<triton::GetProgramIdOp>();
+}
+
+static bool hasProvenBranchStride(Operation *memory) {
+  auto add = memory->getOperand(0).getDefiningOp<triton::AddPtrOp>();
+  if (!add)
+    return false;
+  auto base = add.getPtr().getDefiningOp<triton::SplatOp>();
+  auto arg = base ? dyn_cast<BlockArgument>(base.getSrc()) : BlockArgument{};
+  if (!arg || !isa<triton::FuncOp>(arg.getOwner()->getParentOp()))
+    return false;
+  auto branch = add.getOffset().getDefiningOp<scf::IfOp>();
+  if (!branch || !branch.elseBlock())
+    return false;
+  Value condition = branch.getCondition();
+  if (!isProgramUniformScalar(condition)) {
+    auto cmp = condition.getDefiningOp<arith::CmpIOp>();
+    if (!cmp || !isProgramUniformScalar(cmp.getLhs()) ||
+        !isProgramUniformScalar(cmp.getRhs()))
+      return false;
+  }
+  unsigned index = cast<OpResult>(add.getOffset()).getResultNumber();
+  return constantProgression(branch.thenBlock()->getTerminator()->getOperand(index)) &&
+         constantProgression(branch.elseBlock()->getTerminator()->getOperand(index));
+}
 
 // Address summaries retain constant affine terms for the calibrated pricing
 // guards. Partial-tile classification uses PtrOffsetInfo directly instead.
@@ -3440,9 +3519,16 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
   OwningOpRef<ModuleOp> analysisModule(cast<ModuleOp>(module->clone(mapping)));
   IRRewriter rewriter(module.getContext());
   llvm::DenseMap<Value, triton::PtrOffsetInfo> offsetMap;
+  auto analyze = [&](Operation *operation) {
+    auto axes = analyzePointerAxes(mapping.lookupOrNull(operation), rewriter,
+                                   offsetMap);
+    if (axes && axes->getStructured().size() == 1 &&
+        hasProvenBranchStride(operation))
+      axes->getStructuredRef()[0] = PointerAxisInfo::structured;
+    return axes;
+  };
   for (Operation *operation : candidates) {
-    Operation *copy = mapping.lookupOrNull(operation);
-    auto axes = analyzePointerAxes(copy, rewriter, offsetMap);
+    auto axes = analyze(operation);
     if (axes)
       unstructuredMemory[operation] = axes->hasUnstructuredDim();
     tiles[operation] =
@@ -3450,15 +3536,13 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
   }
   for (auto indexed : llvm::enumerate(loads)) {
     Operation *operation = indexed.value();
-    auto axes = analyzePointerAxes(mapping.lookupOrNull(operation), rewriter,
-                                   offsetMap);
+    auto axes = analyze(operation);
     summaries[operation] = makeAddressSummary(operation, indexed.index(), axes);
   }
   // Store calibration consumes the same per-axis facts. Keep load ordinals
   // unchanged; -1 marks summaries that do not describe a tt.load.
   for (Operation *operation : stores) {
-    auto axes = analyzePointerAxes(mapping.lookupOrNull(operation), rewriter,
-                                   offsetMap);
+    auto axes = analyze(operation);
     summaries[operation] = makeAddressSummary(operation, -1, axes);
   }
 }

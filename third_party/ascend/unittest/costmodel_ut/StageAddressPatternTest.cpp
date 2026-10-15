@@ -3,6 +3,7 @@
 #include "CostModelTestUtils.h"
 #include "StageIRTestUtils.h"
 #include "mlir/IR/Builders.h"
+#include "llvm/Support/FormatVariadic.h"
 
 using namespace mlir;
 using namespace mlir::ascend;
@@ -108,7 +109,7 @@ static const LogicalStage *payloadStage(const StagePartition &partition,
         continue;
       auto type = dyn_cast<RankedTensorType>(
           store ? op->getOperand(1).getType() : op->getResult(0).getType());
-      if (type && type.getShape() == shape)
+      if (type && type.getElementType().isF32() && type.getShape() == shape)
         return &stage;
     }
   return nullptr;
@@ -292,4 +293,115 @@ TEST(StageAddressPatternTest, LoadedScalarIndexRemainsUniform) {
                            : payload->workload.partialContinuousLoadRows,
                      0);
   }
+}
+
+TEST(StageAddressPatternTest, CrossAxisProductStaysIndirect) {
+  IRTestContext context(true);
+  auto module = context.parse(R"mlir(
+    module {
+      tt.func @bilinear(%base: !tt.ptr<f32>) {
+        %r = tt.make_range {start = 0 : i32, end = 4 : i32} : tensor<4xi32>
+        %a = tt.expand_dims %r {axis = 1 : i32} : tensor<4xi32> -> tensor<4x1xi32>
+        %b = tt.expand_dims %r {axis = 0 : i32} : tensor<4xi32> -> tensor<1x4xi32>
+        %i = tt.broadcast %a : tensor<4x1xi32> -> tensor<4x4xi32>
+        %j = tt.broadcast %b : tensor<1x4xi32> -> tensor<4x4xi32>
+        %offset = arith.muli %i, %j : tensor<4x4xi32>
+        %bp = tt.splat %base : !tt.ptr<f32> -> tensor<4x4x!tt.ptr<f32>>
+        %ptr = tt.addptr %bp, %offset : tensor<4x4x!tt.ptr<f32>>, tensor<4x4xi32>
+        %value = tt.load %ptr : tensor<4x4x!tt.ptr<f32>>
+        tt.return
+      }
+    }
+  )mlir");
+  ASSERT_TRUE(module);
+  auto partition = StagePartitioner().partition(
+      *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+  ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+  auto *payload = payloadStage(*partition, {4, 4});
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(payload->costModelKind, StageCostModelKind::IndirectGatherMemory);
+}
+
+TEST(StageAddressPatternTest, UniformBranchStridesDoNotBecomeIndirect) {
+  // A scalar branch selects a whole affine tensor. A non-affine/loaded branch
+  // or per-lane select must not receive that proof, for either load or store.
+  for (bool store : {false, true})
+    for (unsigned variant : {0u, 1u, 2u})
+    for (StringRef expression : {"arith.muli %range, %two",
+                                 "arith.addi %range, %two",
+                                 "arith.subi %two, %range",
+                                 "arith.muli %range, %large",
+                                 "arith.muli %range, %range",
+                                 "arith.remsi %range, %two",
+                                 "tt.load %ip",
+                                 "arith.select %mask, %range, %two"}) {
+      SCOPED_TRACE(expression.str() + (store ? " store " : " load ") +
+                   std::to_string(variant));
+      IRTestContext context(true);
+      auto module = context.parse(llvm::formatv(R"mlir(
+        module {{
+          tt.func @conditional(%base: !tt.ptr<f32>, %indices: !tt.ptr<i32>,
+                               %condition: i1) {{
+            %range = tt.make_range {{start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+            %two = arith.constant dense<2> : tensor<32xi32>
+            %large = arith.constant dense<1073741824> : tensor<32xi32>
+            %mask = arith.cmpi slt, %range, %two : tensor<32xi32>
+            %ib = tt.splat %indices : !tt.ptr<i32> -> tensor<32x!tt.ptr<i32>>
+            %ip = tt.addptr %ib, %range : tensor<32x!tt.ptr<i32>>, tensor<32xi32>
+            %loaded_condition = tt.load %indices : !tt.ptr<i32>
+            %zero = arith.constant 0 : i32
+            %unknown_condition = arith.cmpi eq, %loaded_condition, %zero : i32
+            %selected = scf.if {4} -> tensor<32xi32> {{
+              scf.yield %range : tensor<32xi32>
+            } else {{
+              %changed = {0} : {2}
+              scf.yield %changed : tensor<32xi32>
+            }
+            {3}
+            %bp = tt.splat %base : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+            %ptr = tt.addptr %bp, {5} : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+            %value = arith.constant dense<0.0> : tensor<32xf32>
+            {1}
+            tt.return
+          }
+        }
+      )mlir", expression,
+          store ? "tt.store %ptr, %value : tensor<32x!tt.ptr<f32>>"
+                : "%loaded = tt.load %ptr, %mask, %value : tensor<32x!tt.ptr<f32>>",
+          expression.starts_with("tt.load") ? "tensor<32x!tt.ptr<i32>>"
+          : expression.starts_with("arith.select")
+              ? "tensor<32xi1>, tensor<32xi32>"
+              : "tensor<32xi32>",
+          variant == 1 ? "%post = arith.muli %selected, %range : tensor<32xi32>" : "",
+          variant == 2 ? "%unknown_condition" : "%condition",
+          variant == 1 ? "%post" : "%selected")
+                                      .str());
+      ASSERT_TRUE(module);
+      auto partition = StagePartitioner().partition(
+          *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+      ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+      auto *payload = payloadStage(*partition, {32}, store);
+      ASSERT_NE(payload, nullptr);
+      const bool affine = variant == 0 && (expression == "arith.muli %range, %two" ||
+                          expression == "arith.addi %range, %two" ||
+                          expression == "arith.subi %two, %range");
+      EXPECT_EQ(payload->costModelKind,
+                affine ? (store ? StageCostModelKind::ContinuousTileStore
+                                : StageCostModelKind::ContinuousTileMemory)
+                       : StageCostModelKind::IndirectGatherMemory);
+      EXPECT_DOUBLE_EQ(store ? payload->workload.indirectStoreBytes
+                             : payload->workload.indirectLoadBytes,
+                       affine ? 0 : 128);
+      if (affine && !store) {
+        auto profile = hardwareProfile();
+        profile.simd.controlFlowAddressScalarizedLoadResidualCyclesByElements =
+            {{32, 100.0}};
+        profile.simd.controlFlowAddressScalarizedLoadEvidence = "unit-test rate";
+        auto costs = evaluateOneStage(*payload, profile);
+        ASSERT_TRUE(bool(costs)) << llvm::toString(costs.takeError());
+        EXPECT_DOUBLE_EQ(costs->stages.front().implementations.front()
+                             .resources.controlFlowAddressScalarizedLoad,
+                         100.0);
+      }
+    }
 }
