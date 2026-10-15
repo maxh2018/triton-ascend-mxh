@@ -270,7 +270,8 @@ constantProgression(Value value, unsigned depth = 0) {
   if (!op)
     return std::nullopt;
   if (auto range = dyn_cast<triton::MakeRangeOp>(op))
-    return std::make_pair(int64_t(range.getStart()), int64_t(range.getEnd()) - 1);
+    return std::make_pair(int64_t(range.getStart()),
+                          int64_t(range.getEnd()) - 1);
   if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
     auto dense = dyn_cast<DenseIntElementsAttr>(constant.getValue());
     if (dense && dense.isSplat()) {
@@ -281,7 +282,8 @@ constantProgression(Value value, unsigned depth = 0) {
   }
   if (!isa<arith::AddIOp, arith::SubIOp, arith::MulIOp>(op))
     return std::nullopt;
-  if (auto flags = op->getAttrOfType<arith::IntegerOverflowFlagsAttr>("overflowFlags"))
+  if (auto flags =
+          op->getAttrOfType<arith::IntegerOverflowFlagsAttr>("overflowFlags"))
     if (flags.getValue() != arith::IntegerOverflowFlags::none)
       return std::nullopt;
   auto a = constantProgression(op->getOperand(0), depth + 1);
@@ -292,8 +294,9 @@ constantProgression(Value value, unsigned depth = 0) {
   if (isa<arith::MulIOp>(op) && a->first != a->second && b->first != b->second)
     return std::nullopt;
   auto calculate = [&](int64_t x, int64_t y) {
-    return isa<arith::MulIOp>(op) ? x * y
-           : isa<arith::SubIOp>(op) ? x - y : x + y;
+    return isa<arith::MulIOp>(op)   ? x * y
+           : isa<arith::SubIOp>(op) ? x - y
+                                    : x + y;
   };
   // Operands are signed i32, so these calculations cannot overflow int64.
   int64_t first = calculate(a->first, b->first);
@@ -331,8 +334,10 @@ static bool hasProvenBranchStride(Operation *memory) {
       return false;
   }
   unsigned index = cast<OpResult>(add.getOffset()).getResultNumber();
-  return constantProgression(branch.thenBlock()->getTerminator()->getOperand(index)) &&
-         constantProgression(branch.elseBlock()->getTerminator()->getOperand(index));
+  return constantProgression(
+             branch.thenBlock()->getTerminator()->getOperand(index)) &&
+         constantProgression(
+             branch.elseBlock()->getTerminator()->getOperand(index));
 }
 
 // Address summaries retain constant affine terms for the calibrated pricing
@@ -3488,6 +3493,31 @@ static void deriveLocalSimtScopeTraffic(StagePartition &partition,
 } // namespace
 
 namespace mlir::ascend {
+
+llvm::SmallVector<Operation *> collectUnstructuredMemoryOps(Operation *root) {
+  llvm::SmallVector<Operation *> result;
+  if (!root || !root->getContext()->getLoadedDialect<triton::TritonDialect>())
+    return result;
+  auto module = dyn_cast<ModuleOp>(root);
+  if (!module)
+    module = root->getParentOfType<ModuleOp>();
+  if (!module)
+    return result;
+  IRMapping mapping;
+  OwningOpRef<ModuleOp> copy(cast<ModuleOp>(module->clone(mapping)));
+  IRRewriter rewriter(root->getContext());
+  llvm::DenseMap<Value, triton::PtrOffsetInfo> offsetMap;
+  root->walk([&](Operation *op) {
+    if (!isa<triton::LoadOp, triton::StoreOp>(op))
+      return;
+    auto axes =
+        analyzePointerAxes(mapping.lookupOrNull(op), rewriter, offsetMap);
+    if (axes && axes->hasUnstructuredDim() &&
+        !(axes->getStructured().size() == 1 && hasProvenBranchStride(op)))
+      result.push_back(op);
+  });
+  return result;
+}
 
 StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
   if (!module ||

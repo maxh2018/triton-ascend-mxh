@@ -2,7 +2,9 @@
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "CostModelTestUtils.h"
 #include "StageIRTestUtils.h"
+#include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Verifier.h"
 #include "llvm/Support/FormatVariadic.h"
 
 using namespace mlir;
@@ -314,12 +316,79 @@ TEST(StageAddressPatternTest, CrossAxisProductStaysIndirect) {
     }
   )mlir");
   ASSERT_TRUE(module);
-  auto partition = StagePartitioner().partition(
-      *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+  auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                StagePartitionerOptions{});
   ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
   auto *payload = payloadStage(*partition, {4, 4});
   ASSERT_NE(payload, nullptr);
   EXPECT_EQ(payload->costModelKind, StageCostModelKind::IndirectGatherMemory);
+  auto plan = buildMixedSimtAnchorPlan(*module, true);
+  ASSERT_EQ(plan.anchors.size(), 1u);
+  EXPECT_EQ(plan.anchors.front().kind, SimtAnchorKind::UnstructuredMemory);
+}
+
+TEST(StageAddressPatternTest, UnstructuredLoadStoreAnchorsMaterializeScopes) {
+  for (bool store : {false, true})
+    for (bool multidimensional : {false, true})
+      for (IndexKind kind : {IndexKind::Range, IndexKind::Scalar,
+                             IndexKind::Loaded, IndexKind::Computed}) {
+        IRTestContext context(true, true);
+        context.getOrLoadDialect<scope::ScopeDialect>();
+        SmallVector<int64_t> shape = multidimensional
+                                         ? SmallVector<int64_t>{4, 8}
+                                         : SmallVector<int64_t>{32};
+        SmallVector<IndexKind> kinds =
+            multidimensional ? SmallVector<IndexKind>{kind, IndexKind::Range}
+                             : SmallVector<IndexKind>{kind};
+        auto module = addressModule(context, shape, kinds, 1, store);
+        ASSERT_TRUE(module);
+        // The shared builder uses OperationState; supply registered Triton's
+        // optional-operand segments before verifying the materialized module.
+        module->walk([&](Operation *op) {
+          if (isa<triton::LoadOp>(op))
+            op->setAttr("operandSegmentSizes",
+                        DenseI32ArrayAttr::get(&context, {1, 0, 0}));
+          if (isa<triton::StoreOp>(op))
+            op->setAttr("operandSegmentSizes",
+                        DenseI32ArrayAttr::get(&context, {1, 1, 0}));
+        });
+        ASSERT_TRUE(succeeded(verify(*module)));
+        std::string original;
+        llvm::raw_string_ostream stream(original);
+        module->print(stream);
+        auto plan = buildMixedSimtAnchorPlan(*module, true);
+        std::string analyzed;
+        llvm::raw_string_ostream analyzedStream(analyzed);
+        module->print(analyzedStream);
+        EXPECT_EQ(original, analyzed);
+        bool indirect =
+            kind == IndexKind::Loaded || kind == IndexKind::Computed;
+        EXPECT_EQ(hasSimtAnchorInBody(*module), indirect);
+        ASSERT_EQ(plan.anchors.size(), indirect ? 1u : 0u);
+        if (!indirect)
+          continue;
+        auto &anchor = plan.anchors.front();
+        EXPECT_EQ(anchor.kind, kind == IndexKind::Loaded
+                                   ? SimtAnchorKind::LoadedIndexDependentMemory
+                                   : SimtAnchorKind::UnstructuredMemory);
+        EXPECT_EQ(anchor.operation->getName().getStringRef(),
+                  store ? "tt.store" : "tt.load");
+        EXPECT_TRUE(anchor.materializable);
+        auto partition = StagePartitioner().partition(
+            *module, plan, StagePartitionerOptions{});
+        ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+        auto *payload = payloadStage(*partition, shape, store);
+        ASSERT_NE(payload, nullptr);
+        EXPECT_TRUE(payload->localSimtMaterializable);
+        EXPECT_EQ(payload->simtAnchorIndices.size(), 1u);
+        auto unsupported = buildMixedSimtAnchorPlan(*module, false);
+        ASSERT_EQ(unsupported.anchors.size(), 1u);
+        EXPECT_FALSE(unsupported.anchors.front().materializable);
+        ASSERT_TRUE(succeeded(materializeSimtAnchorPlan(*module, plan)));
+        EXPECT_EQ(anchor.operation->getParentOp()->getName().getStringRef(),
+                  "scope.scope");
+        EXPECT_TRUE(succeeded(verify(*module)));
+      }
 }
 
 TEST(StageAddressPatternTest, UniformBranchStridesDoNotBecomeIndirect) {
@@ -327,18 +396,17 @@ TEST(StageAddressPatternTest, UniformBranchStridesDoNotBecomeIndirect) {
   // or per-lane select must not receive that proof, for either load or store.
   for (bool store : {false, true})
     for (unsigned variant : {0u, 1u, 2u})
-    for (StringRef expression : {"arith.muli %range, %two",
-                                 "arith.addi %range, %two",
-                                 "arith.subi %two, %range",
-                                 "arith.muli %range, %large",
-                                 "arith.muli %range, %range",
-                                 "arith.remsi %range, %two",
-                                 "tt.load %ip",
-                                 "arith.select %mask, %range, %two"}) {
-      SCOPED_TRACE(expression.str() + (store ? " store " : " load ") +
-                   std::to_string(variant));
-      IRTestContext context(true);
-      auto module = context.parse(llvm::formatv(R"mlir(
+      for (StringRef expression :
+           {"arith.muli %range, %two", "arith.addi %range, %two",
+            "arith.subi %two, %range", "arith.muli %range, %large",
+            "arith.muli %range, %range", "arith.remsi %range, %two",
+            "tt.load %ip", "arith.select %mask, %range, %two"}) {
+        SCOPED_TRACE(expression.str() + (store ? " store " : " load ") +
+                     std::to_string(variant));
+        IRTestContext context(true);
+        auto module = context.parse(
+            llvm::formatv(
+                R"mlir(
         module {{
           tt.func @conditional(%base: !tt.ptr<f32>, %indices: !tt.ptr<i32>,
                                %condition: i1) {{
@@ -365,43 +433,57 @@ TEST(StageAddressPatternTest, UniformBranchStridesDoNotBecomeIndirect) {
             tt.return
           }
         }
-      )mlir", expression,
-          store ? "tt.store %ptr, %value : tensor<32x!tt.ptr<f32>>"
-                : "%loaded = tt.load %ptr, %mask, %value : tensor<32x!tt.ptr<f32>>",
-          expression.starts_with("tt.load") ? "tensor<32x!tt.ptr<i32>>"
-          : expression.starts_with("arith.select")
-              ? "tensor<32xi1>, tensor<32xi32>"
-              : "tensor<32xi32>",
-          variant == 1 ? "%post = arith.muli %selected, %range : tensor<32xi32>" : "",
-          variant == 2 ? "%unknown_condition" : "%condition",
-          variant == 1 ? "%post" : "%selected")
-                                      .str());
-      ASSERT_TRUE(module);
-      auto partition = StagePartitioner().partition(
-          *module, SimtAnchorPlan{}, StagePartitionerOptions{});
-      ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
-      auto *payload = payloadStage(*partition, {32}, store);
-      ASSERT_NE(payload, nullptr);
-      const bool affine = variant == 0 && (expression == "arith.muli %range, %two" ||
-                          expression == "arith.addi %range, %two" ||
-                          expression == "arith.subi %two, %range");
-      EXPECT_EQ(payload->costModelKind,
-                affine ? (store ? StageCostModelKind::ContinuousTileStore
-                                : StageCostModelKind::ContinuousTileMemory)
-                       : StageCostModelKind::IndirectGatherMemory);
-      EXPECT_DOUBLE_EQ(store ? payload->workload.indirectStoreBytes
-                             : payload->workload.indirectLoadBytes,
-                       affine ? 0 : 128);
-      if (affine && !store) {
-        auto profile = hardwareProfile();
-        profile.simd.controlFlowAddressScalarizedLoadResidualCyclesByElements =
-            {{32, 100.0}};
-        profile.simd.controlFlowAddressScalarizedLoadEvidence = "unit-test rate";
-        auto costs = evaluateOneStage(*payload, profile);
-        ASSERT_TRUE(bool(costs)) << llvm::toString(costs.takeError());
-        EXPECT_DOUBLE_EQ(costs->stages.front().implementations.front()
-                             .resources.controlFlowAddressScalarizedLoad,
-                         100.0);
+      )mlir",
+                expression,
+                store ? "tt.store %ptr, %value : tensor<32x!tt.ptr<f32>>"
+                      : "%loaded = tt.load %ptr, %mask, %value : "
+                        "tensor<32x!tt.ptr<f32>>",
+                expression.starts_with("tt.load") ? "tensor<32x!tt.ptr<i32>>"
+                : expression.starts_with("arith.select")
+                    ? "tensor<32xi1>, tensor<32xi32>"
+                    : "tensor<32xi32>",
+                variant == 1
+                    ? "%post = arith.muli %selected, %range : tensor<32xi32>"
+                    : "",
+                variant == 2 ? "%unknown_condition" : "%condition",
+                variant == 1 ? "%post" : "%selected")
+                .str());
+        ASSERT_TRUE(module);
+        auto anchors = collectUnstructuredMemoryOps(*module);
+        const bool proven =
+            variant == 0 && (expression == "arith.muli %range, %two" ||
+                             expression == "arith.addi %range, %two" ||
+                             expression == "arith.subi %two, %range");
+        EXPECT_EQ(anchors.size(), proven ? 0u : 1u);
+        auto partition = StagePartitioner().partition(
+            *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+        ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+        auto *payload = payloadStage(*partition, {32}, store);
+        ASSERT_NE(payload, nullptr);
+        const bool affine =
+            variant == 0 && (expression == "arith.muli %range, %two" ||
+                             expression == "arith.addi %range, %two" ||
+                             expression == "arith.subi %two, %range");
+        EXPECT_EQ(payload->costModelKind,
+                  affine ? (store ? StageCostModelKind::ContinuousTileStore
+                                  : StageCostModelKind::ContinuousTileMemory)
+                         : StageCostModelKind::IndirectGatherMemory);
+        EXPECT_DOUBLE_EQ(store ? payload->workload.indirectStoreBytes
+                               : payload->workload.indirectLoadBytes,
+                         affine ? 0 : 128);
+        if (affine && !store) {
+          auto profile = hardwareProfile();
+          profile.simd
+              .controlFlowAddressScalarizedLoadResidualCyclesByElements = {
+              {32, 100.0}};
+          profile.simd.controlFlowAddressScalarizedLoadEvidence =
+              "unit-test rate";
+          auto costs = evaluateOneStage(*payload, profile);
+          ASSERT_TRUE(bool(costs)) << llvm::toString(costs.takeError());
+          EXPECT_DOUBLE_EQ(costs->stages.front()
+                               .implementations.front()
+                               .resources.controlFlowAddressScalarizedLoad,
+                           100.0);
+        }
       }
-    }
 }
