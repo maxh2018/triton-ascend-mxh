@@ -266,6 +266,60 @@ TEST(StageAddressPatternTest,
   }
 }
 
+TEST(StageAddressPatternTest, LoopPreservesIndirectAndPartialMemoryWork) {
+  for (bool partial : {false, true}) {
+    for (bool store : {false, true}) {
+      IRTestContext context(true);
+      const SmallVector<int64_t> shape =
+          partial ? SmallVector<int64_t>{8, 8} : SmallVector<int64_t>{64};
+      const SmallVector<IndexKind> kinds =
+          partial ? SmallVector<IndexKind>{IndexKind::Loaded, IndexKind::Range}
+                  : SmallVector<IndexKind>{IndexKind::Loaded};
+      auto module = addressModule(context, shape, kinds, 1, store);
+      auto function = *module->getOps<func::FuncOp>().begin();
+      auto &body = function.getBody().front();
+      SmallVector<Operation *> operations;
+      for (auto &op : body.without_terminator())
+        operations.push_back(&op);
+      OpBuilder builder(&body, body.begin());
+      auto loc = builder.getUnknownLoc();
+      auto zero = builder.create<arith::ConstantIndexOp>(loc, 0);
+      auto three = builder.create<arith::ConstantIndexOp>(loc, 3);
+      auto one = builder.create<arith::ConstantIndexOp>(loc, 1);
+      auto loop = builder.create<scf::ForOp>(loc, zero, three, one);
+      for (auto *op : operations)
+        op->moveBefore(loop.getBody()->getTerminator());
+      auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                    StagePartitionerOptions{});
+      ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+      auto total = [&](double StageWorkload::*field) {
+        double value = 0;
+        for (const auto &stage : partition->stages)
+          value += stage.iterationCount * (stage.workload.*field);
+        return value;
+      };
+      EXPECT_DOUBLE_EQ(total(store ? &StageWorkload::indirectStoreBytes
+                                   : &StageWorkload::indirectLoadBytes),
+                       partial ? 0 : 3 * 64 * 4);
+      // Full-indirect fallback counts ceil(64 / 32) warp transactions per trip.
+      EXPECT_DOUBLE_EQ(total(store ? &StageWorkload::indirectStoreTransactions
+                                   : &StageWorkload::indirectLoadTransactions),
+                       partial ? 0 : 3 * 2);
+      EXPECT_DOUBLE_EQ(total(store ? &StageWorkload::partialContinuousStoreRows
+                                   : &StageWorkload::partialContinuousLoadRows),
+                       partial ? 3 * 8 : 0);
+      EXPECT_DOUBLE_EQ(total(store
+                                 ? &StageWorkload::partialContinuousStoreBytes
+                                 : &StageWorkload::partialContinuousLoadBytes),
+                       partial ? 3 * 64 * 4 : 0);
+      EXPECT_DOUBLE_EQ(
+          total(store ? &StageWorkload::partialContinuousStoreWarpInstructions
+                      : &StageWorkload::partialContinuousLoadWarpInstructions),
+          partial ? 3 * 8 : 0);
+    }
+  }
+}
+
 TEST(StageAddressPatternTest, LoadedScalarIndexRemainsUniform) {
   for (bool store : {false, true}) {
     IRTestContext context(true);

@@ -29,8 +29,6 @@ def test_get_logger():
 
 
 def test_get_ascend_arch_from_env(monkeypatch):
-    # Restore the caller's target after this test so later kernels compile for
-    # the actual device rather than inheriting this environment override.
     monkeypatch.setenv("TRITON_ASCEND_ARCH", "Ascend910_9599")
     result = utils.get_ascend_arch_from_env()
     assert result == "Ascend910_9599"
