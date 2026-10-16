@@ -636,7 +636,8 @@ StageMemoryCost IndirectGatherMemoryCostModel::cost(
     auto result = cost(stage, legacy, implementation);
     if (load) {
       result.loadPricing = "random_dtype_six_term_20261008";
-      if (auto fitted = factorIncrement(stage, profile, implementation, false)) {
+      if (auto fitted =
+              factorIncrement(stage, profile, implementation, false)) {
         result.load = fitted;
         result.loadPricing = factorModel;
       }
@@ -648,8 +649,10 @@ StageMemoryCost IndirectGatherMemoryCostModel::cost(
         result.storePricing = factorModel;
       }
     }
-    if (!result.load) result.loadPricing = nullptr;
-    if (!result.store) result.storePricing = nullptr;
+    if (!result.load)
+      result.loadPricing = nullptr;
+    if (!result.store)
+      result.storePricing = nullptr;
     return result;
   }
   return {calibratedIndirectLoad(stage, profile, implementation),
