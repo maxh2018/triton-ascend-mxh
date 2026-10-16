@@ -15,7 +15,8 @@ TEST(IndirectStoreCostModelTest, FactorCandidateIsFirstWriteGroupCost) {
   EXPECT_TRUE(profile.isValid());
   OperationState indexState(test.op->getLoc(), "tt.load");
   indexState.addOperands(test.op->getOperand(0));
-  indexState.addTypes(RankedTensorType::get({128}, IntegerType::get(&context, 32)));
+  indexState.addTypes(
+      RankedTensorType::get({128}, IntegerType::get(&context, 32)));
   auto *index = Operation::create(indexState);
   test.block.push_front(index);
   test.op->setOperand(0, index->getResult(0));

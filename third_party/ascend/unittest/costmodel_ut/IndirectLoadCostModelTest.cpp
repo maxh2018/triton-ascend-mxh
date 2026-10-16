@@ -6,7 +6,8 @@ using namespace mlir;
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
-TEST(IndirectLoadCostModelTest, FactorCandidateUsesGroupUnitsAndRequiresIndexEvidence) {
+TEST(IndirectLoadCostModelTest,
+     FactorCandidateUsesGroupUnitsAndRequiresIndexEvidence) {
   IRTestContext context(false, true);
   MemoryCase test(context, Float32Type::get(&context), {128});
   auto profile = calibrationProfile();
@@ -17,7 +18,8 @@ TEST(IndirectLoadCostModelTest, FactorCandidateUsesGroupUnitsAndRequiresIndexEvi
   EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4}).load);
   OperationState indexState(test.op->getLoc(), "tt.load");
   indexState.addOperands(test.op->getOperand(0));
-  indexState.addTypes(RankedTensorType::get({128}, IntegerType::get(&context, 32)));
+  indexState.addTypes(
+      RankedTensorType::get({128}, IntegerType::get(&context, 32)));
   auto *index = Operation::create(indexState);
   test.block.push_front(index);
   test.op->setOperand(0, index->getResult(0));
@@ -41,12 +43,16 @@ TEST(IndirectLoadCostModelTest, FactorCandidateUsesGroupUnitsAndRequiresIndexEvi
     ASSERT_TRUE(fit.load);
     EXPECT_NEAR(cost.resources.load, *fit.load, 1e-10);
     EXPECT_NEAR(cost.totalCycles,
-                cost.resources.setup + *fit.load * cost.implementation.superblockFactor,
+                cost.resources.setup +
+                    *fit.load * cost.implementation.superblockFactor,
                 1e-8);
   }
-  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4, true}).load);
-  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4, false, 2}).load);
-  test.stage.workload.addressPatterns.front().axes.front().offsetAxisInfo = "structured";
+  EXPECT_FALSE(
+      model.cost(test.stage, profile, {StageMode::SIMT, 4, true}).load);
+  EXPECT_FALSE(
+      model.cost(test.stage, profile, {StageMode::SIMT, 4, false, 2}).load);
+  test.stage.workload.addressPatterns.front().axes.front().offsetAxisInfo =
+      "structured";
   EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4}).load);
 }
 
