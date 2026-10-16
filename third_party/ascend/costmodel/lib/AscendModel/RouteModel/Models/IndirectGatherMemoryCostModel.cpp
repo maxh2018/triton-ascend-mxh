@@ -8,6 +8,103 @@ using namespace mlir;
 using namespace mlir::ascend;
 
 namespace {
+constexpr const char *factorModel = "unmasked_factor_candidate_20261017";
+
+// Experimental one-AIV F-program increments. Known W16/small-E outliers
+// are retained intentionally. Rank, type and geometry coverage are not relaxed.
+// Load includes address/layout changes versus an index-passthrough baseline;
+// store uses fresh unfilled targets and a shared address/value-sink baseline.
+static std::optional<double> factorIncrement(
+    const LogicalStage &stage, const HardwareProfile &hardware,
+    const StageImplementation &implementation, bool store) {
+  const auto &work = stage.workload;
+  const auto &p = work.addressPatterns.front();
+  const int64_t w = hardware.baseSimtWarpCount;
+  const int64_t f = implementation.superblockFactor;
+  if (hardware.target != "Ascend950PR/dav-c310" ||
+      implementation.mode != StageMode::SIMT || implementation.localScope ||
+      stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
+      (f != 1 && f != 2 && f != 4) || (w != 1 && w != 4 && w != 16) ||
+      p.axes.size() != 1 || !p.dependsOnLoadedValue ||
+      p.stageId != stage.id || p.memoryOp != (store ? "tt.store" : "tt.load") ||
+      !work.predicateCounts.empty() || stage.features.activeLaneRatio != 1 ||
+      stage.features.hasAtomicMemory || work.privateStackLoadInstructions ||
+      work.privateStackStoreInstructions ||
+      (store ? work.indirectLoadBytes != 0 : work.indirectStoreBytes != 0))
+    return std::nullopt;
+  llvm::SmallPtrSet<Operation *, 4> targets;
+  for (Operation *owned : stage.operations)
+    owned->walk([&](Operation *op) {
+      if (op->getName().getStringRef() == (store ? "tt.store" : "tt.load"))
+        targets.insert(op);
+    });
+  if (targets.size() != 1)
+    return std::nullopt;
+  Operation *op = *targets.begin();
+  if (op->getNumOperands() != (store ? 2u : 1u) ||
+      (!store && op->getNumResults() != 1))
+    return std::nullopt;
+  llvm::SmallVector<Value> pending{op->getOperand(0)};
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  bool loadedIndex = false;
+  while (!pending.empty()) {
+    Operation *producer = pending.pop_back_val().getDefiningOp();
+    if (!producer || !visited.insert(producer).second)
+      continue;
+    if (producer->getName().getStringRef() == "tt.load") {
+      if (producer->getNumResults() != 1)
+        return std::nullopt;
+      auto indexType = dyn_cast<RankedTensorType>(producer->getResult(0).getType());
+      if (!indexType || !indexType.getElementType().isInteger(32))
+        return std::nullopt;
+      loadedIndex = true;
+      continue;
+    }
+    pending.append(producer->operand_begin(), producer->operand_end());
+  }
+  if (!loadedIndex)
+    return std::nullopt;
+  auto type = dyn_cast<RankedTensorType>(
+      store ? op->getOperand(1).getType() : op->getResult(0).getType());
+  if (!type || !type.hasStaticShape() || type.getRank() != 1)
+    return std::nullopt;
+  const auto element = type.getElementType();
+  const int group = element.isInteger(8) ? 0 : element.isInteger(16) ? 1
+                    : element.isF32() ? 2 : element.isInteger(64) ? 3 : -1;
+  const int64_t e = type.getNumElements();
+  if (group < 0 || p.axes.front().extent != e ||
+      (store ? work.indirectStoreBytes : work.indirectLoadBytes) !=
+          e * element.getIntOrFloatBitWidth() / 8 ||
+      (e != 8 && e != 16 && e != 32 && e != 64 && e != 128 &&
+       e != 256 && e != 512) ||
+      (e == 16 && w != 16) || (e == 32 && w == 4) ||
+      (e == 128 && w == 1) ||
+      ((e == 64 || e == 256 || e == 512) && w == 16))
+    return std::nullopt;
+  static constexpr double load[4][11] = {
+      {114.06223568631589,2.19786636783679,-1.3764893947282235,-.2650569381840509,4.5195261359854095,-2.947018852455173,1.9148720707208333,-79.53265002228892,169.77441385415742},
+      {128.77054635393904,1.3649882385214698,-.18912283986571862,-.49858876697185,4.675581837359436,.8772283214588263,-.7275675429844192,-115.81232279422217,95.8950323552327},
+      {120.07090406650597,1.5500745996624559,-.43870878244183104,-.18808420588616206,4.537873383737035,1.640631714734442,.15541731034924547,-106.38488394854417,91.2560441788196},
+      {116.94785273549063,1.9765804199364312,-.28377577279558625,-.24761005509333786,4.415935669816099,.8325433060321422,.08183562516063783,-119.76469633579902,110.4385779080016}};
+  static constexpr double stores[4][11] = {
+      {116.62634372635547,6.111117617348127,-.8143304842483025,-.43846744058688536,-1.5395704974200097,-4.53793989093101,-3.2228424603743955},
+      {124.19945311030615,5.904956752148043,-.6508286986542869,-.06135585492914368,-1.669597000307736,-10.024709617521689,-3.1503815285785413,-86.90874840747217,55.935253213898434,6.888336827997633,.001302804707999514},
+      {119.45683288107666,2.5359135035732305,-.5797639385984518,-1.1189187029747005,.2571346944963013,-6.812191310593307,-2.300401406184211},
+      {135.61356141589593,1.8676621751827858,.6123327974117674,-1.0686789769499396,.2490036303670708,-1.9460217818211718,-.9072101216953034}};
+  const double h = std::max<double>(e - 32 * w, 0), l = std::log2(w);
+  const double j = w * f >= 64 ? 1 : 0;
+  const double features[] = {
+      1., double(e), std::max<double>(e - 32, 0), h, h / w, l,
+      double(f - 1), j, j * std::min(e / 32., 1.), l * (f - 1), h * (f - 1) / w};
+  const double *coefficients = store ? stores[group] : load[group];
+  double value = 0;
+  for (unsigned i = 0; i < 11; ++i)
+    value += coefficients[i] * features[i];
+  // mapWorkload resources are per logical program. applySuperBlock multiplies
+  // these exactly once by F; the fitted label already covers the complete group.
+  return std::max(0.0, value) / f;
+}
+
 // Effective incremental latency of one indirect load (payload - matched ALU),
 // not a whole-Stage cost. The random-address prior is intentional: no runtime
 // indices or final ISA facts are inputs. Unsupported domains use legacy rates.
@@ -497,6 +594,35 @@ StageMemoryCost IndirectGatherMemoryCostModel::cost(
         return axis.offsetAxisInfo == "unstructured";
       }))
     return {};
+  if (implementation.mode == StageMode::SIMT &&
+      (profile.simtIndirectLoadModel == factorModel ||
+       profile.simtIndirectStoreModel == factorModel)) {
+    HardwareProfile legacy = profile;
+    const bool load = profile.simtIndirectLoadModel == factorModel;
+    const bool store = profile.simtIndirectStoreModel == factorModel;
+    if (load)
+      legacy.simtIndirectLoadModel = "random_dtype_six_term_20261008";
+    if (store)
+      legacy.simtIndirectStoreModel = "random_store_no_fill_first_20261008";
+    auto result = cost(stage, legacy, implementation);
+    if (load) {
+      result.loadPricing = "random_dtype_six_term_20261008";
+      if (auto fitted = factorIncrement(stage, profile, implementation, false)) {
+        result.load = fitted;
+        result.loadPricing = factorModel;
+      }
+    }
+    if (store) {
+      result.storePricing = "random_store_no_fill_first_20261008";
+      if (auto fitted = factorIncrement(stage, profile, implementation, true)) {
+        result.store = fitted;
+        result.storePricing = factorModel;
+      }
+    }
+    if (!result.load) result.loadPricing = nullptr;
+    if (!result.store) result.storePricing = nullptr;
+    return result;
+  }
   return {calibratedIndirectLoad(stage, profile, implementation),
           calibratedIndirectStore(stage, profile, implementation)};
 }

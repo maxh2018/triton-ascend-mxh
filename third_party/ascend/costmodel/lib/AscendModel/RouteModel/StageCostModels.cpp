@@ -3407,7 +3407,8 @@ bool HardwareProfile::isValid() const {
          !profileVersion.empty() && !target.empty() &&
          (simtIndirectLoadModel.empty() ||
           ((simtIndirectLoadModel == "random_i32_six_term_20261007" ||
-            simtIndirectLoadModel == "random_dtype_six_term_20261008") &&
+            simtIndirectLoadModel == "random_dtype_six_term_20261008" ||
+            simtIndirectLoadModel == "unmasked_factor_candidate_20261017") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectLoadModel.empty() ||
           ((simdIndirectLoadModel == "random_f32_matched_ab_20261007" ||
@@ -3416,6 +3417,7 @@ bool HardwareProfile::isValid() const {
          (simtIndirectStoreModel.empty() ||
           ((simtIndirectStoreModel == "random_f32_store_fill_ab_20261007" ||
             simtIndirectStoreModel == "random_store_no_fill_first_20261008" ||
+            simtIndirectStoreModel == "unmasked_factor_candidate_20261017" ||
             simtIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectStoreModel.empty() ||
@@ -3634,6 +3636,10 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
         cost.indirectStorePricing = implementation.mode == StageMode::SIMD
                                         ? profile.simdIndirectStoreModel
                                         : profile.simtIndirectStoreModel;
+      if (fitted.loadPricing)
+        cost.indirectLoadPricing = fitted.loadPricing;
+      if (fitted.storePricing)
+        cost.indirectStorePricing = fitted.storePricing;
       if (implementation.aivSubblocks > 1)
         cost.perAivWorkload = executionStage.workload;
       if (resources->recurrenceGroupCriticalPath > 0.0 ||

@@ -4317,10 +4317,11 @@
     "simt_indirect_store_model": {
       "enum": [
         "random_f32_store_fill_ab_20261007",
+        "unmasked_factor_candidate_20261017",
         "random_store_no_fill_first_20261008",
         "random_store_no_fill_reuse_20261008"
       ],
-      "description": "Optional Ascend950PR random SIMT store A/B increment in SYS_CNT cycles. The 20261008 models use no target fill, grouped storage widths and ranks 1-8; reuse requires explicit workload evidence. The 20261007 F32 target-fill model remains reproducible. Unsupported workloads use the generic resource model."
+      "description": "Optional Ascend950PR SIMT store increment in SYS_CNT cycles. The experimental 20261017 candidate covers measured rank1 INT32-loaded addresses, representative payloads, W=1/4/16 and F=1/2/4, with unresolved outliers and first-write state only. Its full-group fit is divided by F before existing superblock accounting. Unsupported candidate inputs retain the 20261008 first-write F1 fit or upstream resource curves. The 20261008 reuse model requires explicit evidence; the 20261007 F32 target-fill model remains reproducible."
     },
     "simd_indirect_store_model": {
       "enum": [
@@ -4334,9 +4335,10 @@
     "simt_indirect_load_model": {
       "enum": [
         "random_i32_six_term_20261007",
+        "unmasked_factor_candidate_20261017",
         "random_dtype_six_term_20261008"
       ],
-      "description": "Optional Ascend950PR/dav-c310 random-address matched-ALU SIMT load fit in SYS_CNT cycles. The 20261008 model shares coefficients by 1/2/4/8-byte storage width, ranks 1-5, W=1-64, q=1/2/4, H<=2, and admits address helpers alongside one target load. The 20261007 INT32 model is explicit historical compatibility only. Unsupported workloads use the generic resource model; does not change SIMD."
+      "description": "Optional Ascend950PR/dav-c310 SIMT load fit in SYS_CNT cycles. The experimental 20261017 candidate measures a complete one-AIV F-program group against an index-passthrough baseline, including address/layout differences; it is not isolated LDG latency. Rank1 INT32-loaded addresses, representative payloads and measured W=1/4/16,F=1/2/4 geometries only; small-E/W16/F4 outliers remain. The group fit is divided by F before existing superblock accounting. Other inputs retain the 20261008 width-based F1 fit or upstream resource curves. SIMD is unchanged."
     },
     "simd_indirect_load_model": {
       "enum": [

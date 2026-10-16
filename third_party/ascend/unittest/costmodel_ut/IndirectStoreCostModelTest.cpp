@@ -6,6 +6,34 @@ using namespace mlir;
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
+TEST(IndirectStoreCostModelTest, FactorCandidateIsFirstWriteGroupCost) {
+  IRTestContext context(false, true);
+  MemoryCase test(context, Float32Type::get(&context), {128}, true);
+  auto profile = calibrationProfile();
+  profile.baseSimtWarpCount = 4;
+  profile.simtIndirectStoreModel = "unmasked_factor_candidate_20261017";
+  EXPECT_TRUE(profile.isValid());
+  OperationState indexState(test.op->getLoc(), "tt.load");
+  indexState.addOperands(test.op->getOperand(0));
+  indexState.addTypes(RankedTensorType::get({128}, IntegerType::get(&context, 32)));
+  auto *index = Operation::create(indexState);
+  test.block.push_front(index);
+  test.op->setOperand(0, index->getResult(0));
+  const IndirectGatherMemoryCostModel model;
+  for (int64_t factor : {1, 2, 4}) {
+    auto result = model.cost(test.stage, profile, {StageMode::SIMT, factor});
+    ASSERT_TRUE(result.store);
+    const double group = 119.45683288107666 + 2.5359135035732305 * 128 -
+                         .5797639385984518 * 96 - 6.812191310593307 * 2 -
+                         2.300401406184211 * (factor - 1);
+    EXPECT_NEAR(*result.store * factor, group, 1e-10);
+    EXPECT_STREQ(result.storePricing, "unmasked_factor_candidate_20261017");
+  }
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 8}).store);
+  test.stage.workload.indirectStoreBytes = 1;
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4}).store);
+}
+
 TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
   IRTestContext context(false, true);
   MemoryCase memory(context, Float32Type::get(&context), {32}, true);

@@ -12,6 +12,8 @@ namespace mlir::ascend {
 struct StageMemoryCost {
   std::optional<double> load;
   std::optional<double> store;
+  const char *loadPricing = nullptr;
+  const char *storePricing = nullptr;
 };
 
 /// Extension point for newly calibrated Stage resources. Existing workload,

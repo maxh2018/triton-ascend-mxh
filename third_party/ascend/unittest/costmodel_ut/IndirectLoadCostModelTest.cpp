@@ -6,6 +6,50 @@ using namespace mlir;
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
+TEST(IndirectLoadCostModelTest, FactorCandidateUsesGroupUnitsAndRequiresIndexEvidence) {
+  IRTestContext context(false, true);
+  MemoryCase test(context, Float32Type::get(&context), {128});
+  auto profile = calibrationProfile();
+  profile.baseSimtWarpCount = 4;
+  profile.simtIndirectLoadModel = "unmasked_factor_candidate_20261017";
+  EXPECT_TRUE(profile.isValid());
+  const IndirectGatherMemoryCostModel model;
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4}).load);
+  OperationState indexState(test.op->getLoc(), "tt.load");
+  indexState.addOperands(test.op->getOperand(0));
+  indexState.addTypes(RankedTensorType::get({128}, IntegerType::get(&context, 32)));
+  auto *index = Operation::create(indexState);
+  test.block.push_front(index);
+  test.op->setOperand(0, index->getResult(0));
+  for (int64_t factor : {1, 2, 4}) {
+    auto result = model.cost(test.stage, profile, {StageMode::SIMT, factor});
+    ASSERT_TRUE(result.load);
+    double group = 120.07090406650597 + 1.5500745996624559 * 128 -
+                   .43870878244183104 * 96 + 1.640631714734442 * 2 +
+                   .15541731034924547 * (factor - 1);
+    EXPECT_NEAR(*result.load * factor, group, 1e-10);
+    EXPECT_STREQ(result.loadPricing, "unmasked_factor_candidate_20261017");
+  }
+  test.stage.iterationCount = 1;
+  test.stage.legalSimtFactors = {1, 2, 4};
+  test.stage.workload.operationCounts.clear();
+  test.stage.workload.issueElements = 0;
+  for (const auto &cost : indirectCosts(test.stage, profile)) {
+    if (cost.implementation.mode != StageMode::SIMT)
+      continue;
+    const auto fit = model.cost(test.stage, profile, cost.implementation);
+    ASSERT_TRUE(fit.load);
+    EXPECT_NEAR(cost.resources.load, *fit.load, 1e-10);
+    EXPECT_NEAR(cost.totalCycles,
+                cost.resources.setup + *fit.load * cost.implementation.superblockFactor,
+                1e-8);
+  }
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4, true}).load);
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4, false, 2}).load);
+  test.stage.workload.addressPatterns.front().axes.front().offsetAxisInfo = "structured";
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4}).load);
+}
+
 TEST(IndirectLoadCostModelTest, FitReplacesUpstreamCurveAndRejectsCvPartition) {
   IRTestContext context(false, true);
   MemoryCase test(context, Float32Type::get(&context), {128});

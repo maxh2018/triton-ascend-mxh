@@ -2125,7 +2125,8 @@ loadCandidateProfileUncached(llvm::StringRef pathRef,
     hardware.simtIndirectLoadModel =
         reader.string(*root, "simt_indirect_load_model", "profile");
     if (hardware.simtIndirectLoadModel != "random_i32_six_term_20261007" &&
-        hardware.simtIndirectLoadModel != "random_dtype_six_term_20261008")
+        hardware.simtIndirectLoadModel != "random_dtype_six_term_20261008" &&
+        hardware.simtIndirectLoadModel != "unmasked_factor_candidate_20261017")
       reader.setError("unsupported simt_indirect_load_model");
   }
   if (root->get("simd_indirect_load_model")) {
@@ -2143,7 +2144,8 @@ loadCandidateProfileUncached(llvm::StringRef pathRef,
         hardware.simtIndirectStoreModel !=
             "random_store_no_fill_first_20261008" &&
         hardware.simtIndirectStoreModel !=
-            "random_store_no_fill_reuse_20261008")
+            "random_store_no_fill_reuse_20261008" &&
+        hardware.simtIndirectStoreModel != "unmasked_factor_candidate_20261017")
       reader.setError("unsupported simt_indirect_store_model");
   }
   if (root->get("simd_indirect_store_model")) {
