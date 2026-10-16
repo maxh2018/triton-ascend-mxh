@@ -5,6 +5,7 @@
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "llvm/Support/FormatVariadic.h"
 
 using namespace mlir;
@@ -118,7 +119,7 @@ static const LogicalStage *payloadStage(const StagePartition &partition,
 }
 } // namespace
 
-TEST(StageAddressPatternTest, PartialContinuousStageAlwaysUsesSerialCost) {
+TEST(StageAddressPatternTest, PartialContinuousStageUsesUpstreamAggregation) {
   LogicalStage stage =
       logicalStage("partial", StageCostModelKind::PartialContinuousTileMemory,
                    StageScheduleKind::IndependentPipelined);
@@ -142,7 +143,10 @@ TEST(StageAddressPatternTest, PartialContinuousStageAlwaysUsesSerialCost) {
        table->stages.front().implementations) {
     const auto &resource = implementation.resources;
     EXPECT_DOUBLE_EQ(implementation.totalCycles,
-                     resource.setup + resource.load + resource.store);
+                     resource.setup +
+                         (implementation.implementation.mode == StageMode::SIMD
+                              ? std::max(resource.load, resource.store)
+                              : resource.load + resource.store));
   }
 }
 
@@ -174,7 +178,7 @@ TEST(StageAddressPatternTest, PartialContinuousRowsUseDirectMemoryPerRow) {
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadRows, 8);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadBytes, 8 * columns * 4);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadWarpInstructions,
-                     8 * std::ceil(columns / 32.0));
+                     std::ceil(8 * columns / 32.0));
     EXPECT_DOUBLE_EQ(work.indirectLoadTransactions, 0);
     auto table = evaluateOneStage(*payload);
     ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
@@ -201,7 +205,7 @@ TEST(StageAddressPatternTest, PartialStructuredStoreAndNonunitStride) {
                      8);
     if (store)
       EXPECT_DOUBLE_EQ(payload->workload.partialContinuousStoreWarpInstructions,
-                       8);
+                       2);
     EXPECT_DOUBLE_EQ(store ? payload->workload.indirectStoreTransactions
                            : payload->workload.indirectLoadTransactions,
                      0);
@@ -253,13 +257,12 @@ TEST(StageAddressPatternTest,
     const bool partial = axes.first && axes.second;
     const auto &work = payload->workload;
     EXPECT_EQ(payload->costModelKind,
-              partial ? StageCostModelKind::PartialContinuousTileMemory
-                      : StageCostModelKind::IndirectGatherMemory);
-    EXPECT_EQ(payload->features.hasPartialContinuousMemory, partial);
+              StageCostModelKind::PartialContinuousTileMemory);
+    EXPECT_TRUE(payload->features.hasPartialContinuousMemory);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadRows, partial ? 8 : 0);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadBytes, partial ? 256 : 0);
     EXPECT_DOUBLE_EQ(work.partialContinuousLoadWarpInstructions,
-                     partial ? 8 : 0);
+                     partial ? 2 : 0);
     EXPECT_DOUBLE_EQ(work.indirectLoadBytes, partial ? 0 : 256);
     if (partial)
       EXPECT_DOUBLE_EQ(work.indirectLoadTransactions, 0);
@@ -315,7 +318,7 @@ TEST(StageAddressPatternTest, LoopPreservesIndirectAndPartialMemoryWork) {
       EXPECT_DOUBLE_EQ(
           total(store ? &StageWorkload::partialContinuousStoreWarpInstructions
                       : &StageWorkload::partialContinuousLoadWarpInstructions),
-          partial ? 3 * 8 : 0);
+          partial ? 3 * 2 : 0);
     }
   }
 }
@@ -442,6 +445,175 @@ TEST(StageAddressPatternTest, UnstructuredLoadStoreAnchorsMaterializeScopes) {
         EXPECT_EQ(anchor.operation->getParentOp()->getName().getStringRef(),
                   "scope.scope");
         EXPECT_TRUE(succeeded(verify(*module)));
+      }
+}
+
+TEST(StageAddressPatternTest, AllDContractExcludesEveryMixedAxisPosition) {
+  for (bool store : {false, true})
+    for (auto left : {IndexKind::Range, IndexKind::Loaded, IndexKind::Computed})
+      for (auto right : {IndexKind::Range, IndexKind::Loaded, IndexKind::Computed}) {
+        IRTestContext context(true);
+        auto module = addressModule(context, {4, 8}, {left, right}, 1, store);
+        auto partition = StagePartitioner().partition(
+            *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+        ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+        auto *payload = payloadStage(*partition, {4, 8}, store);
+        ASSERT_NE(payload, nullptr);
+        const bool allD = left != IndexKind::Range && right != IndexKind::Range;
+        const bool mixed =
+            (left == IndexKind::Range) != (right == IndexKind::Range);
+        EXPECT_EQ(payload->costModelKind ==
+                      StageCostModelKind::IndirectGatherMemory,
+                  allD);
+        EXPECT_EQ(payload->features.hasIndirectMemory, allD || mixed);
+        EXPECT_EQ(payload->costModelKind ==
+                      StageCostModelKind::PartialContinuousTileMemory,
+                  mixed);
+      }
+}
+
+TEST(StageAddressPatternTest, MixedNonRowFallbackKeepsIrregularPricing) {
+  for (bool store : {false, true}) {
+    IRTestContext context(true);
+    auto module = addressModule(
+        context, {4, 8}, {IndexKind::Range, IndexKind::Loaded}, 1, store);
+    auto partition = StagePartitioner().partition(
+        *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+    ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+    auto *payload = payloadStage(*partition, {4, 8}, store);
+    ASSERT_NE(payload, nullptr);
+    ASSERT_EQ(payload->costModelKind,
+              StageCostModelKind::PartialContinuousTileMemory);
+    EXPECT_DOUBLE_EQ(payload->workload.partialContinuousLoadRows, 0);
+    EXPECT_DOUBLE_EQ(payload->workload.partialContinuousStoreRows, 0);
+    auto profile = hardwareProfile();
+    profile.simd.loadOperationSetupCycles = 10.0;
+    profile.simd.storeOperationSetupCycles = 10.0;
+    auto costs = evaluateOneStage(*payload, profile);
+    ASSERT_TRUE(bool(costs)) << llvm::toString(costs.takeError());
+    const auto &resources =
+        costs->stages.front().implementations.front().resources;
+    // A byte-only fallback would cost 4 load / 8 store cycles here.
+    EXPECT_TRUE(resources.indirectMemoryAnalyticalFallback);
+    EXPECT_GE(store ? resources.store : resources.load, 14.0);
+  }
+}
+
+TEST(StageAddressPatternTest, MixedAxesUseUpstreamCurvesInBothModes) {
+  for (bool store : {false, true})
+    for (bool tailStructured : {false, true}) {
+      IRTestContext context(true);
+      auto module = addressModule(
+          context, {4, 8},
+          tailStructured
+              ? ArrayRef<IndexKind>({IndexKind::Loaded, IndexKind::Range})
+              : ArrayRef<IndexKind>({IndexKind::Range, IndexKind::Loaded}),
+          1, store);
+      auto partition = StagePartitioner().partition(
+          *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+      ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+      auto *payload = payloadStage(*partition, {4, 8}, store);
+      ASSERT_NE(payload, nullptr);
+      ASSERT_EQ(payload->costModelKind,
+                StageCostModelKind::PartialContinuousTileMemory);
+      auto profile = hardwareProfile();
+      for (auto *mode : {&profile.simd, &profile.simt}) {
+        mode->indirectLoadSystemCyclesByElements = {{32, 777.0}};
+        mode->indirectLoadStartupSystemCyclesByWarpInstructions = {{1, 1.0}};
+        mode->segmentedIndirectLoadFp32GroupCyclesByFactorSegmentsAndContiguousElements
+            [1][4][8] = 777.0;
+        mode->indirectStoreSystemCyclesBySegments = {{4, 777.0}, {32, 777.0}};
+      }
+      auto costs = evaluateOneStage(*payload, profile);
+      ASSERT_TRUE(bool(costs)) << llvm::toString(costs.takeError());
+      for (const auto &cost : costs->stages.front().implementations) {
+        EXPECT_DOUBLE_EQ(store ? cost.resources.store
+                               : cost.resources.indirectLoadGroup,
+                         777.0);
+        EXPECT_FALSE(cost.resources.indirectMemoryAnalyticalFallback);
+      }
+    }
+}
+
+TEST(StageAddressPatternTest, ScheduledUniformBranchRemainsStructured) {
+  IRTestContext context(true);
+  auto module = context.parse(R"mlir(
+    module {
+      tt.func @scheduled(%base: !tt.ptr<f32>) {
+        %pid = tt.get_program_id x : i32
+        %n = tt.get_num_programs x : i32
+        %zero = arith.constant 0 : i32
+        %one = arith.constant 1 : i32
+        %range = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+        %two = arith.constant dense<2> : tensor<32xi32>
+        %bp = tt.splat %base : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+        scf.for %iv = %pid to %n step %one : i32 {
+          %logical = arith.remui %iv, %n : i32
+          %condition = arith.cmpi eq, %logical, %zero : i32
+          %selected = scf.if %condition -> tensor<32xi32> {
+            scf.yield %range : tensor<32xi32>
+          } else {
+            %scaled = arith.muli %range, %two : tensor<32xi32>
+            scf.yield %scaled : tensor<32xi32>
+          }
+          %ptr = tt.addptr %bp, %selected : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+          %value = tt.load %ptr : tensor<32x!tt.ptr<f32>>
+        } {ta.auto_blockify_v1.loop}
+        tt.return
+      }
+    })mlir");
+  ASSERT_TRUE(module);
+  EXPECT_TRUE(collectUnstructuredMemoryOps(*module).empty());
+  auto partition = StagePartitioner().partition(
+      *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+  ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+  auto *payload = payloadStage(*partition, {32});
+  ASSERT_NE(payload, nullptr);
+  EXPECT_FALSE(payload->features.hasIndirectMemory);
+  EXPECT_EQ(payload->costModelKind, StageCostModelKind::ContinuousTileMemory);
+}
+
+TEST(StageAddressPatternTest, ClampedStrideProofRejectsPartialClampingAndMisalignment) {
+  for (int high : {62, 63, 65})
+    for (int tile : {16, 32})
+      for (int outer : {32, 64}) {
+        IRTestContext context(true);
+        context.getOrLoadDialect<math::MathDialect>();
+        auto module = context.parse(llvm::formatv(R"mlir(
+          module {{
+            tt.func @clamped(%base: !tt.ptr<f32>, %block: i32, %row: i32) {{
+              %tile = arith.constant {0} : i32
+              %align = arith.constant {1} : i32
+              %start = arith.muli %block, %tile : i32
+              %rowbase = arith.muli %row, %align : i32
+              %s = tt.splat %start : i32 -> tensor<32xi32>
+              %r = tt.make_range {{start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+              %x = arith.addi %s, %r : tensor<32xi32>
+              %f = arith.sitofp %x : tensor<32xi32> to tensor<32xf32>
+              %two = arith.constant dense<2.0> : tensor<32xf32>
+              %scaled = arith.mulf %f, %two : tensor<32xf32>
+              %floor = math.floor %scaled : tensor<32xf32>
+              %low = arith.constant dense<0.0> : tensor<32xf32>
+              %high = arith.constant dense<{2}.0> : tensor<32xf32>
+              %clamped = tt.clampf %floor, %low, %high, propagateNan = none : tensor<32xf32>
+              %i = arith.fptosi %clamped : tensor<32xf32> to tensor<32xi32>
+              %o = tt.splat %rowbase : i32 -> tensor<32xi32>
+              %offset = arith.addi %o, %i : tensor<32xi32>
+              %bp = tt.splat %base : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>>
+              %p = tt.addptr %bp, %offset : tensor<32x!tt.ptr<f32>>, tensor<32xi32>
+              %v = tt.load %p : tensor<32x!tt.ptr<f32>>
+              tt.return
+            }
+          })mlir", tile, outer, high).str());
+        ASSERT_TRUE(module);
+        auto partition = StagePartitioner().partition(
+            *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+        ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+        auto *payload = payloadStage(*partition, {32});
+        ASSERT_NE(payload, nullptr);
+        const bool proven = high < 64 && tile == 32 && outer == 64;
+        EXPECT_EQ(payload->features.hasIndirectMemory, !proven);
+        EXPECT_EQ(collectUnstructuredMemoryOps(*module).empty(), proven);
       }
 }
 

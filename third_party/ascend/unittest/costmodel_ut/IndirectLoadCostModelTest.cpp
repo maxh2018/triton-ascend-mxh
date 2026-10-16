@@ -36,6 +36,10 @@ TEST(IndirectLoadCostModelTest, FitReplacesUpstreamCurveAndRejectsCvPartition) {
       model.cost(test.stage, profile, {StageMode::SIMT, 1, true, 2});
   EXPECT_FALSE(partitioned.load);
   EXPECT_FALSE(partitioned.store);
+  for (StringRef axis : {"structured", "unknown", ""}) {
+    work.addressPatterns.front().axes.front().offsetAxisInfo = axis.str();
+    EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 1}).load);
+  }
 }
 
 TEST(IndirectLoadCostModelTest,
@@ -89,14 +93,20 @@ TEST(IndirectLoadCostModelTest, SimdMatchedIndirectNarrowRankTwoDomain) {
   outer.knownStride = 4096;
   inner.extent = 8;
   inner.regularity = "opaque_loaded";
+  inner.offsetAxisInfo = "unstructured";
   pattern.axes = {outer, inner};
   work.addressPatterns = {pattern};
   auto profile = calibrationProfile();
   profile.simdIndirectLoadModel = "random_f32_matched_ab_20261007";
   for (const char *category : {"fixed_stride", "opaque_loaded"}) {
     work.addressPatterns[0].axes[0].regularity = category;
+    work.addressPatterns[0].axes[0].offsetAxisInfo =
+        StringRef(category) == "fixed_stride" ? "structured" : "unstructured";
     auto result = indirectCosts(stage, profile);
-    EXPECT_DOUBLE_EQ(result[0].resources.load, 83.56748010753823 * 32);
+    if (StringRef(category) == "fixed_stride")
+      EXPECT_EQ(result[0].indirectLoadPricing, "generic_resource_model");
+    else
+      EXPECT_DOUBLE_EQ(result[0].resources.load, 83.56748010753823 * 32);
   }
   work.addressPatterns[0].axes[0].regularity = "computed_nonaffine";
   auto fallback = indirectCosts(stage, profile);

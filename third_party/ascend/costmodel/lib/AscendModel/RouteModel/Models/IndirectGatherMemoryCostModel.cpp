@@ -488,7 +488,14 @@ StageMemoryCost IndirectGatherMemoryCostModel::cost(
     const StageImplementation &implementation) const {
   // The calibration used one AIV and the original unsliced TTIR tensor.
   // CV partitioned implementations retain the generic resource model.
-  if (implementation.aivSubblocks != 1)
+  if (implementation.aivSubblocks != 1 ||
+      stage.workload.addressPatterns.size() != 1)
+    return {};
+  const auto &axes = stage.workload.addressPatterns.front().axes;
+  if (axes.empty() ||
+      !llvm::all_of(axes, [](const AddressAxisSummary &axis) {
+        return axis.offsetAxisInfo == "unstructured";
+      }))
     return {};
   return {calibratedIndirectLoad(stage, profile, implementation),
           calibratedIndirectStore(stage, profile, implementation)};

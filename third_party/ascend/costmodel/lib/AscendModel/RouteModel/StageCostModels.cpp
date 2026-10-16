@@ -1201,24 +1201,11 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
         count * depth * profile.prefixScanStepLatencyCycles;
   }
   // Unclassified scalar operations have no execution-throughput evidence.
-  if (stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory) {
-    // Retain #2489's row-wise fallback; these rows are not scalar gathers.
-    if (simd) {
-      resources.load +=
-          work.partialContinuousLoadRows * profile.loadOperationSetupCycles +
-          work.loadBytes / profile.loadBytesPerCycle;
-      resources.store +=
-          work.partialContinuousStoreRows * profile.storeOperationSetupCycles +
-          work.storeBytes / profile.storeBytesPerCycle;
-    } else {
-      resources.load +=
-          work.loadWarpInstructions / profile.loadWarpInstructionsPerCycle;
-      resources.store +=
-          work.storeWarpInstructions / profile.storeWarpInstructionsPerCycle;
-    }
-  } else if (stage.features.hasIndirectMemory || fitted.load || fitted.store ||
-             work.indirectLoadTransactions > 0.0 ||
-             work.indirectStoreTransactions > 0.0) {
+  // Mixed-axis classification does not replace #2528's resource pricing.
+  if (stage.features.hasIndirectMemory || fitted.load || fitted.store ||
+      stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory ||
+      work.indirectLoadTransactions > 0.0 ||
+      work.indirectStoreTransactions > 0.0) {
     const double loads = work.loadWarpInstructions;
     const double stores = work.storeWarpInstructions;
     double curvedLoadBytes = 0.0;
@@ -2382,6 +2369,7 @@ static double applySuperBlock(const LogicalStage &stage,
        stage.costModelKind == StageCostModelKind::ContinuousShortLoad ||
        stage.costModelKind == StageCostModelKind::CachePolicyStore ||
        stage.costModelKind == StageCostModelKind::IndirectScalarMemory ||
+       stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory ||
        stage.costModelKind == StageCostModelKind::IndirectGatherMemory) &&
       (resources.continuousLoadGroup > 0.0 ||
        resources.continuousStoreGroup > 0.0 ||
@@ -2418,10 +2406,6 @@ static double estimateStageBase(const LogicalStage &stage,
                                                                     : 1.0;
     return r.setup + dispatchCount * std::max(r.scalar, r.issue);
   }
-  case StageCostModelKind::PartialContinuousTileMemory:
-    // Slices expanded along unstructured axes are billed serially. Structured
-    // axes may have nonunit strides; they do not imply contiguous addresses.
-    return serial;
   case StageCostModelKind::ContinuousTileMemory:
   case StageCostModelKind::ContinuousTileStore:
   case StageCostModelKind::ContinuousShortLoad:

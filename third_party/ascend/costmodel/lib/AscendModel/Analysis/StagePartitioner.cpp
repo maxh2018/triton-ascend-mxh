@@ -300,13 +300,113 @@ constantProgression(Value value, unsigned depth = 0) {
   return std::make_pair(first, last);
 }
 
-static bool isProgramUniformScalar(Value value) {
-  if (!isa<IntegerType>(value.getType()))
+static bool isProgramUniformScalar(Value value, unsigned depth = 0) {
+  if (depth > 32 || !isa<IntegerType, FloatType, IndexType>(value.getType()))
     return false;
-  if (auto arg = dyn_cast<BlockArgument>(value))
-    return isa<triton::FuncOp>(arg.getOwner()->getParentOp());
-  return value.getDefiningOp<arith::ConstantOp>() ||
-         value.getDefiningOp<triton::GetProgramIdOp>();
+  if (auto arg = dyn_cast<BlockArgument>(value)) {
+    auto *parent = arg.getOwner()->getParentOp();
+    if (isa<triton::FuncOp>(parent))
+      return true;
+    auto loop = dyn_cast<scf::ForOp>(parent);
+    return loop && arg == loop.getInductionVar() &&
+           isProgramUniformScalar(loop.getLowerBound(), depth + 1) &&
+           isProgramUniformScalar(loop.getUpperBound(), depth + 1) &&
+           isProgramUniformScalar(loop.getStep(), depth + 1);
+  }
+  Operation *op = value.getDefiningOp();
+  if (!op)
+    return false;
+  if (isa<arith::ConstantOp, triton::GetProgramIdOp,
+          triton::GetNumProgramsOp>(op))
+    return true;
+  // Pure scalar arithmetic of program-uniform leaves stays uniform. Do not
+  // infer uniformity from scalar type alone: loaded conditions stay unknown.
+  return op->getName().getDialectNamespace() == "arith" &&
+         llvm::all_of(op->getOperands(), [&](Value operand) {
+           return isProgramUniformScalar(operand, depth + 1);
+         });
+}
+
+// Prove divisibility of an i32 scalar without assuming its runtime value.
+// Wrapping arithmetic preserves divisibility by powers of two dividing 2^32.
+static bool isAlignedUniform(Value value, int64_t alignment,
+                            unsigned depth = 0) {
+  if (depth > 32 || !value.getType().isInteger(32) ||
+      !isProgramUniformScalar(value))
+    return false;
+  if (auto c = value.getDefiningOp<arith::ConstantOp>()) {
+    auto attr = dyn_cast<IntegerAttr>(c.getValue());
+    return attr && attr.getInt() % alignment == 0;
+  }
+  Operation *op = value.getDefiningOp();
+  if (!op)
+    return false;
+  if (isa<arith::AddIOp, arith::SubIOp>(op))
+    return isAlignedUniform(op->getOperand(0), alignment, depth + 1) &&
+           isAlignedUniform(op->getOperand(1), alignment, depth + 1);
+  if (isa<arith::MulIOp>(op))
+    return isAlignedUniform(op->getOperand(0), alignment, depth + 1) ||
+           isAlignedUniform(op->getOperand(1), alignment, depth + 1);
+  return false;
+}
+
+// Recognize an aligned, clamped resize-like progression, not an operator name.
+// For x=b+[0,N), b divisible by power-of-two N: b<0 and b>=N saturate
+// uniformly; b=0 is exact FP32 arithmetic. A power-of-two scale and
+// scale*(N-1)<=upper<scale*N ensure no partially clamped tile exists.
+static bool hasProvenClampedStride(Value value) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!type || type.getRank() != 1 || !type.getElementType().isInteger(32))
+    return false;
+  auto sum = value.getDefiningOp<arith::AddIOp>();
+  if (!sum)
+    return false;
+  auto outer = sum.getLhs().getDefiningOp<triton::SplatOp>();
+  auto converted = sum.getRhs().getDefiningOp<arith::FPToSIOp>();
+  if (!outer || !converted)
+    return false;
+  Operation *clamp = converted.getIn().getDefiningOp();
+  if (!clamp || clamp->getName().getStringRef() != "tt.clampf")
+    return false;
+  auto constant = [](Value v) -> std::optional<double> {
+    auto op = v.getDefiningOp<arith::ConstantOp>();
+    auto attr = op ? dyn_cast<DenseFPElementsAttr>(op.getValue())
+                   : DenseFPElementsAttr{};
+    if (!attr || !attr.isSplat())
+      return std::nullopt;
+    return attr.getSplatValue<APFloat>().convertToDouble();
+  };
+  auto low = constant(clamp->getOperand(1));
+  auto high = constant(clamp->getOperand(2));
+  Operation *floor = clamp->getOperand(0).getDefiningOp();
+  if (!low || !high || *low != 0 || !floor ||
+      floor->getName().getStringRef() != "math.floor")
+    return false;
+  auto multiply = floor->getOperand(0).getDefiningOp<arith::MulFOp>();
+  auto scale = multiply ? constant(multiply.getRhs()) : std::nullopt;
+  auto toFloat = multiply ? multiply.getLhs().getDefiningOp<arith::SIToFPOp>()
+                          : arith::SIToFPOp{};
+  const int64_t n = type.getDimSize(0);
+  if (!scale || !toFloat ||
+      !cast<RankedTensorType>(multiply.getType()).getElementType().isF32() ||
+      n < 2 || n > (1 << 20) || !llvm::isPowerOf2_64(n) ||
+      *scale < 1 || *scale > (1 << 20) || std::floor(*scale) != *scale ||
+      !llvm::isPowerOf2_64(static_cast<uint64_t>(*scale)) ||
+      *scale * n > (1 << 24) || *high < *scale * (n - 1) ||
+      *high >= *scale * n || std::floor(*high) != *high)
+    return false;
+  auto input = toFloat.getIn().getDefiningOp<arith::AddIOp>();
+  auto base = input ? input.getLhs().getDefiningOp<triton::SplatOp>()
+                    : triton::SplatOp{};
+  auto range = input ? input.getRhs().getDefiningOp<triton::MakeRangeOp>()
+                     : triton::MakeRangeOp{};
+  // Outer alignment prevents signed i32 wrap within [base,base+upper].
+  int64_t outerAlignment = 1;
+  while (outerAlignment <= *high)
+    outerAlignment *= 2;
+  return base && range && range.getStart() == 0 && range.getEnd() == n &&
+         isAlignedUniform(base.getSrc(), n) &&
+         isAlignedUniform(outer.getSrc(), outerAlignment);
 }
 
 static bool hasProvenBranchStride(Operation *memory) {
@@ -317,6 +417,8 @@ static bool hasProvenBranchStride(Operation *memory) {
   auto arg = base ? dyn_cast<BlockArgument>(base.getSrc()) : BlockArgument{};
   if (!arg || !isa<triton::FuncOp>(arg.getOwner()->getParentOp()))
     return false;
+  if (hasProvenClampedStride(add.getOffset()))
+    return true;
   auto branch = add.getOffset().getDefiningOp<scf::IfOp>();
   if (!branch || !branch.elseBlock())
     return false;
@@ -648,12 +750,10 @@ getPartialContinuousTile(Operation *operation,
 static bool
 isIndirectMemoryOperation(Operation *operation,
                           const StageMemoryPatternAnalysis *memoryPatterns) {
-  const bool hasUnstructuredAxes =
-      memoryPatterns &&
-      memoryPatterns->hasUnstructuredAxes(operation).value_or(false);
-  // Preserve loaded-index cases even when pointer analysis reports no
-  // unstructured axes. The indirect classification is the union of both.
-  return hasUnstructuredAxes || isLoadedIndexDependentMemoryOp(operation);
+  if (memoryPatterns)
+    if (auto known = memoryPatterns->hasUnstructuredAxes(operation))
+      return *known;
+  return isLoadedIndexDependentMemoryOp(operation);
 }
 
 static bool hasTensorResult(Operation *operation) {
@@ -1517,10 +1617,10 @@ static void accumulateOneOperation(
     work.loadBytes += bytes;
     work.loadOperations += 1.0;
     const auto partial = getPartialContinuousTile(operation, memoryPatterns);
-    const double logicalMemoryGroups =
-        partial ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
-                : warpInstructions;
-    work.loadWarpInstructions += logicalMemoryGroups;
+    const double logicalMemoryGroups = warpInstructions;
+    // Keep #2528's tensor-wide instruction accounting for resource pricing;
+    // row geometry below is diagnostic, not a different execution count.
+    work.loadWarpInstructions += warpInstructions;
     if (partial) {
       work.partialContinuousLoadRows += partial->rows;
       work.partialContinuousLoadBytes += bytes;
@@ -1575,10 +1675,8 @@ static void accumulateOneOperation(
     const int64_t warpInstructions = static_cast<int64_t>(
         std::ceil(getTypeElementCount(value.getType()) / 32.0));
     const auto partial = getPartialContinuousTile(operation, memoryPatterns);
-    const double logicalMemoryGroups =
-        partial ? partial->rows * std::ceil(partial->elementsPerRow / 32.0)
-                : warpInstructions;
-    work.storeWarpInstructions += logicalMemoryGroups;
+    const double logicalMemoryGroups = warpInstructions;
+    work.storeWarpInstructions += warpInstructions;
     if (partial) {
       work.partialContinuousStoreRows += partial->rows;
       work.partialContinuousStoreBytes += getValueBytes(value);
@@ -2764,16 +2862,50 @@ static bool operationTreeContainsName(Operation *root, llvm::StringRef name) {
   return found;
 }
 
-static bool operationTreeContainsIndirectMemory(
-    Operation *root, const StageMemoryPatternAnalysis *memoryPatterns) {
-  bool found = root && isIndirectMemoryOperation(root, memoryPatterns);
-  if (!root || found)
-    return found;
-  root->walk([&](Operation *nested) {
-    if (!found)
-      found = isIndirectMemoryOperation(nested, memoryPatterns);
+static bool hasAllDAddressPattern(const StageWorkload &work) {
+  return llvm::any_of(work.addressPatterns, [](const AddressPatternSummary &p) {
+    return (p.memoryOp == "tt.load" || p.memoryOp == "tt.store") &&
+           !p.axes.empty() &&
+           llvm::all_of(p.axes, [](const AddressAxisSummary &a) {
+             return a.offsetAxisInfo == "unstructured";
+           });
+  });
+}
+
+static bool operationTreeContainsAllDMemory(
+    Operation *root, const StageMemoryPatternAnalysis *patterns) {
+  if (!root || !patterns)
+    return false;
+  bool found = false;
+  root->walk([&](Operation *op) {
+    const auto name = op->getName().getStringRef();
+    if (name != "tt.load" && name != "tt.store")
+      return;
+    const auto *p = patterns->lookupSummary(op);
+    found |= p && !p->axes.empty() &&
+             llvm::all_of(p->axes, [](const AddressAxisSummary &a) {
+               return a.offsetAxisInfo == "unstructured";
+             });
   });
   return found;
+}
+
+static bool isMixedAxisMemory(
+    Operation *op, const StageMemoryPatternAnalysis *patterns) {
+  const auto *p = patterns ? patterns->lookupSummary(op) : nullptr;
+  if (!p || p->axes.empty())
+    return false;
+  bool structured = false, unstructured = false;
+  for (const auto &axis : p->axes) {
+    if (axis.offsetAxisInfo == "structured" ||
+        axis.offsetAxisInfo == "scalar" || axis.offsetAxisInfo == "scalarlike")
+      structured = true;
+    else if (axis.offsetAxisInfo == "unstructured")
+      unstructured = true;
+    else
+      return false;
+  }
+  return structured && unstructured;
 }
 
 static bool operationTreeHasOnlyPartialContinuousMemory(
@@ -2790,7 +2922,7 @@ static bool operationTreeHasOnlyPartialContinuousMemory(
     }
     if (name != "tt.load" && name != "tt.store")
       return;
-    if (getPartialContinuousTile(operation, memoryPatterns))
+    if (isMixedAxisMemory(operation, memoryPatterns))
       hasPartial = true;
     else if (isIndirectMemoryOperation(operation, memoryPatterns))
       hasOtherIndirect = true;
@@ -3077,8 +3209,7 @@ classifySemanticRoot(Operation *root,
     return StageCostModelKind::VectorIssue;
   if (operationTreeHasOnlyPartialContinuousMemory(root, memoryPatterns))
     return StageCostModelKind::PartialContinuousTileMemory;
-  if (operationTreeContainsIndirectMemory(root, memoryPatterns) ||
-      operationTreeHasAnyName(root, {"tt.gather"}))
+  if (operationTreeContainsAllDMemory(root, memoryPatterns))
     return StageCostModelKind::IndirectGatherMemory;
   if (operationTreeHasAnyName(root, {"scf.for", "scf.while"}))
     return StageCostModelKind::IndependentPipelinedLoop;
@@ -3767,7 +3898,7 @@ llvm::Error StageFeatureAnalysis::analyze(
           facts.hasIndirectMemory |= indirect;
           hasContiguousMemory |= !indirect;
           if (indirect) {
-            if (getPartialContinuousTile(operation, memoryPatterns))
+            if (isMixedAxisMemory(operation, memoryPatterns))
               hasPartialContinuousMemory = true;
             else
               hasOtherIndirectMemory = true;
@@ -3822,8 +3953,9 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
     case StageCostModelKind::TinyCubeRoofline:
       return facts.hasDot;
     case StageCostModelKind::IndirectScalarMemory:
-    case StageCostModelKind::IndirectGatherMemory:
       return facts.hasIndirectMemory;
+    case StageCostModelKind::IndirectGatherMemory:
+      return hasAllDAddressPattern(workload);
     case StageCostModelKind::PartialContinuousTileMemory:
       return facts.hasPartialContinuousMemory;
     case StageCostModelKind::AtomicMemory:
@@ -3900,7 +4032,7 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
         return StageCostModelKind::AtomicMemory;
       if (facts.hasPartialContinuousMemory)
         return StageCostModelKind::PartialContinuousTileMemory;
-      if (facts.hasIndirectMemory)
+      if (hasAllDAddressPattern(stage.workload))
         return StageCostModelKind::IndirectGatherMemory;
       if (facts.hasConversionPack)
         return StageCostModelKind::ConversionPack;

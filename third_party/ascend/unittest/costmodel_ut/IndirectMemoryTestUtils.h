@@ -38,6 +38,7 @@ loadedAddressPattern(const LogicalStage &stage, llvm::StringRef memoryOp,
     AddressAxisSummary axis;
     axis.extent = extent;
     axis.regularity = regularity.str();
+    axis.offsetAxisInfo = "unstructured";
     pattern.axes.push_back(axis);
   }
   return pattern;
