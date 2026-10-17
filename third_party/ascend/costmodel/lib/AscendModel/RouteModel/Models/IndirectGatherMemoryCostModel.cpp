@@ -1,6 +1,8 @@
 // Indirect memory calibration and domain guards.
 #include "AscendModel/RouteModel/Models/IndirectGatherMemoryCostModel.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include <algorithm>
 #include <cmath>
 
@@ -9,6 +11,161 @@ using namespace mlir::ascend;
 
 namespace {
 constexpr const char *factorModel = "unmasked_factor_candidate_20261017";
+constexpr const char *prefixMaskModel = "prefix_mask_rank_factor_20261017";
+constexpr const char *randomMaskModel = "random_mask_rank_factor_20261017";
+
+#include "IndirectMaskModel.inc"
+
+// Only element-order-preserving reshapes from the measured flat templates.
+static Value flatMaskSource(Value value) {
+  while (auto reshape = value.getDefiningOp<triton::ReshapeOp>()) {
+    if (reshape.getAllowReorder())
+      return {};
+    value = reshape.getSrc();
+  }
+  return value;
+}
+
+static bool splatZero(Value value) {
+  auto constant = value.getDefiningOp<arith::ConstantOp>();
+  auto dense = constant ? dyn_cast<DenseElementsAttr>(constant.getValue())
+                        : DenseElementsAttr();
+  if (!dense || !dense.isSplat())
+    return false;
+  return isa<FloatType>(dense.getElementType())
+             ? dense.getSplatValue<APFloat>().isZero()
+             : dense.getSplatValue<APInt>().isZero();
+}
+
+static std::optional<double>
+maskedIncrement(const LogicalStage &stage, const HardwareProfile &hardware,
+                const StageImplementation &implementation, bool store) {
+  const auto &selector =
+      store ? hardware.simtIndirectStoreModel : hardware.simtIndirectLoadModel;
+  const bool randomPrior = selector == randomMaskModel;
+  if (selector != prefixMaskModel && !randomPrior)
+    return std::nullopt;
+  const auto &work = stage.workload;
+  const auto &pattern = work.addressPatterns.front();
+  const int64_t w = hardware.baseSimtWarpCount;
+  const int64_t f = implementation.superblockFactor;
+  if (hardware.target != "Ascend950PR/dav-c310" ||
+      implementation.mode != StageMode::SIMT || implementation.localScope ||
+      stage.costModelKind != StageCostModelKind::IndirectGatherMemory ||
+      (f != 1 && f != 2 && f != 4) || (w != 1 && w != 4) ||
+      !pattern.dependsOnLoadedValue || pattern.stageId != stage.id ||
+      pattern.memoryOp != (store ? "tt.store" : "tt.load") ||
+      stage.features.hasAtomicMemory || work.privateStackLoadInstructions ||
+      work.privateStackStoreInstructions ||
+      (store && work.hasProvenIndirectStoreReuse) ||
+      (store ? work.indirectLoadBytes != 0 : work.indirectStoreBytes != 0))
+    return std::nullopt;
+  llvm::SmallPtrSet<Operation *, 4> targets;
+  for (Operation *owned : stage.operations)
+    owned->walk([&](Operation *op) {
+      if (op->getName().getStringRef() == (store ? "tt.store" : "tt.load"))
+        targets.insert(op);
+    });
+  if (targets.size() != 1)
+    return std::nullopt;
+  Operation *op = *targets.begin();
+  // Load requires explicit zero other; store requires one mask.
+  if (op->getNumOperands() != 3 || (!store && op->getNumResults() != 1))
+    return std::nullopt;
+  if (auto load = dyn_cast<triton::LoadOp>(op)) {
+    if (load.getCache() != triton::CacheModifier::NONE ||
+        load.getEvict() != triton::EvictionPolicy::NORMAL ||
+        load.getIsVolatile())
+      return std::nullopt;
+  } else if (auto write = dyn_cast<triton::StoreOp>(op)) {
+    if (write.getCache() != triton::CacheModifier::NONE ||
+        write.getEvict() != triton::EvictionPolicy::NORMAL)
+      return std::nullopt;
+  } else {
+    return std::nullopt;
+  }
+  auto type = dyn_cast<RankedTensorType>(store ? op->getOperand(1).getType()
+                                               : op->getResult(0).getType());
+  if (!type || !type.hasStaticShape() || type.getRank() < 1 ||
+      type.getRank() > 5 || pattern.axes.size() != size_t(type.getRank()))
+    return std::nullopt;
+  const auto element = type.getElementType();
+  const int group = element.isInteger(8)    ? 0
+                    : element.isInteger(16) ? 1
+                    : element.isF32()       ? 2
+                    : element.isInteger(64) ? 3
+                                            : -1;
+  const int64_t e = type.getNumElements(), rank = type.getRank();
+  const int64_t q = e / (32 * w), fi = f == 4 ? 2 : f == 2 ? 1 : 0;
+  if (group < 0 || e % (32 * w) || (q != 1 && q != 2 && q != 4) ||
+      (store ? work.indirectStoreBytes : work.indirectLoadBytes) !=
+          e * element.getIntOrFloatBitWidth() / 8)
+    return std::nullopt;
+  // Exact union of rank_matrix and refine_matrix, not the Cartesian hull.
+  const int64_t rotation = rank + group + fi;
+  if (w != (rotation % 2 ? 4 : 1) && q != (1LL << (rotation % 3)))
+    return std::nullopt;
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    const int64_t expected =
+        axis == (w == 1 ? rank - 1 : 0) ? e / (1LL << (rank - 1)) : 2;
+    if (expected < 2 || type.getDimSize(axis) != expected ||
+        pattern.axes[axis].extent != expected)
+      return std::nullopt;
+  }
+  auto address = op->getOperand(0).getDefiningOp<triton::AddPtrOp>();
+  if (!address || !address.getPtr().getDefiningOp<triton::SplatOp>())
+    return std::nullopt;
+  Value offset = flatMaskSource(address.getOffset());
+  auto index =
+      offset ? offset.getDefiningOp<triton::LoadOp>() : triton::LoadOp();
+  auto indexType = offset ? dyn_cast<RankedTensorType>(offset.getType())
+                          : RankedTensorType();
+  if (!index || index.getMask() || !indexType || indexType.getRank() != 1 ||
+      indexType.getNumElements() != e ||
+      !indexType.getElementType().isInteger(32))
+    return std::nullopt;
+  Value mask = op->getOperand(store ? 2 : 1);
+  if (mask.getType() != type.clone(IntegerType::get(op->getContext(), 1)))
+    return std::nullopt;
+  mask = flatMaskSource(mask);
+  auto cmp = mask ? mask.getDefiningOp<arith::CmpIOp>() : arith::CmpIOp();
+  if (!cmp)
+    return std::nullopt;
+  bool random = false;
+  const int64_t k = w == 1 ? e / 2 : e * 3 / 4;
+  if (cmp.getPredicate() == arith::CmpIPredicate::slt) {
+    auto range = cmp.getLhs().getDefiningOp<triton::MakeRangeOp>();
+    auto limit = cmp.getRhs().getDefiningOp<arith::ConstantOp>();
+    auto values = limit ? dyn_cast<DenseIntElementsAttr>(limit.getValue())
+                        : DenseIntElementsAttr();
+    if (!range || range.getStart() != 0 || range.getEnd() != e || !values ||
+        !values.isSplat() || !values.getElementType().isInteger(32) ||
+        values.getSplatValue<APInt>().getSExtValue() != k)
+      return std::nullopt;
+  } else {
+    // An explicit profile prior, not a proof of runtime density. This is only
+    // the original shuffled byte-mask family: W1 half, W4 three quarters.
+    if (!randomPrior || cmp.getPredicate() != arith::CmpIPredicate::ne ||
+        !splatZero(cmp.getRhs()))
+      return std::nullopt;
+    Value source = cmp.getLhs();
+    if (auto extend = source.getDefiningOp<arith::ExtUIOp>())
+      source = extend.getIn();
+    auto loaded = source.getDefiningOp<triton::LoadOp>();
+    auto maskType = dyn_cast<RankedTensorType>(source.getType());
+    if (!loaded || loaded.getMask() || !maskType || maskType.getRank() != 1 ||
+        maskType.getNumElements() != e ||
+        !maskType.getElementType().isInteger(8))
+      return std::nullopt;
+    random = true;
+  }
+  if (!store && !splatZero(op->getOperand(2)))
+    return std::nullopt;
+  // Existing applySuperBlock accounts for F once. Auxiliary work stays priced.
+  return maskGroupCycles(store, random, group, e, w, f, rank,
+                         type.getShape().back(), k) /
+         f;
+}
 
 // Experimental one-AIV F-program increments. Known W16/small-E outliers
 // are retained intentionally. Rank, type and geometry coverage are not relaxed.
@@ -618,11 +775,58 @@ StageMemoryCost IndirectGatherMemoryCostModel::cost(
       stage.workload.addressPatterns.size() != 1)
     return {};
   const auto &axes = stage.workload.addressPatterns.front().axes;
-  if (axes.empty() ||
-      !llvm::all_of(axes, [](const AddressAxisSummary &axis) {
+  if (axes.empty() || !llvm::all_of(axes, [](const AddressAxisSummary &axis) {
         return axis.offsetAxisInfo == "unstructured";
       }))
     return {};
+  const auto candidate = [](const std::string &name) {
+    return name == factorModel || name == prefixMaskModel ||
+           name == randomMaskModel;
+  };
+  if (implementation.mode == StageMode::SIMT &&
+      (candidate(profile.simtIndirectLoadModel) ||
+       candidate(profile.simtIndirectStoreModel))) {
+    int64_t elements = 1;
+    for (const auto &axis : axes) {
+      if (axis.extent <= 0 || elements > INT64_MAX / axis.extent)
+        return {};
+      elements *= axis.extent;
+    }
+    if (elements / 32.0 < profile.baseSimtWarpCount)
+      return {}; // q<1 uses #2528 resources; q=1 remains eligible.
+  }
+  if (implementation.mode == StageMode::SIMT &&
+      (profile.simtIndirectLoadModel == prefixMaskModel ||
+       profile.simtIndirectLoadModel == randomMaskModel ||
+       profile.simtIndirectStoreModel == prefixMaskModel ||
+       profile.simtIndirectStoreModel == randomMaskModel)) {
+    HardwareProfile unmasked = profile;
+    const bool load = profile.simtIndirectLoadModel == prefixMaskModel ||
+                      profile.simtIndirectLoadModel == randomMaskModel;
+    const bool store = profile.simtIndirectStoreModel == prefixMaskModel ||
+                       profile.simtIndirectStoreModel == randomMaskModel;
+    if (load)
+      unmasked.simtIndirectLoadModel = factorModel;
+    if (store)
+      unmasked.simtIndirectStoreModel = factorModel;
+    auto result = cost(stage, unmasked, implementation);
+    if (load)
+      if (auto fitted =
+              maskedIncrement(stage, profile, implementation, false)) {
+        result.load = fitted;
+        result.loadPricing = profile.simtIndirectLoadModel == randomMaskModel
+                                 ? randomMaskModel
+                                 : prefixMaskModel;
+      }
+    if (store)
+      if (auto fitted = maskedIncrement(stage, profile, implementation, true)) {
+        result.store = fitted;
+        result.storePricing = profile.simtIndirectStoreModel == randomMaskModel
+                                  ? randomMaskModel
+                                  : prefixMaskModel;
+      }
+    return result;
+  }
   if (implementation.mode == StageMode::SIMT &&
       (profile.simtIndirectLoadModel == factorModel ||
        profile.simtIndirectStoreModel == factorModel)) {

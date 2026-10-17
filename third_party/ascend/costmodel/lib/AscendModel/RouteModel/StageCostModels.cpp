@@ -3408,7 +3408,9 @@ bool HardwareProfile::isValid() const {
          (simtIndirectLoadModel.empty() ||
           ((simtIndirectLoadModel == "random_i32_six_term_20261007" ||
             simtIndirectLoadModel == "random_dtype_six_term_20261008" ||
-            simtIndirectLoadModel == "unmasked_factor_candidate_20261017") &&
+            simtIndirectLoadModel == "unmasked_factor_candidate_20261017" ||
+            simtIndirectLoadModel == "prefix_mask_rank_factor_20261017" ||
+            simtIndirectLoadModel == "random_mask_rank_factor_20261017") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectLoadModel.empty() ||
           ((simdIndirectLoadModel == "random_f32_matched_ab_20261007" ||
@@ -3418,6 +3420,8 @@ bool HardwareProfile::isValid() const {
           ((simtIndirectStoreModel == "random_f32_store_fill_ab_20261007" ||
             simtIndirectStoreModel == "random_store_no_fill_first_20261008" ||
             simtIndirectStoreModel == "unmasked_factor_candidate_20261017" ||
+            simtIndirectStoreModel == "prefix_mask_rank_factor_20261017" ||
+            simtIndirectStoreModel == "random_mask_rank_factor_20261017" ||
             simtIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectStoreModel.empty() ||
