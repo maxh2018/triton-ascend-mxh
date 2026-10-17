@@ -7,6 +7,7 @@ add_compile_definitions(
 add_mlir_library(AscendModelRouteModel
   ../Analysis/SimtAnchorAnalysis.cpp
   ../Analysis/StagePartitioner.cpp
+  ../Analysis/StageMemoryPatternAnalysis.cpp
   ../Analysis/SimtRegisterPressureAnalysis.cpp
   StageCostModels.cpp
   Models/IndirectGatherMemoryCostModel.cpp

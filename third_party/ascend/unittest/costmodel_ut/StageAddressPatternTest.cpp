@@ -1,11 +1,12 @@
 // Pointer-analysis coverage for the indirect and partially structured stages.
+#include "AscendModel/Analysis/StageMemoryPatternAnalysis.h"
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "CostModelTestUtils.h"
 #include "StageIRTestUtils.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Verifier.h"
-#include "mlir/Dialect/Math/IR/Math.h"
 #include "llvm/Support/FormatVariadic.h"
 
 using namespace mlir;
@@ -451,7 +452,8 @@ TEST(StageAddressPatternTest, UnstructuredLoadStoreAnchorsMaterializeScopes) {
 TEST(StageAddressPatternTest, AllDContractExcludesEveryMixedAxisPosition) {
   for (bool store : {false, true})
     for (auto left : {IndexKind::Range, IndexKind::Loaded, IndexKind::Computed})
-      for (auto right : {IndexKind::Range, IndexKind::Loaded, IndexKind::Computed}) {
+      for (auto right :
+           {IndexKind::Range, IndexKind::Loaded, IndexKind::Computed}) {
         IRTestContext context(true);
         auto module = addressModule(context, {4, 8}, {left, right}, 1, store);
         auto partition = StagePartitioner().partition(
@@ -477,8 +479,8 @@ TEST(StageAddressPatternTest, MixedNonRowFallbackKeepsIrregularPricing) {
     IRTestContext context(true);
     auto module = addressModule(
         context, {4, 8}, {IndexKind::Range, IndexKind::Loaded}, 1, store);
-    auto partition = StagePartitioner().partition(
-        *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+    auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                  StagePartitionerOptions{});
     ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
     auto *payload = payloadStage(*partition, {4, 8}, store);
     ASSERT_NE(payload, nullptr);
@@ -509,8 +511,8 @@ TEST(StageAddressPatternTest, MixedAxesUseUpstreamCurvesInBothModes) {
               ? ArrayRef<IndexKind>({IndexKind::Loaded, IndexKind::Range})
               : ArrayRef<IndexKind>({IndexKind::Range, IndexKind::Loaded}),
           1, store);
-      auto partition = StagePartitioner().partition(
-          *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+      auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                    StagePartitionerOptions{});
       ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
       auto *payload = payloadStage(*partition, {4, 8}, store);
       ASSERT_NE(payload, nullptr);
@@ -564,8 +566,8 @@ TEST(StageAddressPatternTest, ScheduledUniformBranchRemainsStructured) {
     })mlir");
   ASSERT_TRUE(module);
   EXPECT_TRUE(collectUnstructuredMemoryOps(*module).empty());
-  auto partition = StagePartitioner().partition(
-      *module, SimtAnchorPlan{}, StagePartitionerOptions{});
+  auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                StagePartitionerOptions{});
   ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
   auto *payload = payloadStage(*partition, {32});
   ASSERT_NE(payload, nullptr);
@@ -573,7 +575,8 @@ TEST(StageAddressPatternTest, ScheduledUniformBranchRemainsStructured) {
   EXPECT_EQ(payload->costModelKind, StageCostModelKind::ContinuousTileMemory);
 }
 
-TEST(StageAddressPatternTest, ClampedStrideProofRejectsPartialClampingAndMisalignment) {
+TEST(StageAddressPatternTest,
+     ClampedStrideProofRejectsPartialClampingAndMisalignment) {
   for (int high : {62, 63, 65})
     for (int tile : {16, 32})
       for (int outer : {32, 64}) {
@@ -604,7 +607,9 @@ TEST(StageAddressPatternTest, ClampedStrideProofRejectsPartialClampingAndMisalig
               %v = tt.load %p : tensor<32x!tt.ptr<f32>>
               tt.return
             }
-          })mlir", tile, outer, high).str());
+          })mlir",
+                                                  tile, outer, high)
+                                        .str());
         ASSERT_TRUE(module);
         auto partition = StagePartitioner().partition(
             *module, SimtAnchorPlan{}, StagePartitionerOptions{});
@@ -615,6 +620,53 @@ TEST(StageAddressPatternTest, ClampedStrideProofRejectsPartialClampingAndMisalig
         EXPECT_EQ(payload->features.hasIndirectMemory, !proven);
         EXPECT_EQ(collectUnstructuredMemoryOps(*module).empty(), proven);
       }
+}
+
+TEST(StageAddressPatternTest, MemoryFactsDoNotMutateInputIR) {
+  IRTestContext context(true);
+  auto module =
+      addressModule(context, {4, 8}, {IndexKind::Loaded, IndexKind::Range});
+  auto print = [&] {
+    std::string text;
+    llvm::raw_string_ostream stream(text);
+    module->print(stream);
+    return text;
+  };
+  const auto before = print();
+  StageMemoryPatternAnalysis facts(*module);
+  EXPECT_EQ(print(), before);
+  module->walk([&](triton::LoadOp load) {
+    auto type = cast<RankedTensorType>(load.getPtr().getType());
+    auto irregular = facts.hasUnstructuredAxes(load);
+    ASSERT_TRUE(irregular.has_value());
+    EXPECT_EQ(*irregular, type.getRank() == 2);
+    const auto *summary = facts.lookupSummary(load);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->axes.size(), type.getRank());
+    auto tile = facts.lookup(load);
+    EXPECT_EQ(tile.has_value(), type.getRank() == 2);
+    if (tile) {
+      EXPECT_DOUBLE_EQ(tile->rows, 4);
+      EXPECT_DOUBLE_EQ(tile->elementsPerRow, 8);
+    }
+  });
+  EXPECT_EQ(print(), before);
+}
+
+TEST(StageAddressPatternTest, MissingMemoryFactsRemainUnknown) {
+  IRTestContext context(true);
+  auto module = addressModule(context, {8}, {IndexKind::PointerArgument});
+  StageMemoryPatternAnalysis facts(*module);
+  module->walk([&](triton::LoadOp load) {
+    EXPECT_FALSE(facts.hasUnstructuredAxes(load).has_value());
+    EXPECT_FALSE(facts.lookup(load).has_value());
+    const auto *summary = facts.lookupSummary(load);
+    ASSERT_NE(summary, nullptr);
+    ASSERT_EQ(summary->axes.size(), 1u);
+    EXPECT_EQ(summary->axes[0].offsetAxisInfo, "unknown");
+  });
+  EXPECT_EQ(facts.lookupSummary(*module), nullptr);
+  EXPECT_FALSE(facts.hasUnstructuredAxes(*module).has_value());
 }
 
 TEST(StageAddressPatternTest, UniformBranchStridesDoNotBecomeIndirect) {
