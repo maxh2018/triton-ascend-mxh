@@ -5,74 +5,6 @@ using namespace mlir;
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
-namespace {
-// Real Triton ops exercise reshape/prefix proofs as well as formula dispatch.
-OwningOpRef<ModuleOp> maskModule(IRTestContext &context,
-                                 ArrayRef<int64_t> shape, int64_t k, bool store,
-                                 bool random = false, StringRef dtype = "f32") {
-  int64_t e = 1;
-  std::string dims;
-  for (int64_t d : shape) {
-    e *= d;
-    dims += std::to_string(d) + "x";
-  }
-  std::string source = llvm::formatv(R"mlir(
-    module {{ tt.func @masked(%base: !tt.ptr<f32>,
-        %indices_base: !tt.ptr<i32>, %masks_base: !tt.ptr<i8>,
-        %values: tensor<{1}f32>) {{
-      %input_lane = tt.make_range {{start = 0 : i32, end = {0} : i32} : tensor<{0}xi32>
-      %indices_splat = tt.splat %indices_base : !tt.ptr<i32> -> tensor<{0}x!tt.ptr<i32>>
-      %indices = tt.addptr %indices_splat, %input_lane : tensor<{0}x!tt.ptr<i32>>, tensor<{0}xi32>
-      %i = tt.load %indices : tensor<{0}x!tt.ptr<i32>>
-      %offset = tt.reshape %i : tensor<{0}xi32> -> tensor<{1}i32>
-      %base_tensor = tt.splat %base : !tt.ptr<f32> -> tensor<{1}!tt.ptr<f32>>
-      %ptr = tt.addptr %base_tensor, %offset : tensor<{1}!tt.ptr<f32>>, tensor<{1}i32>
-  )mlir",
-                                     e, dims)
-                           .str();
-  source += random ? llvm::formatv(R"mlir(
-      %masks_splat = tt.splat %masks_base : !tt.ptr<i8> -> tensor<{0}x!tt.ptr<i8>>
-      %masks = tt.addptr %masks_splat, %input_lane : tensor<{0}x!tt.ptr<i8>>, tensor<{0}xi32>
-      %m = tt.load %masks : tensor<{0}x!tt.ptr<i8>>
-      %zero_mask = arith.constant dense<0> : tensor<{0}xi8>
-      %flat = arith.cmpi ne, %m, %zero_mask : tensor<{0}xi8>
-  )mlir",
-                                   e)
-                         .str()
-                   : llvm::formatv(R"mlir(
-      %lane = tt.make_range {{start = 0 : i32, end = {0} : i32} : tensor<{0}xi32>
-      %limit = arith.constant dense<{1}> : tensor<{0}xi32>
-      %flat = arith.cmpi slt, %lane, %limit : tensor<{0}xi32>
-  )mlir",
-                                   e, k)
-                         .str();
-  source += llvm::formatv(
-                "%mask = tt.reshape %flat : tensor<{0}xi1> -> tensor<{1}i1>\n",
-                e, dims)
-                .str();
-  source +=
-      store ? llvm::formatv(
-                  "tt.store %ptr, %values, %mask : tensor<{0}!tt.ptr<f32>>\n",
-                  dims)
-                  .str()
-            : llvm::formatv(
-                  "%zero = arith.constant dense<0.0> : tensor<{0}f32>\n%out = "
-                  "tt.load %ptr, %mask, %zero : tensor<{0}!tt.ptr<f32>>\n",
-                  dims)
-                  .str();
-  source += "tt.return } }";
-  if (dtype != "f32") {
-    const size_t zero = source.find("dense<0.0>");
-    if (zero != std::string::npos)
-      source.replace(zero, 10, "dense<0>");
-  }
-  for (size_t at = 0; (at = source.find("f32", at)) != std::string::npos;
-       at += dtype.size())
-    source.replace(at, 3, dtype.str());
-  return context.parse(source);
-}
-} // namespace
-
 TEST(IndirectMaskCostModelTest, RankFactorPrefixAndExplicitRandomPrior) {
   IRTestContext context(true);
   const IndirectGatherMemoryCostModel model;
@@ -84,7 +16,8 @@ TEST(IndirectMaskCostModelTest, RankFactorPrefixAndExplicitRandomPrior) {
           const int64_t e = 32 * (1LL << ((rank + 2 + fi) % 3));
           SmallVector<int64_t> shape(rank, 2);
           shape.back() = e / (1LL << (rank - 1));
-          auto module = maskModule(context, shape, e / 2, store, random);
+          auto module = memoryModule(context, shape, "f32", store,
+                                     random ? "loaded" : "prefix", e / 2);
           ASSERT_TRUE(module);
           MemoryCase test(context, Float32Type::get(&context), shape, store);
           module->walk([&](Operation *op) {
@@ -141,7 +74,7 @@ TEST(IndirectMaskCostModelTest, PrefixRejectsWrongCountAndReuse) {
   profile.simtIndirectStoreModel = "prefix_mask_rank_factor_20261017";
   const IndirectGatherMemoryCostModel model;
   for (int64_t k : {8, 16}) {
-    auto module = maskModule(context, {32}, k, true);
+    auto module = memoryModule(context, {32}, "f32", true, "prefix", k);
     ASSERT_TRUE(module);
     module->walk([&](triton::StoreOp op) { test.stage.operations = {op}; });
     auto result = model.cost(test.stage, profile, {StageMode::SIMT, 1});
@@ -157,7 +90,7 @@ TEST(IndirectMaskCostModelTest, PrefixRejectsWrongCountAndReuse) {
 TEST(IndirectMaskCostModelTest, PartitionedRankThreeUsesMaskFormula) {
   IRTestContext context(true);
   for (bool store : {false, true}) {
-    auto module = maskModule(context, {2, 2, 32}, 64, store);
+    auto module = memoryModule(context, {2, 2, 32}, "f32", store, "prefix", 64);
     ASSERT_TRUE(module);
     auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
                                                   StagePartitionerOptions{});
