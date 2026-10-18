@@ -1,7 +1,45 @@
 #include "AscendModel/RouteModel/Models/PartialStructuredMemoryModel.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredSimtLoadModel.h"
 #include <gtest/gtest.h>
 
 using namespace mlir::ascend::partial_memory;
+
+TEST(PartialStructuredMemoryModelTest, FactorLoadUsesIndependentEAndWarps) {
+  FactorLoadGeometry c{{{{4, 32, true}, {8, 3, false}}, 32, 2, true},
+                       2, 512, {0, 0}, {4, 8}};
+  ASSERT_TRUE(predictFactorLoad(c)); // E=32, W=2: no q=1 restriction.
+  auto masked = c;
+  masked.upper[0] = 2;
+  ASSERT_TRUE(predictFactorLoad(masked));
+  EXPECT_LT(extractFactorLoadFeatures(masked).at("K"),
+            extractFactorLoadFeatures(c).at("K"));
+  for (int64_t factor : {2, 4}) {
+    c.factor = factor;
+    ASSERT_TRUE(predictFactorLoad(c));
+  }
+  c.factor = 1;
+  EXPECT_FALSE(predictFactorLoad(c));
+}
+
+TEST(PartialStructuredMemoryModelTest, FactorLoadRejectsUnmeasuredGeometry) {
+  FactorLoadGeometry c{{{{4, 32, true}, {8, 3, false}}, 32, 2, true},
+                       4, 512, {0, 0}, {4, 8}};
+  ASSERT_TRUE(predictFactorLoad(c));
+  auto bad = c; bad.programStride = 0;
+  EXPECT_FALSE(predictFactorLoad(bad));
+  bad = c; bad.programStride = 1;
+  EXPECT_FALSE(predictFactorLoad(bad));
+  bad = c; bad.geometry.warps = 32;
+  EXPECT_FALSE(predictFactorLoad(bad)); // 4096 physical threads.
+  bad = c; bad.upper[1] = 3;
+  EXPECT_FALSE(predictFactorLoad(bad)); // Rectangle outside measured families.
+  bad = c; bad.upper[0] = 0;
+  EXPECT_FALSE(predictFactorLoad(bad));
+  bad = c; bad.geometry.floatingPoint = false;
+  EXPECT_FALSE(predictFactorLoad(bad)); // 32-bit representative is f32.
+  bad = c; bad.geometry.axes.back().discrete = true;
+  EXPECT_FALSE(predictFactorLoad(bad));
+}
 
 TEST(PartialStructuredMemoryModelTest, ShortFormulaReferencePredictions) {
   // References from frozen Python inference; asymmetric shape and large odd

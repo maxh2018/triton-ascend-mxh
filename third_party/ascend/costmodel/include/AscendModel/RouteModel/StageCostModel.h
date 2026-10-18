@@ -16,7 +16,9 @@ struct StageMemoryCost {
   // resource. Native SIMD fragments already include owned address helpers.
   bool replacesTensorMemory = false;
   bool includesAddressWork = false;
-  /// Auxiliary operations outside a SIMD native fragment, priced normally.
+  /// The replacement already covers all F logical programs on one core.
+  bool coversSuperblockGroup = false;
+  /// Operations outside the fitted fragment or increment, priced normally.
   std::optional<StageWorkload> remainingWorkload;
   std::string pricing;
 };

@@ -2561,8 +2561,9 @@ static void accumulateDynamicOperationTree(
     Operation *operation, StageWorkload &work, double multiplicity,
     int64_t fallbackLoopTripCount, StageModelFeatures &estimates,
     int64_t logicalProgramCountHint, RankedTensorType mappedTensor = {},
-    const StageMemoryPatternAnalysis *memoryPatterns = nullptr) {
-  if (!operation)
+    const StageMemoryPatternAnalysis *memoryPatterns = nullptr,
+    Operation *excludedMemory = nullptr) {
+  if (!operation || operation == excludedMemory)
     return;
   StageWorkload local;
   accumulateOneOperation(operation, local, mappedTensor, memoryPatterns);
@@ -2597,7 +2598,8 @@ static void accumulateDynamicOperationTree(
       for (Operation &nested : block.getOperations())
         accumulateDynamicOperationTree(
             &nested, work, childMultiplicity, fallbackLoopTripCount, estimates,
-            logicalProgramCountHint, childMappedTensor, memoryPatterns);
+            logicalProgramCountHint, childMappedTensor, memoryPatterns,
+            excludedMemory);
 }
 
 static int64_t countAlgorithmLoops(const LogicalStage &stage) {
@@ -4018,9 +4020,10 @@ llvm::Error StageKindClassifier::analyze(StagePartition &partition,
   return llvm::Error::success();
 }
 
-llvm::Error StageWorkloadAnalysis::analyze(
+static llvm::Error analyzeStageWorkload(
     StagePartition &partition, int64_t logicalProgramCountHint,
-    const StageMemoryPatternAnalysis *memoryPatterns) const {
+    const StageMemoryPatternAnalysis *memoryPatterns,
+    Operation *excludedMemory = nullptr) {
   if (!partition.operationOwnershipComplete)
     return llvm::createStringError(
         std::errc::invalid_argument,
@@ -4032,7 +4035,8 @@ llvm::Error StageWorkloadAnalysis::analyze(
       for (Operation *root : stage.operations)
         root->walk([&](Operation *operation) {
           const auto name = operation->getName().getStringRef();
-          if (name != "tt.load" && name != "tt.store")
+          if (operation == excludedMemory ||
+              (name != "tt.load" && name != "tt.store"))
             return;
           if (const auto *summary = memoryPatterns->lookupSummary(operation)) {
             work.addressPatterns.push_back(*summary);
@@ -4052,7 +4056,7 @@ llvm::Error StageWorkloadAnalysis::analyze(
       accumulateDynamicOperationTree(
           root, work, semanticRootEntryMultiplicity(root),
           fallbackLoopTripCount, stage.features, logicalProgramCountHint, {},
-          memoryPatterns);
+          memoryPatterns, excludedMemory);
     recomputeIssueElements(work);
     stage.workload = std::move(work);
     makePerIteration(stage);
@@ -4067,6 +4071,22 @@ llvm::Error StageWorkloadAnalysis::analyze(
           stage.id.c_str());
   }
   return llvm::Error::success();
+}
+
+llvm::Error StageWorkloadAnalysis::analyze(
+    StagePartition &partition, int64_t logicalProgramCountHint,
+    const StageMemoryPatternAnalysis *memoryPatterns) const {
+  return analyzeStageWorkload(partition, logicalProgramCountHint, memoryPatterns);
+}
+
+llvm::Error StageWorkloadAnalysis::analyzeExcludingMemory(
+    StagePartition &partition, Operation *memory) const {
+  if (!memory || (memory->getName().getStringRef() != "tt.load" &&
+                  memory->getName().getStringRef() != "tt.store"))
+    return llvm::createStringError(std::errc::invalid_argument,
+                                   "expected one fitted memory operation");
+  StageMemoryPatternAnalysis patterns(memory->getParentOfType<ModuleOp>());
+  return analyzeStageWorkload(partition, 0, &patterns, memory);
 }
 
 llvm::Error

@@ -4402,9 +4402,10 @@
     },
     "partial_structured_memory_model": {
       "enum": [
-        "ttir_q1_short_formula_20261014"
+        "ttir_q1_short_formula_20261014",
+        "ttir_static_simt_load_factor_20261017"
       ],
-      "description": "Optional Ascend950PR short affine TTIR geometry fits. Unmasked q=1, ranks 1-5, widths 8/16/32/64; store assumes first logical write without fill. SIMD prices the native fragment with owned addressing, SIMT the matched-baseline increment. No runtime sampling. Unsupported cases retain existing pricing. Individual-input MAPE meets 20% for three models; SIMT load is 23.253%."
+      "description": "Versioned TTIR partial-memory fits. ttir_q1_short_formula_20261014 retains the F1 q=1 unmasked models. ttir_static_simt_load_factor_20261017 additionally enables complete-group SIMT load increments for F2/F4, E=32..2048 independent of W, mixed rank2..5, representative u8/u16/f32/u64, known positive strides and program spacing, and proved constant rectangular masks. The 112-coefficient candidate has individual-input independent MAPE 30.325/32.596% without mask and 25.599/28.209% with mask for F2/F4; it does not meet 20%. Unsupported cases retain legacy pricing. No runtime sampling or q/U/V predictors in the F2/F4 model."
     }
   },
   "required": [

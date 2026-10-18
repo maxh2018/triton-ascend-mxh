@@ -988,6 +988,17 @@ static std::optional<StageResourceCycles>
 mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
             StageMode mode, int64_t superblockFactor, bool wholeSimt,
             StageMemoryCost fitted = {}) {
+  if (fitted.coversSuperblockGroup && fitted.remainingWorkload) {
+    // The physical-group fit owns one target only. Price every uncovered
+    // memory/helper using the same legacy mapping, then add the group once.
+    StageMemoryCost auxiliary;
+    auxiliary.remainingWorkload = fitted.remainingWorkload;
+    auto resources = mapWorkload(stage, profile, mode, superblockFactor,
+                                 wholeSimt, std::move(auxiliary));
+    if (resources)
+      resources->indirectLoadGroup += fitted.load.value_or(0.0);
+    return resources;
+  }
   StageResourceCycles resources;
   StageWorkload work =
       fitted.remainingWorkload ? *fitted.remainingWorkload : stage.workload;
@@ -1205,7 +1216,10 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
   // Unclassified scalar operations have no execution-throughput evidence.
   if (fitted.replacesTensorMemory) {
     // The guard proves one target; keep auxiliary issue and compute work.
-    resources.load += fitted.load.value_or(0.0);
+    if (fitted.coversSuperblockGroup)
+      resources.indirectLoadGroup += fitted.load.value_or(0.0);
+    else
+      resources.load += fitted.load.value_or(0.0);
     resources.store += fitted.store.value_or(0.0);
   } else if (stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory) {
     // Retain #2489's row-wise fallback; these rows are not scalar gathers.
@@ -2304,7 +2318,20 @@ static double applySuperBlock(const LogicalStage &stage,
                               const StageResourceCycles &resources,
                               const StageImplementation &implementation,
                               const HardwareProfile &profile,
-                              double stageCycles) {
+                              double stageCycles,
+                              double fullGroupIncrement = 0.0) {
+  if (fullGroupIncrement > 0.0) {
+    // A-B was measured for the entire F-program group. Preserve the legacy
+    // auxiliary calculation (including control) and add the increment once.
+    auto auxiliary = resources;
+    auxiliary.indirectLoadGroup =
+        std::max(0.0, auxiliary.indirectLoadGroup - fullGroupIncrement);
+    const double auxiliaryCycles =
+        estimateStage(stage, profile, implementation.mode, auxiliary);
+    return applySuperBlock(stage, auxiliary, implementation, profile,
+                           auxiliaryCycles) +
+           iterations(stage) * fullGroupIncrement;
+  }
   if (implementation.mode != StageMode::SIMT ||
       implementation.superblockFactor == 1)
     return stageCycles;
@@ -3652,9 +3679,11 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       cost.implementation = implementation;
       cost.resources = *resources;
       if (fitted.replacesTensorMemory)
-        cost.memoryPricingBoundary = fitted.includesAddressWork
-            ? "simd_native_fragment_with_completion_barrier"
-            : "simt_matched_baseline_increment";
+        cost.memoryPricingBoundary = fitted.coversSuperblockGroup
+            ? "simt_matched_baseline_full_F_group_increment"
+            : fitted.includesAddressWork
+                  ? "simd_native_fragment_with_completion_barrier"
+                  : "simt_matched_baseline_increment";
       if (fitted.load && !fitted.pricing.empty())
         cost.indirectLoadPricing = fitted.pricing;
       else if (fitted.load)
@@ -3704,7 +3733,9 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       else
         cost.formulaEvidence = "analytical_resource_formula";
       if (fitted.load || fitted.store)
-        cost.formulaEvidence = "matched_ab_indirect_memory_increment";
+        cost.formulaEvidence = fitted.coversSuperblockGroup
+            ? "matched_ab_partial_simt_load_full_group_20261017"
+            : "matched_ab_indirect_memory_increment";
       if (resources->indirectMemoryAnalyticalFallback &&
           cost.formulaEvidence.find(
               "analytical_indirect_memory_resource_fallback") ==
@@ -3826,7 +3857,9 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       cost.totalCycles =
           applySuperBlock(executionStage, *resources, implementation, profile,
                           estimateStage(executionStage, profile,
-                                        implementation.mode, *resources));
+                                        implementation.mode, *resources),
+                          fitted.coversSuperblockGroup
+                              ? fitted.load.value_or(0.0) : 0.0);
       if (implementation.aivSubblocks > 1) {
         cost.cvPartitionIdealTotalCycles = cost.totalCycles;
         cost.cvPartitionPayloadEfficiency =

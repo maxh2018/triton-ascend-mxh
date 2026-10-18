@@ -1,6 +1,8 @@
 // Pointer-analysis coverage for the indirect and partially structured stages.
 #include "AscendModel/Analysis/StagePartitioner.h"
 #include "AscendModel/RouteModel/Models/PartialStructuredMemoryModel.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredSimtLoadCostModel.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredSimtLoadModel.h"
 #include "CostModelTestUtils.h"
 #include "StageIRTestUtils.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -118,6 +120,200 @@ static const LogicalStage *payloadStage(const StagePartition &partition,
   return nullptr;
 }
 } // namespace
+
+namespace {
+static OwningOpRef<ModuleOp> factorLoadModule(IRTestContext &context,
+                                             int maskKind, bool knownStride,
+                                             bool wrapped = false) {
+  std::string text = R"mlir(module {
+  tt.func public @factor_load(%X: !tt.ptr<f32>, %Index: !tt.ptr<i32>, %N: i32, %Out: !tt.ptr<f32>) {
+    %pid = tt.get_program_id x : i32
+    %c256 = arith.constant 256 : i32
+    %c8 = arith.constant 8 : i32
+    %r = tt.make_range {start = 0 : i32, end = 4 : i32} : tensor<4xi32>
+    %c = tt.make_range {start = 0 : i32, end = 8 : i32} : tensor<8xi32>
+    %ip = tt.splat %Index : !tt.ptr<i32> -> tensor<4x!tt.ptr<i32>>
+    %iap = tt.addptr %ip, %r : tensor<4x!tt.ptr<i32>>, tensor<4xi32>
+    %idx = tt.load %iap : tensor<4x!tt.ptr<i32>>
+    %scale = tt.splat %c8 : i32 -> tensor<4xi32>
+    %scaled = arith.muli %idx, %scale : tensor<4xi32>
+    %row = tt.expand_dims %scaled {axis = 1 : i32} : tensor<4xi32> -> tensor<4x1xi32>
+    %rows = tt.broadcast %row : tensor<4x1xi32> -> tensor<4x8xi32>
+    %col = tt.expand_dims %c {axis = 0 : i32} : tensor<8xi32> -> tensor<1x8xi32>
+    %cols = tt.broadcast %col : tensor<1x8xi32> -> tensor<4x8xi32>
+    %offset = arith.addi %rows, %cols : tensor<4x8xi32>
+)mlir";
+  text += std::string("    %program_offset = arith.muli %pid, ") +
+          (knownStride ? "%c256" : "%N") + " : i32\n";
+  text += R"mlir(
+    %base = tt.addptr %X, %program_offset : !tt.ptr<f32>, i32
+    %splat = tt.splat %base : !tt.ptr<f32> -> tensor<4x8x!tt.ptr<f32>>
+    %ptr = tt.addptr %splat, %offset : tensor<4x8x!tt.ptr<f32>>, tensor<4x8xi32>
+)mlir";
+  if (maskKind) {
+    text += R"mlir(
+    %flat = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+    %eight = arith.constant dense<8> : tensor<32xi32>
+    %two = arith.constant dense<2> : tensor<32xi32>
+    %zero = arith.constant dense<0> : tensor<32xi32>
+    %flat_row = arith.divsi %flat, %eight : tensor<32xi32>
+)mlir";
+    if (maskKind == 1)
+      text += "    %predicate = arith.cmpi slt, %flat_row, %two : tensor<32xi32>\n";
+    else if (maskKind == 2)
+      text += "    %runtime = tt.splat %N : i32 -> tensor<32xi32>\n"
+              "    %predicate = arith.cmpi slt, %flat_row, %runtime : tensor<32xi32>\n";
+    else if (maskKind == 4)
+      text += "    %raw = arith.cmpi slt, %flat_row, %two : tensor<32xi32>\n"
+              "    %extended = arith.extsi %raw : tensor<32xi1> to tensor<32xi32>\n"
+              "    %predicate = arith.cmpi sgt, %extended, %zero : tensor<32xi32>\n";
+    else if (maskKind == 5)
+      text += "    %negative = arith.subi %flat_row, %two : tensor<32xi32>\n"
+              "    %extended = arith.extui %negative : tensor<32xi32> to tensor<32xi64>\n"
+              "    %zero64 = arith.constant dense<0> : tensor<32xi64>\n"
+              "    %predicate = arith.cmpi slt, %extended, %zero64 : tensor<32xi64>\n";
+    else
+      text += "    %mod = arith.remsi %flat_row, %two : tensor<32xi32>\n"
+              "    %predicate = arith.cmpi eq, %mod, %zero : tensor<32xi32>\n";
+    text += R"mlir(
+    %mask = tt.reshape %predicate : tensor<32xi1> -> tensor<4x8xi1>
+    %other = arith.constant dense<0.0> : tensor<4x8xf32>
+    %v = tt.load %ptr, %mask, %other : tensor<4x8x!tt.ptr<f32>>
+)mlir";
+  } else
+    text += "    %v = tt.load %ptr : tensor<4x8x!tt.ptr<f32>>\n";
+  if (wrapped) {
+    text += R"mlir(
+    %rscale = arith.muli %r, %scale : tensor<4xi32>
+    %orow = tt.expand_dims %rscale {axis = 1 : i32} : tensor<4xi32> -> tensor<4x1xi32>
+    %orows = tt.broadcast %orow : tensor<4x1xi32> -> tensor<4x8xi32>
+    %outshape = arith.addi %orows, %cols : tensor<4x8xi32>
+    %outbase = tt.addptr %Out, %program_offset : !tt.ptr<f32>, i32
+    %outsplat = tt.splat %outbase : !tt.ptr<f32> -> tensor<4x8x!tt.ptr<f32>>
+    %outptr = tt.addptr %outsplat, %outshape : tensor<4x8x!tt.ptr<f32>>, tensor<4x8xi32>
+    tt.store %outptr, %v : tensor<4x8x!tt.ptr<f32>>
+)mlir";
+    text.insert(text.find("    %pid"),
+        "    %zero_scalar = arith.constant 0 : i32\n"
+        "    %gate = arith.cmpi slt, %zero_scalar, %N : i32\n"
+        "    scf.if %gate {\n");
+    text += "    }\n";
+  }
+  text += "    tt.return\n  }\n}\n";
+  return context.parse(text);
+}
+} // namespace
+
+TEST(StageAddressPatternTest, FactorLoadProvesStaticRectangleAndProgramStride) {
+  for (int maskKind : {0, 1, 2, 3, 4, 5}) {
+    for (bool knownStride : {false, true}) {
+      IRTestContext context(true);
+      auto module = factorLoadModule(context, maskKind, knownStride);
+      ASSERT_TRUE(module);
+      auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                     StagePartitionerOptions{});
+      ASSERT_TRUE(bool(partition)) << llvm::toString(partition.takeError());
+      auto *payload = payloadStage(*partition, {4, 8});
+      ASSERT_NE(payload, nullptr);
+      auto profile = hardwareProfile();
+      profile.target = "Ascend950PR/dav-c310";
+      profile.partialStructuredMemoryModel = "ttir_static_simt_load_factor_20261017";
+      profile.baseSimtWarpCount = 2;
+      for (int64_t factor : {2, 4}) {
+        StageImplementation impl{StageMode::SIMT, factor, false};
+        auto price = PartialStructuredSimtLoadCostModel().cost(*payload, profile, impl);
+        if (knownStride && maskKind <= 1) {
+          ASSERT_TRUE(price.load);
+          EXPECT_TRUE(price.coversSuperblockGroup);
+          EXPECT_TRUE(price.replacesTensorMemory);
+          EXPECT_FALSE(price.includesAddressWork);
+          partial_memory::FactorLoadGeometry g{
+              {{{4, 8, true}, {8, 1, false}}, 32, 2, true}, factor, 256,
+              {0, 0}, {maskKind ? 2 : 4, 8}};
+          EXPECT_NEAR(*price.load, *partial_memory::predictFactorLoad(g), 1e-9);
+          auto stage = *payload;
+          stage.legalSimtFactors = {1, 2, 4};
+          auto table = evaluateOneStage(stage, profile);
+          ASSERT_TRUE(bool(table)) << llvm::toString(table.takeError());
+          for (const auto &cost : table->stages.front().implementations) {
+            if (cost.implementation.mode != impl.mode ||
+                cost.implementation.superblockFactor != factor ||
+                cost.implementation.localScope) continue;
+            EXPECT_DOUBLE_EQ(cost.resources.load, 0);
+            EXPECT_NEAR(cost.resources.indirectLoadGroup, *price.load, 1e-9);
+            EXPECT_EQ(cost.memoryPricingBoundary,
+                      "simt_matched_baseline_full_F_group_increment");
+            EXPECT_GE(cost.totalCycles, *price.load);
+            EXPECT_LT(cost.totalCycles, factor * *price.load);
+          }
+        } else {
+          EXPECT_FALSE(price.load); // No guessed bounds or allocation spacing.
+        }
+      }
+    }
+  }
+}
+
+TEST(StageAddressPatternTest, FactorLoadKeepsIndexOutputAndControlInSameStage) {
+  IRTestContext context(true);
+  auto module = factorLoadModule(context, 1, true, true);
+  ASSERT_TRUE(module);
+  auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                 StagePartitionerOptions{});
+  ASSERT_TRUE(bool(partition));
+  const LogicalStage *payload = nullptr;
+  for (const auto &stage : partition->stages)
+    if (stage.workload.addressPatterns.size() == 3) payload = &stage;
+  ASSERT_NE(payload, nullptr);
+  auto profile = hardwareProfile();
+  profile.target = "Ascend950PR/dav-c310";
+  profile.partialStructuredMemoryModel = "ttir_static_simt_load_factor_20261017";
+  profile.baseSimtWarpCount = 2;
+  for (int64_t factor : {2, 4}) {
+    auto price = PartialStructuredSimtLoadCostModel().cost(
+        *payload, profile, {StageMode::SIMT, factor, false});
+    ASSERT_TRUE(price.load);
+    ASSERT_TRUE(price.remainingWorkload);
+    const auto &remaining = *price.remainingWorkload;
+    EXPECT_DOUBLE_EQ(remaining.loadBytes, payload->workload.loadBytes - 128);
+    EXPECT_DOUBLE_EQ(remaining.storeBytes, payload->workload.storeBytes);
+    EXPECT_DOUBLE_EQ(remaining.conditionalBranches,
+                     payload->workload.conditionalBranches);
+    EXPECT_DOUBLE_EQ(remaining.scalarOperations,
+                     payload->workload.scalarOperations);
+    auto stage = *payload;
+    stage.legalSimtFactors = {1, 2, 4};
+    auto table = evaluateOneStage(stage, profile);
+    ASSERT_TRUE(bool(table));
+    auto auxiliaryStage = stage;
+    auxiliaryStage.workload = remaining;
+    auto auxiliaryProfile = profile;
+    auxiliaryProfile.partialStructuredMemoryModel.clear();
+    auto auxiliaryTable = evaluateOneStage(auxiliaryStage, auxiliaryProfile);
+    ASSERT_TRUE(bool(auxiliaryTable));
+    bool found = false;
+    for (const auto &cost : table->stages.front().implementations) {
+      if (cost.implementation.mode != StageMode::SIMT ||
+          cost.implementation.localScope ||
+          cost.implementation.superblockFactor != factor) continue;
+      found = true;
+      EXPECT_NEAR(cost.resources.indirectLoadGroup, *price.load, 1e-9);
+      EXPECT_GT(cost.resources.load, 0);
+      EXPECT_GT(cost.resources.store, 0);
+      bool auxiliaryFound = false;
+      for (const auto &aux : auxiliaryTable->stages.front().implementations) {
+        if (aux.implementation.mode != StageMode::SIMT ||
+            aux.implementation.localScope ||
+            aux.implementation.superblockFactor != factor) continue;
+        auxiliaryFound = true;
+        EXPECT_NEAR(cost.totalCycles,
+                    aux.totalCycles + *price.load * stage.iterationCount, 1e-9);
+      }
+      EXPECT_TRUE(auxiliaryFound);
+    }
+    EXPECT_TRUE(found);
+  }
+}
 
 TEST(StageAddressPatternTest,
      PartialFitOwnsOneMemoryPriceAndNativeAddressWork) {

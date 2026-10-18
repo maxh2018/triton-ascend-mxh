@@ -542,6 +542,8 @@ struct HardwareProfile {
   std::string simdIndirectStoreModel;
   /// Versioned short affine partial-memory fits from static TTIR geometry.
   /// SIMD prices a native fragment; SIMT a matched-baseline increment.
+  /// The factor-20261017 version adds full F2/F4 SIMT load group increments;
+  /// its static/no-runtime-sampling individual errors remain above 20%.
   std::string partialStructuredMemoryModel;
   /// Base warp count of one logical SIMT program.
   int64_t baseSimtWarpCount = 1;
