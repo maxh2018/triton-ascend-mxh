@@ -19,7 +19,8 @@ struct FactorLoadGeometry {
 // These are synthetic geometry, not runtime transactions or cache hit rates.
 Features extractFactorLoadFeatures(const FactorLoadGeometry &geometry);
 // Complete physical F-program A-B increment, in SYS_CNT ticks. Callers must
-// not apply F again. Returns nullopt outside the measured representative domain.
+// not apply F again. Returns nullopt outside the measured representative
+// domain.
 std::optional<double> predictFactorLoad(const FactorLoadGeometry &geometry);
 
 } // namespace mlir::ascend::partial_memory

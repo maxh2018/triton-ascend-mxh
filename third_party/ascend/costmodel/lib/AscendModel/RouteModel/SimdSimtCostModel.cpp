@@ -2124,15 +2124,21 @@ loadCandidateProfileUncached(llvm::StringRef pathRef,
   if (root->get("partial_structured_memory_model")) {
     hardware.partialStructuredMemoryModel =
         reader.string(*root, "partial_structured_memory_model", "profile");
-    if (hardware.partialStructuredMemoryModel != "ttir_q1_short_formula_20261014" &&
-        hardware.partialStructuredMemoryModel != "ttir_static_simt_load_factor_20261017")
+    if (hardware.partialStructuredMemoryModel !=
+            "ttir_q1_short_formula_20261014" &&
+        hardware.partialStructuredMemoryModel !=
+            "ttir_static_simt_load_factor_20261017")
       reader.setError("unsupported partial_structured_memory_model");
   }
   if (root->get("simt_indirect_load_model")) {
     hardware.simtIndirectLoadModel =
         reader.string(*root, "simt_indirect_load_model", "profile");
     if (hardware.simtIndirectLoadModel != "random_i32_six_term_20261007" &&
-        hardware.simtIndirectLoadModel != "random_dtype_six_term_20261008")
+        hardware.simtIndirectLoadModel != "random_dtype_six_term_20261008" &&
+        hardware.simtIndirectLoadModel !=
+            "unmasked_factor_candidate_20261017" &&
+        hardware.simtIndirectLoadModel != "prefix_mask_rank_factor_20261017" &&
+        hardware.simtIndirectLoadModel != "random_mask_rank_factor_20261017")
       reader.setError("unsupported simt_indirect_load_model");
   }
   if (root->get("simd_indirect_load_model")) {
@@ -2150,7 +2156,11 @@ loadCandidateProfileUncached(llvm::StringRef pathRef,
         hardware.simtIndirectStoreModel !=
             "random_store_no_fill_first_20261008" &&
         hardware.simtIndirectStoreModel !=
-            "random_store_no_fill_reuse_20261008")
+            "random_store_no_fill_reuse_20261008" &&
+        hardware.simtIndirectStoreModel !=
+            "unmasked_factor_candidate_20261017" &&
+        hardware.simtIndirectStoreModel != "prefix_mask_rank_factor_20261017" &&
+        hardware.simtIndirectStoreModel != "random_mask_rank_factor_20261017")
       reader.setError("unsupported simt_indirect_store_model");
   }
   if (root->get("simd_indirect_store_model")) {

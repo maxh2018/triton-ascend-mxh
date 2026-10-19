@@ -43,6 +43,7 @@ add_triton_ut(
   SRCS
     SimdSimtCostModelTest.cpp
     IndirectLoadCostModelTest.cpp
+    IndirectMaskCostModelTest.cpp
     IndirectStoreCostModelTest.cpp
     StageAddressPatternTest.cpp
     PartialStructuredMemoryModelTest.cpp

@@ -17,8 +17,10 @@ PartialStructuredMemoryCostModel::cost(const LogicalStage &stage,
   StageMemoryCost result;
   if (impl.mode == StageMode::SIMT && impl.superblockFactor > 1)
     return PartialStructuredSimtLoadCostModel().cost(stage, profile, impl);
-  if ((profile.partialStructuredMemoryModel != "ttir_q1_short_formula_20261014" &&
-       profile.partialStructuredMemoryModel != "ttir_static_simt_load_factor_20261017") ||
+  if ((profile.partialStructuredMemoryModel !=
+           "ttir_q1_short_formula_20261014" &&
+       profile.partialStructuredMemoryModel !=
+           "ttir_static_simt_load_factor_20261017") ||
       profile.target != "Ascend950PR/dav-c310" || impl.superblockFactor != 1 ||
       impl.localScope || impl.aivSubblocks != 1 || stage.features.hasLoop ||
       stage.features.hasAtomicMemory || stage.features.activeLaneRatio != 1 ||

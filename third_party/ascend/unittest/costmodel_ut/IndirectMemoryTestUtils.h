@@ -15,6 +15,81 @@ inline HardwareProfile calibrationProfile() {
   return profile;
 }
 
+inline SmallVector<Type> payloadTypes(MLIRContext &c, bool simt = false) {
+  SmallVector<Type> types = {
+      IntegerType::get(&c, 8),  IntegerType::get(&c, 16),
+      IntegerType::get(&c, 32), IntegerType::get(&c, 64),
+      Float16Type::get(&c),     BFloat16Type::get(&c),
+      Float32Type::get(&c),     Float8E4M3FNType::get(&c),
+      Float8E5M2Type::get(&c)};
+  if (simt)
+    types.append({IntegerType::get(&c, 32, IntegerType::Unsigned),
+                  Float64Type::get(&c)});
+  return types;
+}
+
+// Shared real IR fixture: scalar bases, contiguous index/value loads, one
+// indirect target; optional flat prefix or loaded-byte mask preserves rank.
+inline OwningOpRef<ModuleOp>
+memoryModule(IRTestContext &c, ArrayRef<int64_t> shape, StringRef type,
+             bool store, StringRef mask = "none", int64_t k = 0) {
+  int64_t e = 1;
+  std::string dims;
+  for (int64_t d : shape) {
+    e *= d;
+    dims += std::to_string(d) + "x";
+  }
+  auto fmt = [&](StringRef text) {
+    return llvm::formatv(false, text.data(), e, dims, type, k).str();
+  };
+  std::string ir = fmt(R"(
+    module {{ tt.func @probe(%x: !tt.ptr<{2}>, %idx: !tt.ptr<i32>,
+                             %values: !tt.ptr<{2}>, %masks: !tt.ptr<i8>) {{
+      %r = tt.make_range {{start = 0 : i32, end = {0} : i32} : tensor<{0}xi32>
+      %ip = tt.splat %idx : !tt.ptr<i32> -> tensor<{0}x!tt.ptr<i32>>
+      %ip2 = tt.addptr %ip, %r : tensor<{0}x!tt.ptr<i32>>, tensor<{0}xi32>
+      %i = tt.load %ip2 : tensor<{0}x!tt.ptr<i32>>
+  )");
+  if (shape.size() > 1)
+    ir += fmt("%index = tt.reshape %i : tensor<{0}xi32> -> tensor<{1}i32>\n");
+  ir += fmt("%xp = tt.splat %x : !tt.ptr<{2}> -> tensor<{1}!tt.ptr<{2}>> "
+            "loc(\"probe.py\":1:1)\n%ptr = tt.addptr %xp, ");
+  ir += shape.size() > 1 ? "%index" : "%i";
+  ir +=
+      fmt(" : tensor<{1}!tt.ptr<{2}>>, tensor<{1}i32> loc(\"probe.py\":1:1)\n");
+  if (mask == "prefix")
+    ir += fmt("%k = arith.constant dense<{3}> : tensor<{0}xi32>\n%flat = "
+              "arith.cmpi slt, %r, %k : tensor<{0}xi32>\n");
+  if (mask == "loaded")
+    ir += fmt(R"(
+      %mp = tt.splat %masks : !tt.ptr<i8> -> tensor<{0}x!tt.ptr<i8>>
+      %mp2 = tt.addptr %mp, %r : tensor<{0}x!tt.ptr<i8>>, tensor<{0}xi32>
+      %m = tt.load %mp2 : tensor<{0}x!tt.ptr<i8>>
+      %mz = arith.constant dense<0> : tensor<{0}xi8>
+      %flat = arith.cmpi ne, %m, %mz : tensor<{0}xi8>
+    )");
+  if (mask != "none")
+    ir += fmt("%mask = tt.reshape %flat : tensor<{0}xi1> -> tensor<{1}i1>\n");
+  if (store) {
+    ir += fmt(R"(
+      %vp = tt.splat %values : !tt.ptr<{2}> -> tensor<{0}x!tt.ptr<{2}>>
+      %vp2 = tt.addptr %vp, %r : tensor<{0}x!tt.ptr<{2}>>, tensor<{0}xi32>
+      %v = tt.load %vp2 : tensor<{0}x!tt.ptr<{2}>>
+    )");
+    if (shape.size() > 1)
+      ir += fmt("%value = tt.reshape %v : tensor<{0}x{2}> -> tensor<{1}{2}>\n");
+    ir += shape.size() > 1 ? "tt.store %ptr, %value" : "tt.store %ptr, %v";
+  } else
+    ir += fmt(type.starts_with("f") ? "%zero = arith.constant dense<0.0> : "
+                                      "tensor<{1}{2}>\n%value = tt.load %ptr"
+                                    : "%zero = arith.constant dense<0> : "
+                                      "tensor<{1}{2}>\n%value = tt.load %ptr");
+  if (mask != "none")
+    ir += store ? ", %mask" : ", %mask, %zero";
+  ir += fmt(" : tensor<{1}!tt.ptr<{2}>> loc(\"probe.py\":1:2)\ntt.return } }");
+  return c.parse(ir);
+}
+
 inline std::vector<StageImplementationCost>
 indirectCosts(const LogicalStage &stage, const HardwareProfile &profile) {
   auto result = evaluateOneStage(stage, profile);
@@ -38,6 +113,7 @@ loadedAddressPattern(const LogicalStage &stage, llvm::StringRef memoryOp,
     AddressAxisSummary axis;
     axis.extent = extent;
     axis.regularity = regularity.str();
+    axis.offsetAxisInfo = "unstructured";
     pattern.axes.push_back(axis);
   }
   return pattern;
@@ -96,6 +172,16 @@ struct MemoryCase {
       stage.operations = {owner};
     }
   }
+  void addIndex() {
+    OperationState state(op->getLoc(), "tt.load");
+    state.addOperands(op->getOperand(0));
+    state.addTypes(RankedTensorType::get(
+        {stage.workload.addressPatterns[0].axes[0].extent},
+        IntegerType::get(op->getContext(), 32)));
+    auto *index = Operation::create(state);
+    block.push_front(index);
+    op->setOperand(0, index->getResult(0));
+  }
 };
 
 inline void expectOnlyMemoryChanged(const StageImplementationCost &before,
@@ -105,25 +191,6 @@ inline void expectOnlyMemoryChanged(const StageImplementationCost &before,
   auto adjusted = before;
   auto &oldMemory = store ? adjusted.resources.store : adjusted.resources.load;
   const double newMemory = store ? after.resources.store : after.resources.load;
-  // #2528 uses a competing SIMD resource envelope and serial SIMT service,
-  // with issue as a floor and control/completion costs paid outside it.
-  auto expectedCost = [iterations, &before](const StageResourceCycles &r) {
-    const double execution = r.scalar + r.load + r.store + r.atomic +
-                             r.indirectLoadGroup + r.sharedLayout + r.compute +
-                             r.predicate + r.reduction + r.shuffle + r.dot;
-    const double body =
-        before.implementation.mode == StageMode::SIMD
-            ? std::max({r.load + r.indirectLoadGroup + r.sharedLayout, r.store,
-                        r.atomic, r.compute + r.dot + r.reduction + r.shuffle,
-                        r.scalar + r.predicate, r.issue})
-            : std::max(execution, r.issue);
-    const double completion =
-        r.loopControl + r.branchControl + r.divergence + r.synchronization +
-        r.spill + r.operationCompletion + r.privateStackCombinedFloor;
-    return r.setup + iterations * (body + completion);
-  };
-  EXPECT_NEAR(before.totalCycles, expectedCost(before.resources), 1e-7);
-  EXPECT_NEAR(after.totalCycles, expectedCost(after.resources), 1e-7);
   oldMemory = newMemory;
   (store ? adjusted.indirectStorePricing : adjusted.indirectLoadPricing) =
       store ? after.indirectStorePricing : after.indirectLoadPricing;

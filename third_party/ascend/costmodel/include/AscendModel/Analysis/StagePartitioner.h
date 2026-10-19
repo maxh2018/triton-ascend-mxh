@@ -67,7 +67,7 @@ public:
   /// Recompute auxiliary work while excluding one fitted memory operation.
   /// Address, predicate, control and all other memory operations remain owned.
   llvm::Error analyzeExcludingMemory(StagePartition &partition,
-                                    Operation *memory) const;
+                                     Operation *memory) const;
 };
 
 /// Derives legal SIMD/SIMT implementations from structural Stage facts.

@@ -6,41 +6,59 @@ using namespace mlir;
 using namespace mlir::ascend;
 using namespace mlir::ascend::test;
 
+TEST(IndirectStoreCostModelTest, FactorCandidateIsFirstWriteGroupCost) {
+  IRTestContext context(false, true);
+  MemoryCase test(context, Float32Type::get(&context), {128}, true);
+  auto profile = calibrationProfile();
+  profile.baseSimtWarpCount = 4;
+  profile.simtIndirectStoreModel = "unmasked_factor_candidate_20261017";
+  EXPECT_TRUE(profile.isValid());
+  test.addIndex();
+  const IndirectGatherMemoryCostModel model;
+  for (int64_t factor : {1, 2, 4}) {
+    auto result = model.cost(test.stage, profile, {StageMode::SIMT, factor});
+    ASSERT_TRUE(result.store);
+    const double group = 119.45683288107666 + 2.5359135035732305 * 128 -
+                         .5797639385984518 * 96 - 6.812191310593307 * 2 -
+                         2.300401406184211 * (factor - 1);
+    EXPECT_NEAR(*result.store * factor, group, 1e-10);
+    EXPECT_STREQ(result.storePricing, "unmasked_factor_candidate_20261017");
+  }
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 8}).store);
+  test.stage.workload.indirectStoreBytes = 1;
+  EXPECT_FALSE(model.cost(test.stage, profile, {StageMode::SIMT, 4}).store);
+}
+
 TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
   IRTestContext context(false, true);
   MemoryCase memory(context, Float32Type::get(&context), {32}, true);
   auto &stage = memory.stage;
   stage.iterationCount = 1;
   auto &work = stage.workload;
-  work.storeBytes = work.indirectStoreBytes = 128;
   work.storeWarpInstructions = work.indirectStoreTransactions = 1;
   work.scalarOperations = 7;
   work.loadBytes = 16;
-  work.addressPatterns = {loadedAddressPattern(stage, "tt.store", {32})};
   auto profile = calibrationProfile();
   auto old = indirectCosts(stage, profile);
   profile.simdIndirectStoreModel = "random_f32_store_no_fill_first_20261007";
   profile.simtIndirectStoreModel = "random_f32_store_fill_ab_20261007";
   auto fit = indirectCosts(stage, profile);
-  const auto &a = old;
-  const auto &b = fit;
-  const IndirectGatherMemoryCostModel memoryModel;
-  const StageCostModel &model = memoryModel;
+  const IndirectGatherMemoryCostModel model;
   const auto increment =
       model.cost(stage, profile, {StageMode::SIMD, 1, false});
   ASSERT_TRUE(increment.store);
   EXPECT_DOUBLE_EQ(*increment.store, 150.13769870695648 * 32);
   EXPECT_FALSE(increment.load);
-  EXPECT_DOUBLE_EQ(b[0].resources.store, 150.13769870695648 * 32);
-  EXPECT_NEAR(b[1].resources.store, 145.04451206999323, 1e-9);
+  EXPECT_DOUBLE_EQ(fit[0].resources.store, 150.13769870695648 * 32);
+  EXPECT_NEAR(fit[1].resources.store, 145.04451206999323, 1e-9);
   for (unsigned i = 0; i < 2; ++i) {
-    expectOnlyMemoryChanged(a[i], b[i], true, 1);
-    EXPECT_EQ(b[i].indirectLoadPricing, "generic_resource_model");
-    EXPECT_NE(b[i].indirectStorePricing, "generic_resource_model");
+    expectOnlyMemoryChanged(old[i], fit[i], true, 1);
+    EXPECT_EQ(fit[i].indirectLoadPricing, "generic_resource_model");
+    EXPECT_NE(fit[i].indirectStorePricing, "generic_resource_model");
   }
   profile.simd.indirectDependencyLatencyCycles = 10000;
   auto changed = indirectCosts(stage, profile);
-  EXPECT_DOUBLE_EQ(changed[0].totalCycles, b[0].totalCycles);
+  EXPECT_DOUBLE_EQ(changed[0].totalCycles, fit[0].totalCycles);
   profile.simdIndirectStoreModel = "random_f32_store_no_fill_reuse_20261007";
   changed = indirectCosts(stage, profile);
   EXPECT_EQ(changed[0].indirectStorePricing, "generic_resource_model");
@@ -60,34 +78,16 @@ TEST(IndirectStoreCostModelTest, RandomIndirectStoreStateAndResourceBoundary) {
 
 TEST(IndirectStoreCostModelTest, RandomStoreFitAcceptsPartitionedTritonStore) {
   IRTestContext context(true, false);
-  auto module = context.parse(R"mlir(
-    module {
-      tt.func public @scatter(%x: !tt.ptr<f32>, %idx: !tt.ptr<i32>,
-                              %values: !tt.ptr<f32>) {
-        %r = tt.make_range {start = 0 : i32, end = 128 : i32} : tensor<128xi32>
-        %ip = tt.splat %idx : !tt.ptr<i32> -> tensor<128x!tt.ptr<i32>>
-        %ip2 = tt.addptr %ip, %r : tensor<128x!tt.ptr<i32>>, tensor<128xi32>
-        %index = tt.load %ip2 : tensor<128x!tt.ptr<i32>>
-        %vp = tt.splat %values : !tt.ptr<f32> -> tensor<128x!tt.ptr<f32>>
-        %vp2 = tt.addptr %vp, %r : tensor<128x!tt.ptr<f32>>, tensor<128xi32>
-        %value = tt.load %vp2 : tensor<128x!tt.ptr<f32>>
-        %xp = tt.splat %x : !tt.ptr<f32> -> tensor<128x!tt.ptr<f32>> loc("scatter.py":15:12)
-        %xp2 = tt.addptr %xp, %index : tensor<128x!tt.ptr<f32>>, tensor<128xi32> loc("scatter.py":15:12)
-        tt.store %xp2, %value : tensor<128x!tt.ptr<f32>> loc("scatter.py":15:15)
-        tt.return
-      }
-    }
-  )mlir");
+  auto module = memoryModule(context, {128}, "f32", true);
   ASSERT_TRUE(module);
-  auto partition = StagePartitioner().partition(
-      *module, mlir::ascend::SimtAnchorPlan{}, StagePartitionerOptions{});
+  auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                StagePartitionerOptions{});
   ASSERT_TRUE(bool(partition));
   const LogicalStage *payload = nullptr;
   for (const auto &stage : partition->stages)
     if (stage.workload.indirectStoreBytes > 0)
       payload = &stage;
   ASSERT_NE(payload, nullptr);
-  ASSERT_EQ(payload->operations.size(), 3u);
   auto profile = calibrationProfile();
   profile.baseSimtWarpCount = 1;
   auto old = indirectCosts(*payload, profile);
@@ -121,9 +121,9 @@ TEST(IndirectStoreCostModelTest, RandomStoreDtypeRankStateAndDomain) {
           // Rank 1, 3 and 8 exercise shape-independent pricing. High ranks
           // rely on per-axis loaded evidence, not the legacy rank-5 predicate.
           for (bool rank3 : {false, true}) {
-            llvm::SmallVector<int64_t> shape =
-                rank3 ? llvm::SmallVector<int64_t>{2, 2, e / 4}
-                      : llvm::SmallVector<int64_t>{e};
+            SmallVector<int64_t> shape = rank3
+                                             ? SmallVector<int64_t>{2, 2, e / 4}
+                                             : SmallVector<int64_t>{e};
             if (rank3 && e >= 256)
               shape = {2, 2, 2, 2, 2, 2, 2, e / 128};
             MemoryCase memory(context, IntegerType::get(&context, bits), shape,

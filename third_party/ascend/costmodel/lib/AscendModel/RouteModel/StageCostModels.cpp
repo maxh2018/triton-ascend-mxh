@@ -1221,22 +1221,9 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
     else
       resources.load += fitted.load.value_or(0.0);
     resources.store += fitted.store.value_or(0.0);
-  } else if (stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory) {
-    // Retain #2489's row-wise fallback; these rows are not scalar gathers.
-    if (simd) {
-      resources.load +=
-          work.partialContinuousLoadRows * profile.loadOperationSetupCycles +
-          work.loadBytes / profile.loadBytesPerCycle;
-      resources.store +=
-          work.partialContinuousStoreRows * profile.storeOperationSetupCycles +
-          work.storeBytes / profile.storeBytesPerCycle;
-    } else {
-      resources.load +=
-          work.loadWarpInstructions / profile.loadWarpInstructionsPerCycle;
-      resources.store +=
-          work.storeWarpInstructions / profile.storeWarpInstructionsPerCycle;
-    }
   } else if (stage.features.hasIndirectMemory || fitted.load || fitted.store ||
+             stage.costModelKind ==
+                 StageCostModelKind::PartialContinuousTileMemory ||
              work.indirectLoadTransactions > 0.0 ||
              work.indirectStoreTransactions > 0.0) {
     const double loads = work.loadWarpInstructions;
@@ -2415,6 +2402,7 @@ static double applySuperBlock(const LogicalStage &stage,
        stage.costModelKind == StageCostModelKind::ContinuousShortLoad ||
        stage.costModelKind == StageCostModelKind::CachePolicyStore ||
        stage.costModelKind == StageCostModelKind::IndirectScalarMemory ||
+       stage.costModelKind == StageCostModelKind::PartialContinuousTileMemory ||
        stage.costModelKind == StageCostModelKind::IndirectGatherMemory) &&
       (resources.continuousLoadGroup > 0.0 ||
        resources.continuousStoreGroup > 0.0 ||
@@ -2451,10 +2439,6 @@ static double estimateStageBase(const LogicalStage &stage,
                                                                     : 1.0;
     return r.setup + dispatchCount * std::max(r.scalar, r.issue);
   }
-  case StageCostModelKind::PartialContinuousTileMemory:
-    // Slices expanded along unstructured axes are billed serially. Structured
-    // axes may have nonunit strides; they do not imply contiguous addresses.
-    return serial;
   case StageCostModelKind::ContinuousTileMemory:
   case StageCostModelKind::ContinuousTileStore:
   case StageCostModelKind::ContinuousShortLoad:
@@ -3456,7 +3440,10 @@ bool HardwareProfile::isValid() const {
          !profileVersion.empty() && !target.empty() &&
          (simtIndirectLoadModel.empty() ||
           ((simtIndirectLoadModel == "random_i32_six_term_20261007" ||
-            simtIndirectLoadModel == "random_dtype_six_term_20261008") &&
+            simtIndirectLoadModel == "random_dtype_six_term_20261008" ||
+            simtIndirectLoadModel == "unmasked_factor_candidate_20261017" ||
+            simtIndirectLoadModel == "prefix_mask_rank_factor_20261017" ||
+            simtIndirectLoadModel == "random_mask_rank_factor_20261017") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectLoadModel.empty() ||
           ((simdIndirectLoadModel == "random_f32_matched_ab_20261007" ||
@@ -3465,6 +3452,9 @@ bool HardwareProfile::isValid() const {
          (simtIndirectStoreModel.empty() ||
           ((simtIndirectStoreModel == "random_f32_store_fill_ab_20261007" ||
             simtIndirectStoreModel == "random_store_no_fill_first_20261008" ||
+            simtIndirectStoreModel == "unmasked_factor_candidate_20261017" ||
+            simtIndirectStoreModel == "prefix_mask_rank_factor_20261017" ||
+            simtIndirectStoreModel == "random_mask_rank_factor_20261017" ||
             simtIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectStoreModel.empty() ||
@@ -3666,8 +3656,8 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       StageMemoryCost fitted = PartialStructuredMemoryCostModel().cost(
           executionStage, profile, implementation);
       if (!fitted.load && !fitted.store)
-        fitted = IndirectGatherMemoryCostModel().cost(
-            executionStage, profile, implementation);
+        fitted = IndirectGatherMemoryCostModel().cost(executionStage, profile,
+                                                      implementation);
       std::optional<StageResourceCycles> resources = mapWorkload(
           executionStage, modeProfile, implementation.mode,
           implementation.superblockFactor,
@@ -3679,11 +3669,12 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       cost.implementation = implementation;
       cost.resources = *resources;
       if (fitted.replacesTensorMemory)
-        cost.memoryPricingBoundary = fitted.coversSuperblockGroup
-            ? "simt_matched_baseline_full_F_group_increment"
+        cost.memoryPricingBoundary =
+            fitted.coversSuperblockGroup
+                ? "simt_matched_baseline_full_F_group_increment"
             : fitted.includesAddressWork
-                  ? "simd_native_fragment_with_completion_barrier"
-                  : "simt_matched_baseline_increment";
+                ? "simd_native_fragment_with_completion_barrier"
+                : "simt_matched_baseline_increment";
       if (fitted.load && !fitted.pricing.empty())
         cost.indirectLoadPricing = fitted.pricing;
       else if (fitted.load)
@@ -3696,16 +3687,20 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
         cost.indirectStorePricing = implementation.mode == StageMode::SIMD
                                         ? profile.simdIndirectStoreModel
                                         : profile.simtIndirectStoreModel;
+      if (fitted.loadPricing)
+        cost.indirectLoadPricing = fitted.loadPricing;
+      if (fitted.storePricing)
+        cost.indirectStorePricing = fitted.storePricing;
       if (implementation.aivSubblocks > 1)
         cost.perAivWorkload = executionStage.workload;
       if (fitted.replacesTensorMemory)
         cost.formulaEvidence = fitted.pricing;
       else if (resources->recurrenceGroupCriticalPath > 0.0 ||
-          resources->recurrenceGroupStartup > 0.0 ||
-          resources->multiResultReductionGroupBody > 0.0 ||
-          resources->rowwiseReductionGroupBody > 0.0 ||
-          resources->continuousLoadGroup > 0.0 ||
-          resources->continuousStoreGroup > 0.0)
+               resources->recurrenceGroupStartup > 0.0 ||
+               resources->multiResultReductionGroupBody > 0.0 ||
+               resources->rowwiseReductionGroupBody > 0.0 ||
+               resources->continuousLoadGroup > 0.0 ||
+               resources->continuousStoreGroup > 0.0)
         cost.formulaEvidence = "factor_specific_measured_group_curve";
       else if (resources->storeLayoutService > 0.0)
         cost.formulaEvidence =
@@ -3733,9 +3728,10 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       else
         cost.formulaEvidence = "analytical_resource_formula";
       if (fitted.load || fitted.store)
-        cost.formulaEvidence = fitted.coversSuperblockGroup
-            ? "matched_ab_partial_simt_load_full_group_20261017"
-            : "matched_ab_indirect_memory_increment";
+        cost.formulaEvidence =
+            fitted.coversSuperblockGroup
+                ? "matched_ab_partial_simt_load_full_group_20261017"
+                : "matched_ab_indirect_memory_increment";
       if (resources->indirectMemoryAnalyticalFallback &&
           cost.formulaEvidence.find(
               "analytical_indirect_memory_resource_fallback") ==
@@ -3854,12 +3850,11 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
       }
       if (resources->rowwiseReductionGroupBody > 0.0)
         cost.formulaEvidence += "+bounded_ttir_row_extent_surface";
-      cost.totalCycles =
-          applySuperBlock(executionStage, *resources, implementation, profile,
-                          estimateStage(executionStage, profile,
-                                        implementation.mode, *resources),
-                          fitted.coversSuperblockGroup
-                              ? fitted.load.value_or(0.0) : 0.0);
+      cost.totalCycles = applySuperBlock(
+          executionStage, *resources, implementation, profile,
+          estimateStage(executionStage, profile, implementation.mode,
+                        *resources),
+          fitted.coversSuperblockGroup ? fitted.load.value_or(0.0) : 0.0);
       if (implementation.aivSubblocks > 1) {
         cost.cvPartitionIdealTotalCycles = cost.totalCycles;
         cost.cvPartitionPayloadEfficiency =

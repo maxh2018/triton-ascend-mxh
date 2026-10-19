@@ -21,6 +21,8 @@ struct StageMemoryCost {
   /// Operations outside the fitted fragment or increment, priced normally.
   std::optional<StageWorkload> remainingWorkload;
   std::string pricing;
+  const char *loadPricing = nullptr;
+  const char *storePricing = nullptr;
 };
 
 /// Extension point for newly calibrated Stage resources. Existing workload,

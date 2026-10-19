@@ -1624,24 +1624,17 @@
       "description": "Cost parameters used by stage formulas. This object contains no online route-admission policy.",
       "required": [
         "description",
-        "source"
+        "source",
+        "tiny_dot_flops_max"
       ],
       "properties": {
         "description": {
           "type": "string",
           "description": "Human-readable role and evidence boundary of the complete calibration object."
         },
-        "program_issue_scale": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Multiplier applied after route-specific payload aggregation; SIMD uses its compute-versus-memory roofline maximum, while SIMT serially sums compute, dot, shuffle, memory, and predicate cycles. Setup cost is not multiplied."
-        },
         "source": {
           "type": "string",
           "description": "Workloads, measurements, and rollout boundary from which the route-specific calibration was derived. It is loaded into profile metadata but currently does not affect scoring or reports."
-        },
-        "simd_structural_penalty_ratio": {
-          "$ref": "#/definitions/simd_structural_penalty"
         },
         "tiny_dot_flops_max": {
           "type": [
@@ -1652,20 +1645,7 @@
           "description": "Tiny-dot formula-domain threshold consumed by the current Stage partitioner; null disables the structural threshold in unsupported profiles."
         }
       },
-      "additionalProperties": false,
-      "anyOf": [
-        {
-          "required": [
-            "tiny_dot_flops_max"
-          ]
-        },
-        {
-          "required": [
-            "program_issue_scale",
-            "simd_structural_penalty_ratio"
-          ]
-        }
-      ]
+      "additionalProperties": false
     },
     "simd_memory": {
       "type": "object",
@@ -2221,104 +2201,6 @@
         "vector_measurement": {
           "type": "string",
           "minLength": 1
-        }
-      },
-      "additionalProperties": false
-    },
-    "simd_structural_penalty": {
-      "type": "object",
-      "description": "Parameters for the additive SIMD-only structural residual ratio. The summed ratio multiplies A_SIMD and is added to A_SIMD; it never references A_SIMT.",
-      "required": [
-        "description",
-        "irregular_per_density",
-        "irregular_cap",
-        "tiny_dot_irregular_per_density",
-        "tiny_dot_irregular_cap",
-        "per_mask_rank",
-        "mask_cap",
-        "per_weighted_reduction",
-        "reduction_cap",
-        "per_static_loop_trip",
-        "loop_cap",
-        "control_flow",
-        "rank1_indirect_vector_reduction",
-        "tiny_dot",
-        "tiny_dot_flops_max"
-      ],
-      "properties": {
-        "description": {
-          "type": "string",
-          "description": "Human-readable meaning of the all-SIMD structural residual model."
-        },
-        "irregular_per_density": {
-          "type": "number",
-          "minimum": 0,
-          "description": "All-SIMD penalty ratio per unit of the current rank-based pointer irregularity proxy outside the tiny-dot special case."
-        },
-        "irregular_cap": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Maximum penalty ratio contributed by the rank-based pointer irregularity proxy outside the tiny-dot special case."
-        },
-        "tiny_dot_irregular_per_density": {
-          "type": "number",
-          "minimum": 0,
-          "description": "All-SIMD penalty ratio per unit of the rank-based pointer irregularity proxy for tiny-dot workloads."
-        },
-        "tiny_dot_irregular_cap": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Maximum penalty ratio contributed by the rank-based pointer irregularity proxy for tiny-dot workloads."
-        },
-        "per_mask_rank": {
-          "type": "number",
-          "minimum": 0,
-          "description": "All-SIMD mask-materialization penalty ratio added per unit of mask_rank_sum."
-        },
-        "mask_cap": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Maximum accumulated mask-materialization penalty ratio."
-        },
-        "per_weighted_reduction": {
-          "type": "number",
-          "minimum": 0,
-          "description": "All-SIMD reduction-lowering penalty ratio per loop-execution-weighted tt.reduce."
-        },
-        "reduction_cap": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Maximum accumulated reduction-lowering penalty ratio."
-        },
-        "per_static_loop_trip": {
-          "type": "number",
-          "minimum": 0,
-          "description": "All-SIMD loop-control penalty ratio per statically known loop trip."
-        },
-        "loop_cap": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Maximum accumulated static-loop-control penalty ratio."
-        },
-        "control_flow": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Fixed all-SIMD structural penalty ratio when control flow is present."
-        },
-        "rank1_indirect_vector_reduction": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Fixed all-SIMD penalty ratio for the rank-1 indirect vector-reduction pattern."
-        },
-        "tiny_dot": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Maximum tiny-dot startup penalty ratio, multiplied by the computed underfill fraction."
-        },
-        "tiny_dot_flops_max": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "FLOP count at which tiny-dot underfill and its startup penalty reach zero."
         }
       },
       "additionalProperties": false
@@ -4317,10 +4199,13 @@
     "simt_indirect_store_model": {
       "enum": [
         "random_f32_store_fill_ab_20261007",
+        "unmasked_factor_candidate_20261017",
+        "prefix_mask_rank_factor_20261017",
+        "random_mask_rank_factor_20261017",
         "random_store_no_fill_first_20261008",
         "random_store_no_fill_reuse_20261008"
       ],
-      "description": "Optional Ascend950PR random SIMT store A/B increment in SYS_CNT cycles. The 20261008 models use no target fill, grouped storage widths and ranks 1-8; reuse requires explicit workload evidence. The 20261007 F32 target-fill model remains reproducible. Unsupported workloads use the generic resource model."
+      "description": "Optional Ascend950PR SIMT store increment in SYS_CNT cycles. The mask_rank_factor_20261017 selectors add measured rank1-5, W1/4, q1/2/4, F1/2/4 mask geometries. prefix_mask requires a statically proven constant prefix. random_mask additionally opts into the original shuffled byte-mask prior (W1 density 1/2, W4 density 3/4), not arbitrary runtime masks. q<1 uses upstream resource curves. The experimental unmasked 20261017 candidate covers measured rank1 INT32-loaded addresses, representative payloads, W=1/4/16 and F=1/2/4, with unresolved outliers and first-write state only. Its full-group fit is divided by F before existing superblock accounting. Unsupported candidate inputs retain the 20261008 first-write F1 fit or upstream resource curves. The 20261008 reuse model requires explicit evidence; the 20261007 F32 target-fill model remains reproducible."
     },
     "simd_indirect_store_model": {
       "enum": [
@@ -4334,9 +4219,12 @@
     "simt_indirect_load_model": {
       "enum": [
         "random_i32_six_term_20261007",
+        "unmasked_factor_candidate_20261017",
+        "prefix_mask_rank_factor_20261017",
+        "random_mask_rank_factor_20261017",
         "random_dtype_six_term_20261008"
       ],
-      "description": "Optional Ascend950PR/dav-c310 random-address matched-ALU SIMT load fit in SYS_CNT cycles. The 20261008 model shares coefficients by 1/2/4/8-byte storage width, ranks 1-5, W=1-64, q=1/2/4, H<=2, and admits address helpers alongside one target load. The 20261007 INT32 model is explicit historical compatibility only. Unsupported workloads use the generic resource model; does not change SIMD."
+      "description": "Optional Ascend950PR/dav-c310 SIMT load fit in SYS_CNT cycles. The mask_rank_factor_20261017 selectors add measured rank1-5, W1/4, q1/2/4, F1/2/4 mask geometries. prefix_mask requires a statically proven constant prefix. random_mask additionally opts into the original shuffled byte-mask prior (W1 density 1/2, W4 density 3/4), not arbitrary runtime masks. q<1 uses upstream resource curves. The experimental unmasked 20261017 candidate measures a complete one-AIV F-program group against an index-passthrough baseline, including address/layout differences; it is not isolated LDG latency. Rank1 INT32-loaded addresses, representative payloads and measured W=1/4/16,F=1/2/4 geometries only; small-E/W16/F4 outliers remain. The group fit is divided by F before existing superblock accounting. Other inputs retain the 20261008 width-based F1 fit or upstream resource curves. SIMD is unchanged."
     },
     "simd_indirect_load_model": {
       "enum": [
