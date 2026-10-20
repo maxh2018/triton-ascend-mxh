@@ -20,6 +20,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("list", "pytest", "matrix", "case", "all"))
     parser.add_argument("--case", help="exact matrix case name; required for suite=case")
+    parser.add_argument("--manifest", type=Path, default=GENERAL / "generalization_matrix.json",
+                        help="matrix case list; use a separate manifest for custom cases")
     devices = parser.add_mutually_exclusive_group()
     devices.add_argument("--device", help="ASCEND_RT_VISIBLE_DEVICES")
     devices.add_argument("--devices", help="matrix device pool, e.g. 0,1,2,3; one case per device")
@@ -43,9 +45,9 @@ def main() -> None:
     if args.suite != "case" and args.case:
         parser.error("--case is only supported with suite=case")
     if args.suite == "list":
-        manifest = json.loads((GENERAL / "generalization_matrix.json").read_text(encoding="utf-8"))
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         print(f"pytest_ut: {len(list(PYTEST.rglob('test_*.py')))} test files (parameterized case count needs pytest collection)")
-        print(f"PR #2528: {len(manifest['cases'])} cases")
+        print(f"Matrix: {len(manifest['cases'])} cases ({args.manifest})")
         for case in manifest["cases"]:
             print(f"{case['name']}\t{case['family']}\t{case['driver']}")
         return
@@ -66,6 +68,7 @@ def main() -> None:
     if args.suite in ("matrix", "case", "all"):
         evidence = output / "matrix"
         common = ["--output-root", str(evidence),
+                  "--manifest", str(args.manifest.resolve()),
                   "--jobs", str(args.jobs), "--retries", str(args.retries),
                   "--triton-root", str(args.triton_root.resolve()),
                   "--npuir-root", str(args.npuir_root.resolve())]

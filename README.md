@@ -4,6 +4,7 @@
 它不再包含可构建的完整 Triton-Ascend 编译器；请使用单独安装的兼容编译环境运行测试。
 
 - [测试脚本使用说明](costmodel_tests/README.md)
+- [自定义测试用例提交规范](costmodel_tests/CUSTOM_CASES.md)
 - [用例来源记录](costmodel_tests/sources.json)
 - [必须保留的本地测试依赖](costmodel_tests/dependencies.json)
 

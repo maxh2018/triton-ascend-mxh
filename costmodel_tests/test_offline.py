@@ -4,6 +4,8 @@ Run: python -m unittest discover -s costmodel_tests -p test_offline.py -v
 """
 
 import importlib.util
+import contextlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -92,6 +94,33 @@ class OfflineTests(unittest.TestCase):
             summary = json.loads((output / "summary.json").read_text())
             self.assertEqual(summary["status"], "FAIL")
             self.assertEqual([r["step"] for r in summary["steps"]], ["matrix"])
+
+    def test_custom_manifest_can_be_listed_and_forwarded_without_modifying_original(self):
+        spec = importlib.util.spec_from_file_location("custom_suite_runner", ROOT / "costmodel_tests/run.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        original = (GENERAL / "generalization_matrix.json").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "custom_manifest.json"
+            manifest.write_text(json.dumps({"cases": [{"name": "custom_add", "family": "elementwise",
+                                                       "driver": "bench_custom_add.py"}]}))
+            for suite in ("list", "case", "matrix"):
+                command = ["run.py", suite, "--manifest", str(manifest)]
+                if suite != "list":
+                    command += ["--dry-run", "--output-root", str(Path(directory) / suite)]
+                if suite == "case":
+                    command += ["--case", "custom_add"]
+                stream = io.StringIO()
+                with patch.object(sys, "argv", command), contextlib.redirect_stdout(stream):
+                    module.main()
+                if suite == "list":
+                    self.assertIn("custom_add", stream.getvalue())
+                    self.assertIn("Matrix: 1 cases", stream.getvalue())
+                else:
+                    arguments = json.loads(stream.getvalue().splitlines()[-1].split(": ", 1)[1])
+                    self.assertEqual(arguments[arguments.index("--manifest") + 1], str(manifest.resolve()))
+                    self.assertFalse((Path(directory) / suite).exists())
+        self.assertEqual((GENERAL / "generalization_matrix.json").read_bytes(), original)
 
 
 if __name__ == "__main__":

@@ -231,11 +231,10 @@ profiler 数据优先；没有 profiler 时原审计脚本会退回 Event median
 
 ## 后续增加 case
 
-原始 pytest 测试放在 `pytest_ut/`；要进入 CostModel 性能验收，还需添加支持 route、factor、
-report、profile-dir 和正确性输出的 benchmark，并在 `generalization_matrix.json` 登记
-唯一 name、family、split、driver、arguments。记录原始文件和 commit，禁止按名字硬编码模型。
-现有 `generalization_matrix_v140_all_100.json` 是历史快照，新增用例不要修改该快照。
-新增后的总数和路线数以当前 manifest 为准。
+按 [自定义测试用例提交规范](CUSTOM_CASES.md) 提交：**一个 Python 脚本 + 一条清单配置**。
+文档包含文件位置、必需参数、结果格式和运行命令。
+自定义 case 使用独立的 `custom_manifest.json`，通过 `--manifest` 选择，原 PR 的
+`generalization_matrix.json` 和 `generalization_matrix_v140_all_100.json` 保持不变。
 
 ## 本次验证范围
 
