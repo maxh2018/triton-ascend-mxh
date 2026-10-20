@@ -1,6 +1,27 @@
 # 自定义测试用例提交规范
 
 **只需提交两部分：一个能独立运行的 Python 脚本，以及清单中的一条配置。**
+
+## 现成的最小例子：向量加法
+
+- [示例脚本：x + y](../third_party/ascend/unittest/costmodel_ut/costmodel_generalization/bench_custom_add_example.py)
+- [示例清单：1 个 case](../third_party/ascend/unittest/costmodel_ut/costmodel_generalization/custom_manifest.example.json)
+
+加载兼容的 NPU 编译环境后，在仓库根目录直接运行：
+
+```bash
+python costmodel_tests/run.py case \
+  --manifest third_party/ascend/unittest/costmodel_ut/costmodel_generalization/custom_manifest.example.json \
+  --case custom_add_f32_n1024 --device 0
+```
+
+脚本依次完成：生成输入 → 运行 x + y → 检查精度 → 采集耗时 → 输出 JSON。
+统一入口再负责五条路线、失败重试和 ±10% 耗时预测验收。
+例子展示完整接口，不表示当前 profile 对这个新 shape 已经实测通过。
+添加自己的算子时，复制这两个文件，主要替换 kernel、参考结果和清单里的名字/参数。
+
+## 提交规则
+
 建议复制现有
 [bench_muls_add_costmodel.py](../third_party/ascend/unittest/costmodel_ut/costmodel_generalization/bench_muls_add_costmodel.py)，
 替换 kernel、输入和参考结果，保留参数解析、选路、正确性检查、计时和 JSON 输出部分。
