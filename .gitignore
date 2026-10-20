@@ -93,3 +93,6 @@ docs/sg_execution_times.rst
 
 # macOS
 .DS_Store
+
+# Costmodel test evidence, profiler traces and compiler dumps
+/costmodel_test_results/
