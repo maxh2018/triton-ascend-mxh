@@ -1,8 +1,63 @@
 #include "AscendModel/RouteModel/Models/PartialStructuredMemoryModel.h"
 #include "AscendModel/RouteModel/Models/PartialStructuredSimtLoadModel.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredStaticModel.h"
 #include <gtest/gtest.h>
 
 using namespace mlir::ascend::partial_memory;
+
+TEST(PartialStructuredMemoryModelTest, StaticModelsMatchFrozenReferences) {
+  // Independent E/W and the true full-group F2/F4 predictions. These are not
+  // obtained by multiplying the F1 price. Masked rows use a tail half-prefix.
+  FactorLoadGeometry c{
+      {{{8, 46, true}, {16, 3, false}}, 32, 1, true}, 1, 1472, {0, 0}, {8, 16}};
+  struct Reference {
+    Model model;
+    int factor;
+    bool masked;
+    double ticks;
+  };
+  for (const auto &r :
+       {Reference{Model::SimdLoad, 1, false, 735.4462395047153},
+        Reference{Model::SimdLoad, 1, true, 665.5191911728514},
+        Reference{Model::SimdStore, 1, false, 4824.885842617609},
+        Reference{Model::SimdStore, 1, true, 5806.000000000003},
+        Reference{Model::SimtLoad, 1, false, 150.97310520707447},
+        Reference{Model::SimtLoad, 2, false, 173.38050333732676},
+        Reference{Model::SimtLoad, 4, false, 222.4674727315751},
+        Reference{Model::SimtLoad, 1, true, 138.12692343167586},
+        Reference{Model::SimtLoad, 2, true, 177.32168591623153},
+        Reference{Model::SimtLoad, 4, true, 181.39361035187534},
+        Reference{Model::SimtStore, 1, false, 229.4340747053534},
+        Reference{Model::SimtStore, 2, false, 620.8297160760349},
+        Reference{Model::SimtStore, 4, false, 542.6056212341609},
+        Reference{Model::SimtStore, 1, true, 368.46656099838117},
+        Reference{Model::SimtStore, 2, true, 376.7140884698134},
+        Reference{Model::SimtStore, 4, true, 417.97612056594676}}) {
+    c.factor = r.factor;
+    c.upper[1] = r.masked ? 8 : 16;
+    auto value = predictStatic(c, r.model);
+    ASSERT_TRUE(value);
+    EXPECT_NEAR(*value, r.ticks, 1e-8);
+  }
+}
+
+TEST(PartialStructuredMemoryModelTest, StaticModelsRejectUnsupportedDomain) {
+  FactorLoadGeometry c{
+      {{{8, 46, true}, {16, 3, false}}, 32, 1, true}, 4, 1472, {0, 0}, {8, 16}};
+  ASSERT_TRUE(predictStatic(c, Model::SimtStore));
+  EXPECT_FALSE(predictStatic(c, Model::SimdStore));
+  c.geometry.warps = 32;
+  EXPECT_FALSE(predictStatic(c, Model::SimtLoad));
+  c.geometry.warps = 1;
+  c.programStride = 0;
+  EXPECT_FALSE(predictStatic(c, Model::SimtStore));
+  c.factor = 1;
+  c.upper[1] = 3;
+  EXPECT_FALSE(predictStatic(c, Model::SimdLoad));
+  c.upper[1] = 16;
+  c.geometry.axes[1].pitch = 0;
+  EXPECT_FALSE(predictStatic(c, Model::SimtLoad));
+}
 
 TEST(PartialStructuredMemoryModelTest, FactorLoadUsesIndependentEAndWarps) {
   FactorLoadGeometry c{

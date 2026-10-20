@@ -14,6 +14,8 @@ StageMemoryCost
 PartialStructuredMemoryCostModel::cost(const LogicalStage &stage,
                                        const HardwareProfile &profile,
                                        const StageImplementation &impl) const {
+  if (profile.partialStructuredMemoryModel == "ttir_static_partial_20261020")
+    return costStatic(stage, profile, impl);
   StageMemoryCost result;
   if (impl.mode == StageMode::SIMT && impl.superblockFactor > 1)
     return PartialStructuredSimtLoadCostModel().cost(stage, profile, impl);

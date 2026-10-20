@@ -22,6 +22,27 @@ using namespace mlir::ascend;
 
 namespace {
 
+// Triton's explicit bool-to-byte memory conversion preserves element offsets:
+// bool payloads occupy one byte. Do not generalize this to arbitrary pointer
+// bitcasts, which can change the relationship between element and byte strides.
+static Value byteBoolPointerSource(Value value) {
+  auto *op = value.getDefiningOp();
+  if (!op || op->getName().getStringRef() != "tt.bitcast" ||
+      op->getNumOperands() != 1)
+    return {};
+  auto dst = dyn_cast<RankedTensorType>(value.getType());
+  auto src = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!src || !dst || src.getShape() != dst.getShape())
+    return {};
+  auto sp = dyn_cast<triton::PointerType>(src.getElementType());
+  auto dp = dyn_cast<triton::PointerType>(dst.getElementType());
+  if (!sp || !dp || !sp.getPointeeType().isInteger(1) ||
+      !dp.getPointeeType().isInteger(8) ||
+      sp.getAddressSpace() != dp.getAddressSpace())
+    return {};
+  return op->getOperand(0);
+}
+
 // OffsetAnalysis assumes tensor pointers originate from supported Triton
 // expressions and that tt.broadcast expands at least one dimension.
 static bool hasUnsupportedPointerInput(Value value,
@@ -54,6 +75,8 @@ analyzePointerAxes(Operation *clonedOperation, IRRewriter &rewriter,
   if (!clonedOperation || clonedOperation->getNumOperands() == 0)
     return std::nullopt;
   Value pointer = clonedOperation->getOperand(0);
+  if (auto source = byteBoolPointerSource(pointer))
+    pointer = source;
   if (!isa_and_nonnull<triton::AddPtrOp>(pointer.getDefiningOp()))
     return std::nullopt;
   llvm::DenseSet<Value> visited;
@@ -314,6 +337,8 @@ static SmallVector<AxisTerm> getAxisTerms(Value value, unsigned depth = 0) {
   }
   const llvm::StringRef name = producer->getName().getStringRef();
   const size_t rank = result.size();
+  if (auto source = byteBoolPointerSource(value))
+    return getAxisTerms(source, depth + 1);
   if (name == "tt.load" || name == "tt.gather") {
     auto shape = dyn_cast<RankedTensorType>(value.getType());
     const bool separable =
@@ -653,9 +678,11 @@ StageMemoryPatternAnalysis::StageMemoryPatternAnalysis(ModuleOp module) {
       return;
     auto pointer =
         dyn_cast<RankedTensorType>(operation->getOperand(0).getType());
+    Value source = operation->getOperand(0);
+    if (auto boolSource = byteBoolPointerSource(source))
+      source = boolSource;
     if (pointer && pointer.hasStaticShape() && pointer.getRank() > 0 &&
-        isa_and_nonnull<triton::AddPtrOp>(
-            operation->getOperand(0).getDefiningOp()))
+        isa_and_nonnull<triton::AddPtrOp>(source.getDefiningOp()))
       candidates.push_back(operation);
   });
   if (candidates.empty() && loads.empty() && stores.empty())

@@ -1,7 +1,7 @@
 {
   "$schema": "./simd_simt_profile_schema.json",
   "schema_version": 19,
-  "partial_structured_memory_model": "ttir_static_simt_load_factor_20261017",
+  "partial_structured_memory_model": "ttir_static_partial_20261020",
   "profile_version": "ascend-950pr-simd-simt-20261017-mask-rank-factor",
   "simt_indirect_store_model": "prefix_mask_rank_factor_20261017",
   "simd_indirect_store_model": "random_store_no_fill_first_20261008",

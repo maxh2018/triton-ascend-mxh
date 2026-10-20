@@ -1,9 +1,11 @@
 // Pointer-analysis coverage for the indirect and partially structured stages.
 #include "AscendModel/Analysis/StageMemoryPatternAnalysis.h"
 #include "AscendModel/Analysis/StagePartitioner.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredMemoryCostModel.h"
 #include "AscendModel/RouteModel/Models/PartialStructuredMemoryModel.h"
 #include "AscendModel/RouteModel/Models/PartialStructuredSimtLoadCostModel.h"
 #include "AscendModel/RouteModel/Models/PartialStructuredSimtLoadModel.h"
+#include "AscendModel/RouteModel/Models/PartialStructuredStaticModel.h"
 #include "CostModelTestUtils.h"
 #include "StageIRTestUtils.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
@@ -265,6 +267,121 @@ TEST(StageAddressPatternTest, FactorLoadProvesStaticRectangleAndProgramStride) {
         }
       }
     }
+  }
+}
+
+TEST(StageAddressPatternTest, StaticModelsKeepFullGroupAndAuxiliaryOwnership) {
+  for (bool store : {false, true}) {
+    for (int maskKind : {0, 1, 2, 3}) {
+      IRTestContext context(true);
+      auto module = factorLoadModule(context, maskKind, true);
+      ASSERT_TRUE(module);
+      if (store) {
+        triton::LoadOp target;
+        module->walk([&](triton::LoadOp op) {
+          auto t = dyn_cast<RankedTensorType>(op.getType());
+          if (t && t.getRank() == 2)
+            target = op;
+        });
+        ASSERT_TRUE(target);
+        OpBuilder builder(target);
+        auto type = cast<RankedTensorType>(target.getType());
+        auto value = builder.create<arith::ConstantOp>(
+            target.getLoc(),
+            DenseElementsAttr::get(type, builder.getF32FloatAttr(1.0)));
+        builder.create<triton::StoreOp>(
+            target.getLoc(), target.getPtr(), value, target.getMask(),
+            triton::CacheModifier::NONE, triton::EvictionPolicy::NORMAL);
+        target.erase();
+      }
+      auto partition = StagePartitioner().partition(*module, SimtAnchorPlan{},
+                                                    StagePartitionerOptions{});
+      ASSERT_TRUE(bool(partition));
+      auto *payload = payloadStage(*partition, {4, 8}, store);
+      ASSERT_NE(payload, nullptr);
+      auto profile = hardwareProfile();
+      profile.target = "Ascend950PR/dav-c310";
+      profile.partialStructuredMemoryModel = "ttir_static_partial_20261020";
+      profile.baseSimtWarpCount = 2;
+      for (int F : {1, 2, 4}) {
+        auto price = PartialStructuredMemoryCostModel().cost(
+            *payload, profile, {StageMode::SIMT, F, false});
+        if (maskKind >= 2) {
+          EXPECT_FALSE(price.load);
+          EXPECT_FALSE(price.store);
+          continue;
+        }
+        ASSERT_TRUE(store ? price.store : price.load);
+        EXPECT_TRUE(price.coversSuperblockGroup);
+        auto stage = *payload;
+        stage.legalSimtFactors = {1, 2, 4};
+        auto table = evaluateOneStage(stage, profile);
+        ASSERT_TRUE(bool(table));
+        double ticks = store ? *price.store : *price.load;
+        for (const auto &cost : table->stages.front().implementations) {
+          if (cost.implementation.mode != StageMode::SIMT ||
+              cost.implementation.superblockFactor != F ||
+              cost.implementation.localScope)
+            continue;
+          EXPECT_NEAR(store ? cost.resources.store
+                            : cost.resources.indirectLoadGroup,
+                      ticks, 1e-9);
+          EXPECT_GE(cost.totalCycles, ticks);
+          if (F > 1)
+            EXPECT_LT(cost.totalCycles, F * ticks);
+        }
+      }
+    }
+  }
+}
+
+TEST(StageAddressPatternTest, BooleanPointerCastPreservesByteAddressFacts) {
+  for (bool byteBool : {true, false}) {
+    IRTestContext context(true);
+    auto module = factorLoadModule(context, 0, true);
+    std::string text;
+    llvm::raw_string_ostream out(text);
+    module->print(out);
+    out.flush();
+    // The memory conversion uses one byte for logical i1. A general f32->i8
+    // pointer reinterpretation must not receive the same proof.
+    if (byteBool) {
+      size_t at = 0;
+      while ((at = text.find("!tt.ptr<f32>", at)) != std::string::npos) {
+        text.replace(at, 12, "!tt.ptr<i1>");
+        at += 11;
+      }
+    }
+    auto converted = context.parse(text);
+    ASSERT_TRUE(converted);
+    triton::LoadOp target;
+    converted->walk([&](triton::LoadOp op) {
+      auto t = dyn_cast<RankedTensorType>(op.getType());
+      if (t && t.getRank() == 2)
+        target = op;
+    });
+    ASSERT_TRUE(target);
+    OpBuilder builder(target);
+    auto src = cast<RankedTensorType>(target.getPtr().getType());
+    auto dst = RankedTensorType::get(
+        src.getShape(), triton::PointerType::get(builder.getI8Type(), 1));
+    OperationState castState(target.getLoc(), "tt.bitcast");
+    castState.addTypes(dst);
+    castState.addOperands(target.getPtr());
+    auto ptr = builder.create(castState)->getResult(0);
+    target->setOperand(0, ptr);
+    target->getResult(0).setType(
+        RankedTensorType::get(src.getShape(), builder.getI8Type()));
+    StageMemoryPatternAnalysis analysis(*converted);
+    auto pattern = analysis.lookupSummary(target);
+    ASSERT_TRUE(pattern);
+    EXPECT_EQ(pattern->axes.back().knownStride,
+              byteBool ? std::optional<int64_t>(1) : std::optional<int64_t>(0));
+    if (byteBool)
+      EXPECT_EQ(pattern->axes.front().opaqueMultiplier,
+                std::optional<int64_t>(8));
+    else
+      EXPECT_TRUE(pattern->axes.back().hasUnknownComponent);
   }
 }
 

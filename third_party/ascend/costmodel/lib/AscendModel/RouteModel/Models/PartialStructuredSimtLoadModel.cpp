@@ -74,10 +74,8 @@ bool supported(const FactorLoadGeometry &c) {
 }
 } // namespace
 
-Features mlir::ascend::partial_memory::extractFactorLoadFeatures(
+Features mlir::ascend::partial_memory::extractFactorReferenceFeatures(
     const FactorLoadGeometry &c) {
-  if (!supported(c))
-    return {};
   const auto &g = c.geometry;
   const size_t rank = g.axes.size();
   int64_t E = 1, K = 1, activeD = 1;
@@ -175,8 +173,15 @@ Features mlir::ascend::partial_memory::extractFactorLoadFeatures(
   return out;
 }
 
+Features mlir::ascend::partial_memory::extractFactorLoadFeatures(
+    const FactorLoadGeometry &c) {
+  return supported(c) ? extractFactorReferenceFeatures(c) : Features{};
+}
+
 std::optional<double>
 mlir::ascend::partial_memory::predictFactorLoad(const FactorLoadGeometry &c) {
+  if (!supported(c))
+    return std::nullopt;
   const auto f = extractFactorLoadFeatures(c);
   if (f.empty())
     return std::nullopt;

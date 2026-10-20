@@ -2127,7 +2127,8 @@ loadCandidateProfileUncached(llvm::StringRef pathRef,
     if (hardware.partialStructuredMemoryModel !=
             "ttir_q1_short_formula_20261014" &&
         hardware.partialStructuredMemoryModel !=
-            "ttir_static_simt_load_factor_20261017")
+            "ttir_static_simt_load_factor_20261017" &&
+        hardware.partialStructuredMemoryModel != "ttir_static_partial_20261020")
       reader.setError("unsupported partial_structured_memory_model");
   }
   if (root->get("simt_indirect_load_model")) {

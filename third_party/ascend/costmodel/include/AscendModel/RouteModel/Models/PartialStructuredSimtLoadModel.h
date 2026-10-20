@@ -17,6 +17,8 @@ struct FactorLoadGeometry {
 
 // Same TTIR-only reference descriptors as the frozen 112-coefficient model.
 // These are synthetic geometry, not runtime transactions or cache hit rates.
+// Internal static feature algebra. Caller must validate the geometry domain.
+Features extractFactorReferenceFeatures(const FactorLoadGeometry &geometry);
 Features extractFactorLoadFeatures(const FactorLoadGeometry &geometry);
 // Complete physical F-program A-B increment, in SYS_CNT ticks. Callers must
 // not apply F again. Returns nullopt outside the measured representative

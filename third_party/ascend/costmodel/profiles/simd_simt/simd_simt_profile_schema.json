@@ -4291,9 +4291,10 @@
     "partial_structured_memory_model": {
       "enum": [
         "ttir_q1_short_formula_20261014",
-        "ttir_static_simt_load_factor_20261017"
+        "ttir_static_simt_load_factor_20261017",
+        "ttir_static_partial_20261020"
       ],
-      "description": "Versioned TTIR partial-memory fits. ttir_q1_short_formula_20261014 retains the F1 q=1 unmasked models. ttir_static_simt_load_factor_20261017 additionally enables complete-group SIMT load increments for F2/F4, E=32..2048 independent of W, mixed rank2..5, representative u8/u16/f32/u64, known positive strides and program spacing, and proved constant rectangular masks. The 112-coefficient candidate has individual-input independent MAPE 30.325/32.596% without mask and 25.599/28.209% with mask for F2/F4; it does not meet 20%. Unsupported cases retain legacy pricing. No runtime sampling or q/U/V predictors in the F2/F4 model."
+      "description": "Versioned TTIR partial-memory fits. ttir_static_partial_20261020 enables static linear/power partial-memory models for load/store, SIMD F1 and SIMT F1/F2/F4, E=32..2048 independent of W, rank2..5 mixed axes, payload storage bits 8/16/32/64 and proven constant prefix rectangles or measured tail half-windows. SIMD float64 is not supported. Store uses first-write state. The fit has unresolved independent-input accuracy and direction limits; enabling this draft is not an accuracy guarantee. Unknown masks, unsupported addresses and invalid/nonpositive calibration scales retain fallback. ttir_q1_short_formula_20261014 retains the F1 q=1 unmasked models. ttir_static_simt_load_factor_20261017 additionally enables complete-group SIMT load increments for F2/F4, E=32..2048 independent of W, mixed rank2..5, representative u8/u16/f32/u64, known positive strides and program spacing, and proved constant rectangular masks. The 112-coefficient candidate has individual-input independent MAPE 30.325/32.596% without mask and 25.599/28.209% with mask for F2/F4; it does not meet 20%. Unsupported cases retain legacy pricing. No runtime sampling or q/U/V predictors in the F2/F4 model."
     }
   },
   "required": [
