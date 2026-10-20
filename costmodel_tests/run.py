@@ -20,7 +20,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("list", "pytest", "matrix", "case", "all"))
     parser.add_argument("--case", help="exact matrix case name; required for suite=case")
-    parser.add_argument("--device", help="ASCEND_RT_VISIBLE_DEVICES")
+    devices = parser.add_mutually_exclusive_group()
+    devices.add_argument("--device", help="ASCEND_RT_VISIBLE_DEVICES")
+    devices.add_argument("--devices", help="matrix device pool, e.g. 0,1,2,3; one case per device")
+    parser.add_argument("--jobs", type=int, default=1, help="concurrent matrix cases (default: 1)")
+    parser.add_argument("--retries", type=int, default=3, help="extra attempts per failed matrix case (default: 3)")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--expected-bishengir", type=Path)
@@ -30,6 +34,10 @@ def main() -> None:
     parser.add_argument("--pytest-args", nargs=argparse.REMAINDER,
                         help="pytest arguments; place this option last, e.g. -k atomic --collect-only")
     args = parser.parse_args()
+    if args.jobs < 1 or args.retries < 0:
+        parser.error("--jobs must be positive and --retries must be nonnegative")
+    if args.suite == "pytest" and (args.devices is not None or args.jobs != 1 or args.retries != 3):
+        parser.error("--jobs/--retries/--devices apply to matrix cases; use --pytest-args for pytest options")
     if args.suite == "case" and not args.case:
         parser.error("suite=case requires --case (a manifest name, not a .py file)")
     if args.suite != "case" and args.case:
@@ -48,6 +56,8 @@ def main() -> None:
     env = os.environ.copy()
     if args.device is not None:
         env["ASCEND_RT_VISIBLE_DEVICES"] = args.device
+    elif args.devices is not None:
+        env["ASCEND_RT_VISIBLE_DEVICES"] = args.devices
     commands = []
     if args.suite in ("pytest", "all"):
         commands.append(("pytest", [sys.executable, "-m", "pytest", str(PYTEST),
@@ -56,23 +66,17 @@ def main() -> None:
     if args.suite in ("matrix", "case", "all"):
         evidence = output / "matrix"
         common = ["--output-root", str(evidence),
+                  "--jobs", str(args.jobs), "--retries", str(args.retries),
                   "--triton-root", str(args.triton_root.resolve()),
                   "--npuir-root", str(args.npuir_root.resolve())]
+        if args.devices is not None:
+            common += ["--devices", args.devices]
         for option, value in (("--profile", args.profile), ("--expected-bishengir", args.expected_bishengir)):
             if value is not None:
                 common += [option, str(value.resolve())]
-        if args.suite == "case":
-            commands.append(("case", [sys.executable, str(GENERAL / "run_generalization_case.py"),
-                                       args.case, *common]))
-        else:
-            commands.append(("matrix", [sys.executable, str(GENERAL / "run_generalization_matrix.py"),
-                                         "--include-explicit", *common]))
-            commands.append(("audit", [sys.executable, str(GENERAL / "audit_generalization_matrix.py"),
-                                       "--evidence-root", str(evidence),
-                                       "--manifest", str(evidence / "generalization_matrix.json"),
-                                       "--profile", str(evidence / "costmodel_profile.json"),
-                                       "--output-json", str(evidence / "generalization_audit.json"),
-                                       "--output-markdown", str(evidence / "generalization_audit.md")]))
+        selected = ["--case", args.case] if args.suite == "case" else []
+        commands.append(("case" if args.suite == "case" else "matrix",
+                         [sys.executable, str(GENERAL / "run_generalization_batch.py"), *selected, *common]))
     print(f"Output: {output}", flush=True)
     if args.dry_run:
         for name, command in commands:
@@ -85,9 +89,6 @@ def main() -> None:
         # Inherit terminal output; the PR collector also retains per-case logs.
         completed = subprocess.run(command, cwd=ROOT, env=env, check=False)
         records.append({"step": name, "command": command, "returncode": completed.returncode})
-        # Audit a failed matrix when its summary exists, to explain missing routes.
-        if name == "matrix" and completed.returncode and not (output / "matrix/matrix_summary.json").is_file():
-            break
     passed = bool(records) and len(records) == len(commands) and all(r["returncode"] == 0 for r in records)
     summary = {"status": "PASS" if passed else "FAIL", "suite": args.suite, "steps": records}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

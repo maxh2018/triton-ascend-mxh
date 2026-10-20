@@ -70,7 +70,7 @@ class OfflineTests(unittest.TestCase):
             report = json.loads((root / "audit.json").read_text())
             self.assertTrue(any("missing_matrix_record" in r["failure_reasons"] for r in report["results"]))
 
-    def test_launcher_propagates_failed_matrix_even_if_audit_exits_zero(self):
+    def test_launcher_propagates_failed_batch(self):
         spec = importlib.util.spec_from_file_location("suite_runner", ROOT / "costmodel_tests/run.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -78,7 +78,7 @@ class OfflineTests(unittest.TestCase):
             output = Path(directory) / "results"
 
             def fake_run(command, **kwargs):
-                if Path(command[1]).name == "run_generalization_matrix.py":
+                if Path(command[1]).name == "run_generalization_batch.py":
                     (output / "matrix").mkdir()
                     (output / "matrix/matrix_summary.json").write_text("{}")
                     return subprocess.CompletedProcess(command, 1)
@@ -91,7 +91,7 @@ class OfflineTests(unittest.TestCase):
             self.assertEqual(stopped.exception.code, 1)
             summary = json.loads((output / "summary.json").read_text())
             self.assertEqual(summary["status"], "FAIL")
-            self.assertEqual([r["step"] for r in summary["steps"]], ["matrix", "audit"])
+            self.assertEqual([r["step"] for r in summary["steps"]], ["matrix"])
 
 
 if __name__ == "__main__":

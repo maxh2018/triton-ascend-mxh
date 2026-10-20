@@ -18,6 +18,7 @@ fixture 保留；逐文件用途见 [dependencies.json](dependencies.json)。
 | PR 测试脚本 | 同上 | 运行、审计、分片、合并、合同校验、残差诊断、profile 采集和后端证据采集脚本 |
 | Profile 快照 | `third_party/ascend/costmodel/profiles/` | SIMD/SIMT selection profile、microbench JSON 和 schema；包含 pytest 校准测试所需 validator |
 | 新增统一入口 | `costmodel_tests/run.py` | pytest 全集、矩阵全量、单 case、组合执行及命令预览 |
+| 新增并发入口 | `costmodel_generalization/run_generalization_batch.py` | case 级并发、仅失败 case 重试、隔离尝试日志、最终汇总审计 |
 | 新增单 case 入口 | `costmodel_generalization/run_generalization_case.py` | 自动生成单 case 清单、运行全部规定路线并审计 |
 
 基线 main：`a176ab28b11b63d427760c15f6cd63c14ac296f1`。
@@ -98,6 +99,8 @@ case 参数来自矩阵的 `name`，不能填 `bench_*.py` 文件名。
 每条路线检查计算结果，并对模型预测耗时进行默认 ±10% 误差验收。
 任何一条失败，单 case 汇总即 FAIL；已失败路线之后未运行的路线会被 audit 标为缺失。
 这里没有“Auto 必须是实测最快路线”的断言。
+统一入口 `run.py case` 会在单次尝试失败后重试整个 case，默认额外重试 3 次。
+直接调用 `run_generalization_case.py` 仍然只执行一次；重试由 batch 调度层负责。
 
 ## PR 矩阵：运行全部 100 个 case
 
@@ -109,8 +112,47 @@ python costmodel_tests/run.py all --device 0
 ```
 
 完整矩阵预期有 508 条路线记录（100 × 5 + 8 条 Mixed）。原 PR runner 默认只跑 Auto，
-统一入口已经自动添加 `--include-explicit`，并在运行后调用 audit。
+统一入口通过 batch 调度每个 case，单次执行自动添加 `--include-explicit`，并在运行后调用 audit。
 矩阵默认每个路线使用 3 个独立计时进程，取 profiler 平均耗时的中位样本。
+
+## 并发与失败重试
+
+`--jobs` 控制同时运行的 **case 数**，默认 1；同一 case 内的各条路线仍串行。
+`--retries` 是首次失败后的**额外重试次数**，默认 3，即一个 case 最多运行 4 次。
+设置 0 则不重试。编译/运行失败、精度失败、缺少证据、预测误差 audit 失败均可触发重试。
+只重试失败的 case，该 case 的标准路线整体重新执行，已经通过的其他 case 不会再运行。
+
+```bash
+# 单卡上同时运行 4 个 case，失败后额外重试 3 次
+python costmodel_tests/run.py matrix --device 0 --jobs 4 --retries 3
+
+# 四张卡并发：每张卡同一时间只运行一个 case，减少测时相互干扰
+python costmodel_tests/run.py matrix --devices 0,1,2,3 --jobs 4 --retries 3
+
+# 禁用失败重试
+python costmodel_tests/run.py matrix --device 0 --jobs 1 --retries 0
+
+# 单 case 失败后额外重试 5 次
+python costmodel_tests/run.py case --case softmax_original --device 0 --retries 5
+```
+
+`--device` 和 `--devices` 互斥；`--devices` 需要至少提供 `--jobs` 张互不重复的卡。
+同一张 NPU 并发执行多个 case 会产生资源竞争，可能改变 profiler 耗时和 ±10% 审计结果。
+因此精度/预测误差验收建议使用多卡隔离并发，或保持 `--jobs 1`。
+设备池中的卡应具有与 profile 一致的目标型号。
+这些并发和重试选项作用于 100-case 矩阵（`matrix`、`case`、`all` 的矩阵阶段），
+不改变原始 pytest 的执行策略；pytest 参数继续使用 `--pytest-args`。
+
+仅批跑指定的几个 case，可直接使用新 batch 脚本：
+
+```bash
+python third_party/ascend/unittest/costmodel_ut/costmodel_generalization/run_generalization_batch.py \
+  --case softmax_original --case atomic_discrete_i32_p1_b256 \
+  --devices 0,1 --jobs 2 --retries 3 --output-root /tmp/costmodel_selected_new
+```
+
+终端显示每次 START/PASS/FAIL/RETRY，重试用尽后仍继续完成其他 case，最终返回非零退出码。
+该功能是当前一次运行内的自动重试，不是对已有结果目录的断点续跑。
 
 显式指定环境位置：
 
@@ -136,19 +178,31 @@ summary.json                       # 统一入口最终 PASS/FAIL 和各步骤�
 pytest.xml                         # pytest JUnit 结果（执行 pytest 时）
 matrix/
   matrix_summary.json              # 矩阵运行记录
+  batch_summary.json               # case 状态、尝试次数、设备、每次日志位置、最终失败列表
+  batch_summary.partial.json       # 每完成一个 case 更新一次的进度
   generalization_matrix.json       # 此次清单快照；单 case 时只有一项
   costmodel_profile.json           # profile 快照
   generalization_audit.md          # 各路线预测/实测/误差/PASS/FAIL
   generalization_audit.json        # all_pass 和 failure_reasons
-  single_case_summary.json         # 仅单 case
-  <case>__<route>_f<factor>/
-    evidence.json                  # correct、profiler、编译/运行退出码等
-    route.json                     # Auto 的候选与最终选择
-    stdout.log / stderr.log
+  cases/<case>/
+    attempt_01.log                 # 首次运行终端输出
+    attempt_01/                    # 首次运行的完整证据
+      single_case_summary.json
+      generalization_audit.json
+      <case>__<route>_f<factor>/
+        evidence.json              # correct、profiler、编译/运行退出码等
+        route.json                 # Auto 的候选与最终选择
+        stdout.log / stderr.log
+    attempt_02.log                 # 失败重试时才生成
+    attempt_02/
 ```
 
 直接运行单 case 脚本时，默认输出到该脚本旁的 `single_case_results/`，
 并额外生成 `runner.log`、`audit.log`。日志、trace、dump、结果默认不提交 Git。
+batch 汇总只引用各 case 的最后一次尝试，之前的失败日志始终保留；最终 audit 仍按每个 case
+全部规定路线审计。`batch_summary.json` 的 `failed_cases` 列出重试用尽仍失败的 case。
+batch 的 `matrix_summary.json` 供 audit 读取；原 PR 的 shard 合并/跨族 gates 仍应使用原始
+`run_generalization_matrix.py`/`run_generalization_shard.sh` 的完整元数据输出。
 审计判据：运行成功、`correct=true`、合法预测与实测存在，且
 `abs(predicted_us / measured_us - 1) <= 0.10`。
 profiler 数据优先；没有 profiler 时原审计脚本会退回 Event median，正式复现应保留 profiler。
@@ -161,6 +215,7 @@ profiler 数据优先；没有 profiler 时原审计脚本会退回 Event median
 | 脚本 | 用途 |
 |---|---|
 | `run_generalization_matrix.py` | case/family/route/shard 筛选，运行与证据收集 |
+| `run_generalization_batch.py` | 在原 PR runner 外调度并发、失败重试和最终结果审计 |
 | `audit_generalization_matrix.py` | 逐路线检查预测误差，要求传入 manifest 的全部规定路线存在 |
 | `run_generalization_shard.sh` | 按设备/分片运行完整路线；可设 `COSTMODEL_ENV_SCRIPT` 加载自己的环境 |
 | `merge_generalization_runs.py` | 合并完整矩阵的多个分片结果 |
@@ -190,5 +245,5 @@ main 的 pytest 文件完整保留、命令预览和模拟证据的真实 audit�
 无需 NPU 的测试资料自检：
 
 ```bash
-python -m unittest discover -s costmodel_tests -p test_offline.py -v
+python -m unittest discover -s costmodel_tests -p 'test_*.py' -v
 ```

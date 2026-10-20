@@ -14,6 +14,7 @@
 python costmodel_tests/run.py list
 python costmodel_tests/run.py case --case softmax_original --device 0
 python costmodel_tests/run.py matrix --device 0
+python costmodel_tests/run.py matrix --devices 0,1 --jobs 2 --retries 3
 python costmodel_tests/run.py pytest --device 0
 ```
 
@@ -23,5 +24,5 @@ python costmodel_tests/run.py pytest --device 0
 无需 NPU 的资料自检：
 
 ```bash
-python -m unittest discover -s costmodel_tests -p test_offline.py -v
+python -m unittest discover -s costmodel_tests -p 'test_*.py' -v
 ```

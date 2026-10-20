@@ -1,0 +1,151 @@
+"""CPU-only subprocess tests for concurrency and selective retries, using the real audit."""
+
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+GENERAL = Path(__file__).resolve().parents[1] / "third_party/ascend/unittest/costmodel_ut/costmodel_generalization"
+
+FAKE_WORKER = r'''
+import argparse, json, os
+from pathlib import Path
+import subprocess, sys, time
+
+p = argparse.ArgumentParser()
+p.add_argument('case')
+p.add_argument('--output-root', type=Path)
+p.add_argument('--manifest', type=Path)
+p.add_argument('--profile', type=Path)
+a, unused = p.parse_known_args()
+output = a.output_root
+output.mkdir()
+number = int(output.name.split('_')[-1])
+started = time.monotonic()
+time.sleep(0.25)
+mode = os.environ.get('BATCH_TEST_MODE', 'flaky')
+if mode == 'missing':
+    raise SystemExit(1)
+cases = json.loads(a.manifest.read_text())
+case = next(c for c in cases['cases'] if c['name'] == a.case)
+cases['cases'] = [case]
+(output / 'manifest.json').write_text(json.dumps(cases))
+fail = mode == 'always' or (a.case == 'flaky' and number == 1)
+modes = [('auto', 1), ('simd', 1), ('simt_only', 1), ('simt_only', 2), ('simt_only', 4)]
+modes += [(m['route'], m['factor']) for m in case.get('extra_modes', [])]
+candidate = {'legal': True, 'total_system_cycles': 10, 'runtime_physical_program_count': 1}
+route = {'selected_route_elapsed_prediction': {'applied': True, 'predicted_microseconds': 10},
+         'stage_model': {'routes': {'all_simd': candidate, 'mixed_simd_simt': candidate},
+                         'all_simt_factor_routes': {str(f): candidate for f in (1, 2, 4)}}}
+records = []
+for mode_name, factor in modes:
+    name = f'{a.case}__{mode_name}_f{factor}'
+    directory = output / name
+    directory.mkdir()
+    (directory / 'evidence.json').write_text(json.dumps({
+        'returncode': 0, 'benchmark': {'correct': True, 'profiler': {'average_us': 20 if fail else 10}}}))
+    if mode_name == 'auto':
+        (directory / 'route.json').write_text(json.dumps(route))
+    records.append({'name': name, 'family': case['family'], 'split': case['split'],
+                    'route': mode_name, 'factor': factor, 'returncode': 0, 'evidence_dir': str(directory)})
+(output / 'matrix_summary.json').write_text(json.dumps({'records': records}))
+result = subprocess.run([sys.executable, os.environ['BATCH_TEST_AUDIT'],
+    '--evidence-root', str(output), '--manifest', str(output / 'manifest.json'),
+    '--profile', str(a.profile), '--output-json', str(output / 'generalization_audit.json'),
+    '--output-markdown', str(output / 'generalization_audit.md')], capture_output=True)
+audit = json.loads((output / 'generalization_audit.json').read_text())
+(output / 'single_case_summary.json').write_text(json.dumps({'status': 'PASS' if audit['all_pass'] else 'FAIL'}))
+(output / 'timing.json').write_text(json.dumps({'start': started, 'end': time.monotonic(),
+    'device': os.environ.get('ASCEND_RT_VISIBLE_DEVICES')}))
+raise SystemExit(result.returncode)
+'''
+
+
+class BatchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.worker = self.root / "fake_worker.py"
+        self.worker.write_text(FAKE_WORKER, encoding="utf-8")
+        self.profile = self.root / "profile.json"
+        self.profile.write_text(json.dumps({"kernel_timing": {"system_counter_frequency_mhz": 1,
+            "boundary_residual_system_cycles_by_physical_program_count": {"1": 0, "2": 0}}}))
+        self.manifest = self.root / "manifest.json"
+        self.manifest.write_text(json.dumps({"cases": [
+            {"name": "stable", "family": "example", "split": "holdout",
+             "extra_modes": [{"route": "mixed", "factor": 4}]},
+            {"name": "flaky", "family": "example", "split": "holdout"}]}))
+        spec = importlib.util.spec_from_file_location("batch_under_test", GENERAL / "run_generalization_batch.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def run_batch(self, *extra, mode="flaky", expected_status=0):
+        output = self.root / "results"
+        command = ["batch.py", "--manifest", str(self.manifest), "--profile", str(self.profile),
+                   "--expected-bishengir", sys.executable, "--output-root", str(output), *extra]
+        with patch.object(sys, "argv", command), \
+                patch.object(self.module, "SINGLE_CASE_SCRIPT", self.worker), \
+                patch.dict(os.environ, {"BATCH_TEST_MODE": mode,
+                                        "BATCH_TEST_AUDIT": str(GENERAL / "audit_generalization_matrix.py"),
+                                        "TRITON_ASCEND_COMPILE_MODE": ""}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as stopped:
+                self.module.main()
+        self.assertEqual(stopped.exception.code, expected_status)
+        return output
+
+    def test_concurrent_device_slots_and_retry_only_failed_case(self):
+        output = self.run_batch("--jobs", "2", "--devices", "0,1")
+        batch = json.loads((output / "batch_summary.json").read_text())
+        stable, flaky = batch["cases"]
+        self.assertEqual(batch["status"], "PASS")
+        self.assertEqual([stable["attempt_count"], flaky["attempt_count"]], [1, 2])
+        self.assertEqual([a["status"] for a in flaky["attempts"]], ["FAIL", "PASS"])
+        self.assertNotEqual(stable["device"], flaky["device"])
+        first = [json.loads((output / "cases" / name / "attempt_01/timing.json").read_text())
+                 for name in ("stable", "flaky")]
+        self.assertLess(max(r["start"] for r in first), min(r["end"] for r in first))
+        self.assertFalse((output / "cases/stable/attempt_02").exists())
+        records = json.loads((output / "matrix_summary.json").read_text())["records"]
+        self.assertEqual(len(records), 11)  # Mixed record remains included.
+        self.assertTrue(all("attempt_02" in r["evidence_dir"] for r in records if r["name"].startswith("flaky__")))
+        self.assertTrue(json.loads((output / "generalization_audit.json").read_text())["all_pass"])
+
+    def test_default_three_retries_stop_after_four_attempts(self):
+        output = self.run_batch("--case", "flaky", mode="always", expected_status=1)
+        batch = json.loads((output / "batch_summary.json").read_text())
+        self.assertEqual(batch["cases"][0]["attempt_count"], 4)
+        self.assertEqual(batch["failed_cases"], ["flaky"])
+        self.assertFalse((output / "cases/stable").exists())
+        self.assertFalse((output / "cases/flaky/attempt_05").exists())
+
+    def test_zero_retries_means_one_attempt(self):
+        output = self.run_batch("--case", "flaky", "--retries", "0", expected_status=1)
+        batch = json.loads((output / "batch_summary.json").read_text())
+        self.assertEqual(batch["cases"][0]["attempt_count"], 1)
+
+    def test_missing_worker_results_are_failed_and_audited(self):
+        output = self.run_batch("--case", "stable", "--retries", "1", mode="missing", expected_status=1)
+        batch = json.loads((output / "batch_summary.json").read_text())
+        self.assertEqual(batch["cases"][0]["attempt_count"], 2)
+        audit = json.loads((output / "generalization_audit.json").read_text())
+        self.assertFalse(audit["all_pass"])
+        self.assertTrue(all("missing_matrix_record" in r["failure_reasons"] for r in audit["results"]))
+
+    def test_invalid_selection_and_options_fail_before_creating_output(self):
+        for extra in (("--case", "unknown"), ("--jobs", "0"), ("--retries", "-1"),
+                      ("--jobs", "2", "--devices", "0")):
+            with self.subTest(extra=extra):
+                output = self.run_batch(*extra, expected_status=2)
+                self.assertFalse(output.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

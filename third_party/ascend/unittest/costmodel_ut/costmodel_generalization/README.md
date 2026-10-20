@@ -10,6 +10,7 @@
 python costmodel_tests/run.py list
 python costmodel_tests/run.py case --case softmax_original --device 0
 python costmodel_tests/run.py matrix --device 0
+python costmodel_tests/run.py matrix --devices 0,1 --jobs 2 --retries 3
 python costmodel_tests/run.py pytest --device 0
 ```
 
