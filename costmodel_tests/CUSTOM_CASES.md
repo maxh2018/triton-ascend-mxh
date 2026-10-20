@@ -7,6 +7,21 @@
 - [示例脚本：x + y](../third_party/ascend/unittest/costmodel_ut/costmodel_generalization/bench_custom_add_example.py)
 - [示例清单：1 个 case](../third_party/ascend/unittest/costmodel_ut/costmodel_generalization/custom_manifest.example.json)
 
+示例 JSON 中每个字段的含义：
+
+| 字段 | 示例值 | 含义 |
+|---|---|---|
+| `cases` | `[{...}]` | 用例列表，每个对象代表一个测试配置；增加对象即可登记多个 case。 |
+| `name` | `custom_add_f32_n1024` | 唯一的用例名，运行命令的 `--case` 就填写这个值。 |
+| `family` | `elementwise` | 算子类别，用于分类和按类别统计；这里表示逐元素计算。 |
+| `split` | `holdout` | 数据用途：`train` 表示用于模型开发，`holdout` 表示留出验证；新提交默认填 `holdout`，不改变运行方式。 |
+| `driver` | `bench_custom_add_example.py` | 执行该 case 的 Python 脚本路径，相对于 `costmodel_generalization/` 目录。 |
+| `arguments` | `["--n-elements", "1024"]` | 传给脚本的自定义命令行参数，按顺序填写，所有元素均为字符串；这里表示测试 1024 个元素。 |
+
+例如，上述 `driver` 和 `arguments` 会组成
+`python bench_custom_add_example.py --n-elements 1024`，运行器还会自动追加 route、factor、
+report 等公共参数。相同脚本可以登记多个 case，例如修改 `name` 和 `--n-elements` 的值来测试不同输入规模。
+
 加载兼容的 NPU 编译环境后，在仓库根目录直接运行：
 
 ```bash
