@@ -14,5 +14,6 @@ python costmodel_tests/run.py matrix --devices 0,1 --jobs 2 --retries 3
 python costmodel_tests/run.py pytest --device 0
 ```
 
-请先加载兼容 PR 的 NPU 编译环境。100-case 的通过条件包括计算精度和 ±10% 耗时预测误差，
-没有直接断言 Auto 必须是实测最快路线。
+请先加载兼容 PR 的 NPU 编译环境。默认只检查 Auto 最终选择路线的计算精度和 ±10%
+耗时预测误差，与原 PR 的 100-case 结果表范围一致。加 `--validation-scope all` 可扩展到
+完整路线验收。没有直接断言 Auto 必须是实测最快路线。

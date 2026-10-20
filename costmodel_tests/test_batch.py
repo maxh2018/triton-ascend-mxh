@@ -23,6 +23,7 @@ p.add_argument('case')
 p.add_argument('--output-root', type=Path)
 p.add_argument('--manifest', type=Path)
 p.add_argument('--profile', type=Path)
+p.add_argument('--validation-scope', choices=('auto', 'all'), default='auto')
 a, unused = p.parse_known_args()
 output = a.output_root
 output.mkdir()
@@ -39,6 +40,8 @@ cases['cases'] = [case]
 fail = mode == 'always' or (a.case == 'flaky' and number == 1)
 modes = [('auto', 1), ('simd', 1), ('simt_only', 1), ('simt_only', 2), ('simt_only', 4)]
 modes += [(m['route'], m['factor']) for m in case.get('extra_modes', [])]
+if a.validation_scope == 'auto':
+    modes = [('auto', 1)]
 candidate = {'legal': True, 'total_system_cycles': 10, 'runtime_physical_program_count': 1}
 route = {'selected_route_elapsed_prediction': {'applied': True, 'predicted_microseconds': 10},
          'stage_model': {'routes': {'all_simd': candidate, 'mixed_simd_simt': candidate},
@@ -56,6 +59,7 @@ for mode_name, factor in modes:
                     'route': mode_name, 'factor': factor, 'returncode': 0, 'evidence_dir': str(directory)})
 (output / 'matrix_summary.json').write_text(json.dumps({'records': records}))
 result = subprocess.run([sys.executable, os.environ['BATCH_TEST_AUDIT'],
+    '--validation-scope', a.validation_scope,
     '--evidence-root', str(output), '--manifest', str(output / 'manifest.json'),
     '--profile', str(a.profile), '--output-json', str(output / 'generalization_audit.json'),
     '--output-markdown', str(output / 'generalization_audit.md')], capture_output=True)
@@ -86,10 +90,12 @@ class BatchTests(unittest.TestCase):
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
 
-    def run_batch(self, *extra, mode="flaky", expected_status=0):
+    def run_batch(self, *extra, mode="flaky", expected_status=0, scope="all"):
         output = self.root / "results"
         command = ["batch.py", "--manifest", str(self.manifest), "--profile", str(self.profile),
                    "--expected-bishengir", sys.executable, "--output-root", str(output), *extra]
+        if scope is not None:
+            command += ["--validation-scope", scope]
         with patch.object(sys, "argv", command), \
                 patch.object(self.module, "SINGLE_CASE_SCRIPT", self.worker), \
                 patch.dict(os.environ, {"BATCH_TEST_MODE": mode,
@@ -125,6 +131,18 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(batch["failed_cases"], ["flaky"])
         self.assertFalse((output / "cases/stable").exists())
         self.assertFalse((output / "cases/flaky/attempt_05").exists())
+
+    def test_default_auto_scope_runs_one_record_per_case_and_retries_only_failure(self):
+        output = self.run_batch("--jobs", "2", scope=None)
+        batch = json.loads((output / "batch_summary.json").read_text())
+        self.assertEqual(batch["validation_scope"], "auto")
+        self.assertEqual([r["attempt_count"] for r in batch["cases"]], [1, 2])
+        records = json.loads((output / "matrix_summary.json").read_text())["records"]
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(r["route"] == "auto" for r in records))
+        audit = json.loads((output / "generalization_audit.json").read_text())
+        self.assertEqual(audit["expected_record_count"], 2)
+        self.assertTrue(audit["all_pass"])
 
     def test_zero_retries_means_one_attempt(self):
         output = self.run_batch("--case", "flaky", "--retries", "0", expected_status=1)

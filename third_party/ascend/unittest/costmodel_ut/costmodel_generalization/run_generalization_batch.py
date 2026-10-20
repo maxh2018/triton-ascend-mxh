@@ -33,7 +33,7 @@ def write_json(path: Path, value: dict) -> None:
 def run_case(case: dict, args: argparse.Namespace, env: dict, device: str | None) -> dict:
     """One case owns an isolated directory; successful cases are never rerun."""
     attempts = []
-    expected = 5 + len(case.get("extra_modes", []))
+    expected = 1 if args.validation_scope == "auto" else 5 + len(case.get("extra_modes", []))
     for number in range(1, args.retries + 2):
         output = args.output_root / "cases" / case["name"] / f"attempt_{number:02d}"
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -41,6 +41,7 @@ def run_case(case: dict, args: argparse.Namespace, env: dict, device: str | None
         command = [
             sys.executable, str(SINGLE_CASE_SCRIPT), case["name"],
             "--manifest", str(args.output_root / "generalization_matrix.json"),
+            "--validation-scope", args.validation_scope,
             "--profile", str(args.output_root / "costmodel_profile.json"),
             "--expected-bishengir", str(args.expected_bishengir),
             "--output-root", str(output),
@@ -98,6 +99,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=HERE / "generalization_matrix.json")
     parser.add_argument("--case", action="append", default=[], help="exact case name; repeat to select a batch")
+    parser.add_argument("--validation-scope", choices=("auto", "all"), default="auto")
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=1, help="maximum concurrent cases (routes within a case stay serial)")
     parser.add_argument("--retries", type=int, default=3, help="extra attempts after failure; 0 disables retries")
@@ -164,6 +166,7 @@ def main() -> None:
 
     def batch_summary():
         return {"schema": "costmodel-batch-run-v1", "jobs": args.jobs, "retries": args.retries,
+                "validation_scope": args.validation_scope,
                 "case_count": len(selected), "completed_case_count": len(results),
                 "cases": [results[c["name"]] for c in selected if c["name"] in results]}
 
@@ -193,12 +196,14 @@ def main() -> None:
         "schema": "triton-costmodel-generalization-batch-run-v1",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "manifest": str(args.output_root / "generalization_matrix.json"), "records": records,
+        "validation_scope": args.validation_scope,
         "batch_summary": str(args.output_root / "batch_summary.json"),
     })
     audit_command = [sys.executable, str(HERE / "audit_generalization_matrix.py"),
                      "--evidence-root", str(args.output_root),
                      "--manifest", str(args.output_root / "generalization_matrix.json"),
                      "--profile", str(args.output_root / "costmodel_profile.json"),
+                     "--validation-scope", args.validation_scope,
                      "--output-json", str(args.output_root / "generalization_audit.json"),
                      "--output-markdown", str(args.output_root / "generalization_audit.md")]
     with (args.output_root / "audit.log").open("w", encoding="utf-8") as stream:

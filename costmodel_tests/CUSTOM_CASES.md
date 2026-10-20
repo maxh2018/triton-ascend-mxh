@@ -31,7 +31,7 @@ python costmodel_tests/run.py case \
 ```
 
 脚本依次完成：生成输入 → 运行 x + y → 检查精度 → 采集耗时 → 输出 JSON。
-统一入口再负责五条路线、失败重试和 ±10% 耗时预测验收。
+统一入口默认只运行 Auto 最终选中的路线，负责失败重试和 ±10% 耗时预测验收。
 例子展示完整接口，不表示当前 profile 对这个新 shape 已经实测通过。
 添加自己的算子时，复制这两个文件，主要替换 kernel、参考结果和清单里的名字/参数。
 
@@ -140,7 +140,9 @@ python costmodel_tests/run.py matrix --manifest "$MANIFEST" \
   --devices 0,1 --jobs 2 --retries 3
 ```
 
-系统会测试 Auto、SIMD、SIMT F1/F2/F4。计算结果正确且每条路线的预测耗时误差
-不超过 ±10% 才通过；“Auto 是否实测最快”不属于当前审计条件。
+默认与原 PR 的 100-case Auto 结果表保持一致：只测试 Auto 最终选择的路线，
+该路线计算结果正确且预测耗时误差不超过 ±10% 才通过。
+需要额外检查 SIMD、SIMT F1/F2/F4 等路线时，加 `--validation-scope all`。
+“Auto 是否实测最快”不属于当前审计条件。
 如果只有原始 pytest、尚未接入上述接口，先放入 `pytest_ut/`，只能按 pytest 原有断言运行，
 不会自动具备 CostModel 计时审计能力。

@@ -28,6 +28,7 @@ python "$here/validate_generalization_contract.py" \
 
 set +e
 python "$here/audit_generalization_matrix.py" \
+  --validation-scope all \
   --evidence-root "$output_root" \
   --manifest "$manifest" \
   --profile "$profile" \

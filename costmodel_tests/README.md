@@ -19,7 +19,7 @@ fixture 保留；逐文件用途见 [dependencies.json](dependencies.json)。
 | Profile 快照 | `third_party/ascend/costmodel/profiles/` | SIMD/SIMT selection profile、microbench JSON 和 schema；包含 pytest 校准测试所需 validator |
 | 新增统一入口 | `costmodel_tests/run.py` | pytest 全集、矩阵全量、单 case、组合执行及命令预览 |
 | 新增并发入口 | `costmodel_generalization/run_generalization_batch.py` | case 级并发、仅失败 case 重试、隔离尝试日志、最终汇总审计 |
-| 新增单 case 入口 | `costmodel_generalization/run_generalization_case.py` | 自动生成单 case 清单、运行全部规定路线并审计 |
+| 新增单 case 入口 | `costmodel_generalization/run_generalization_case.py` | 自动生成单 case 清单，默认运行 Auto 最终选择的路线并审计 |
 
 基线 main：`a176ab28b11b63d427760c15f6cd63c14ac296f1`。
 导入 PR：<https://github.com/triton-lang/triton-ascend/pull/2528>，固定提交
@@ -95,9 +95,11 @@ python third_party/ascend/unittest/costmodel_ut/costmodel_generalization/run_gen
 ```
 
 case 参数来自矩阵的 `name`，不能填 `bench_*.py` 文件名。
-脚本自动运行 Auto、SIMD、SIMT F1/F2/F4；8 个 solve_tril case 另有 Mixed/F4。
-每条路线检查计算结果，并对模型预测耗时进行默认 ±10% 误差验收。
-任何一条失败，单 case 汇总即 FAIL；已失败路线之后未运行的路线会被 audit 标为缺失。
+默认 `--validation-scope auto`，与原 PR 的 100-case Auto 结果表口径一致：
+只运行 Auto 最终选择的路线，检查该路线的计算结果和 ±10% 耗时预测误差。
+Auto 可以选择 SIMD、SIMT 或 Mixed 及对应 factor；不会单独强制执行其他候选路线。
+需要完整路线验收时设置 `--validation-scope all`，才会额外运行 SIMD、SIMT F1/F2/F4，
+以及清单中的额外 Mixed 配置，并要求全部规定路线通过。
 这里没有“Auto 必须是实测最快路线”的断言。
 统一入口 `run.py case` 会在单次尝试失败后重试整个 case，默认额外重试 3 次。
 直接调用 `run_generalization_case.py` 仍然只执行一次；重试由 batch 调度层负责。
@@ -111,8 +113,16 @@ python costmodel_tests/run.py matrix --device 0
 python costmodel_tests/run.py all --device 0
 ```
 
-完整矩阵预期有 508 条路线记录（100 × 5 + 8 条 Mixed）。原 PR runner 默认只跑 Auto，
-统一入口通过 batch 调度每个 case，单次执行自动添加 `--include-explicit`，并在运行后调用 audit。
+默认矩阵预期有 **100 条 Auto 路线记录**，每个 case 一条，与原 PR 结果表范围一致。
+完整模式 `--validation-scope all` 才有 508 条路线记录（100 × 5 + 8 条 Mixed），
+此时单次执行添加 `--include-explicit`。原 PR 的 audit 本身要求完整路线，
+本分支新增了 Auto-only 审计范围，并在 runner、batch 和 audit 之间统一传递。
+默认 Auto-only 不会因为未选中路线的预测误差或缺失而失败。
+
+```bash
+# 可选：扩展为完整路线验收
+python costmodel_tests/run.py matrix --device 0 --validation-scope all
+```
 矩阵默认每个路线使用 3 个独立计时进程，取 profiler 平均耗时的中位样本。
 
 ## 并发与失败重试
@@ -120,7 +130,8 @@ python costmodel_tests/run.py all --device 0
 `--jobs` 控制同时运行的 **case 数**，默认 1；同一 case 内的各条路线仍串行。
 `--retries` 是首次失败后的**额外重试次数**，默认 3，即一个 case 最多运行 4 次。
 设置 0 则不重试。编译/运行失败、精度失败、缺少证据、预测误差 audit 失败均可触发重试。
-只重试失败的 case，该 case 的标准路线整体重新执行，已经通过的其他 case 不会再运行。
+只重试失败的 case：默认重新执行 Auto；完整模式重新执行该 case 的全部规定路线。
+已经通过的其他 case 不会再运行。
 
 ```bash
 # 单卡上同时运行 4 个 case，失败后额外重试 3 次
@@ -199,8 +210,8 @@ matrix/
 
 直接运行单 case 脚本时，默认输出到该脚本旁的 `single_case_results/`，
 并额外生成 `runner.log`、`audit.log`。日志、trace、dump、结果默认不提交 Git。
-batch 汇总只引用各 case 的最后一次尝试，之前的失败日志始终保留；最终 audit 仍按每个 case
-全部规定路线审计。`batch_summary.json` 的 `failed_cases` 列出重试用尽仍失败的 case。
+batch 汇总只引用各 case 的最后一次尝试，之前的失败日志始终保留；最终 audit 使用同一
+`validation_scope`（默认 `auto`）。`batch_summary.json` 的 `failed_cases` 列出重试用尽仍失败的 case。
 batch 的 `matrix_summary.json` 供 audit 读取；原 PR 的 shard 合并/跨族 gates 仍应使用原始
 `run_generalization_matrix.py`/`run_generalization_shard.sh` 的完整元数据输出。
 审计判据：运行成功、`correct=true`、合法预测与实测存在，且
@@ -216,7 +227,7 @@ profiler 数据优先；没有 profiler 时原审计脚本会退回 Event median
 |---|---|
 | `run_generalization_matrix.py` | case/family/route/shard 筛选，运行与证据收集 |
 | `run_generalization_batch.py` | 在原 PR runner 外调度并发、失败重试和最终结果审计 |
-| `audit_generalization_matrix.py` | 逐路线检查预测误差，要求传入 manifest 的全部规定路线存在 |
+| `audit_generalization_matrix.py` | 默认仅审计 Auto；`--validation-scope all` 使用原 PR 完整路线判据 |
 | `run_generalization_shard.sh` | 按设备/分片运行完整路线；可设 `COSTMODEL_ENV_SCRIPT` 加载自己的环境 |
 | `merge_generalization_runs.py` | 合并完整矩阵的多个分片结果 |
 | `run_generalization_gates.sh` | 合并、合同自检和跨族残差诊断，适用于完整矩阵，不适用于单 case |

@@ -73,6 +73,8 @@ def main() -> None:
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=HERE / "generalization_matrix.json")
     parser.add_argument("--maximum-error", type=float, default=0.10)
+    parser.add_argument("--validation-scope", choices=("auto", "all"), default="auto",
+                        help="auto: only the selected route; all: original full-route audit")
     args = parser.parse_args()
 
     summary = load(args.evidence_root / "matrix_summary.json")
@@ -80,8 +82,9 @@ def main() -> None:
     manifest = load(args.manifest)
     expected = {}
     for case in manifest["cases"]:
-        modes = list(STANDARD_MODES)
-        modes.extend((entry["route"], int(entry.get("factor", 1))) for entry in case.get("extra_modes", []))
+        modes = [("auto", 1)] if args.validation_scope == "auto" else list(STANDARD_MODES)
+        if args.validation_scope == "all":
+            modes.extend((entry["route"], int(entry.get("factor", 1))) for entry in case.get("extra_modes", []))
         for mode, factor in modes:
             key = (case["name"], mode, factor)
             if key in expected:
@@ -91,6 +94,9 @@ def main() -> None:
     locations = {}
     records = {}
     for record in summary["records"]:
+        # Auto-only audits may also read an older complete-route result directory.
+        if args.validation_scope == "auto" and (record["route"], int(record["factor"])) != ("auto", 1):
+            continue
         base = record["name"].split("__", 1)[0]
         metadata[base] = {
             "family": record["family"],
@@ -168,6 +174,7 @@ def main() -> None:
     results.sort(key=lambda row: (row["case"], row["mode"], row["factor"]))
     report = {
         "schema": "triton-costmodel-generalization-audit-v1",
+        "validation_scope": args.validation_scope,
         "maximum_absolute_relative_error": args.maximum_error,
         "expected_record_count": len(expected),
         "matrix_record_count": len(summary["records"]),
@@ -178,6 +185,8 @@ def main() -> None:
     args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     lines = [
         "# Cost model cross-operator audit",
+        "",
+        f"Validation scope: {args.validation_scope}",
         "",
         "| Case | Family | Split | Route | Factor | Predicted (us) | Measured (us) | Error | Gate |",
         "|---|---|---|---|---:|---:|---:|---:|---|",

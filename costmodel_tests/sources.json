@@ -404,5 +404,6 @@
   ],
   "layout": "Tests-only branch; compiler/build/CI and unrelated files removed after initial import.",
   "local_fixture_dependencies": "costmodel_tests/dependencies.json",
-  "local_batch_runner": "run_generalization_batch.py: per-case concurrency, selective failure retries and final-attempt audit; tested with simulated subprocesses"
+  "local_batch_runner": "run_generalization_batch.py: per-case concurrency, selective failure retries and final-attempt audit; tested with simulated subprocesses",
+  "validation_scope": "Default auto: match PR 100-case Auto table. Optional all: original complete-route audit."
 }

@@ -9,6 +9,7 @@
 - [必须保留的本地测试依赖](costmodel_tests/dependencies.json)
 
 包含 pytest_ut 的 374 个测试文件，以及 PR #2528 的 100-case 回归矩阵。
+矩阵默认只验收 Auto 最终选择的路线；完整路线验收可指定 `--validation-scope all`。
 加载 NPU 编译环境后，在仓库根目录执行：
 
 ```bash

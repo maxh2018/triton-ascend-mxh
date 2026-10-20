@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and audit one manifest case using all standard routes.
+"""Run and audit one manifest case (Auto selected route by default).
 
 Load the CANN/Triton/bishengir environment before running this script on an NPU
 host. Example: python run_generalization_case.py softmax_original --device 0
@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("case", help="exact case name from generalization_matrix.json")
     parser.add_argument("--device", help="ASCEND_RT_VISIBLE_DEVICES value")
     parser.add_argument("--manifest", type=Path, default=HERE / "generalization_matrix.json")
+    parser.add_argument("--validation-scope", choices=("auto", "all"), default="auto")
     parser.add_argument("--output-root", type=Path, help="new or empty output directory")
     parser.add_argument(
         "--profile", type=Path,
@@ -84,13 +85,14 @@ def main() -> None:
     subset.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
     env["TRITON_ASCEND_AUTO_SIMT_PROFILE"] = str(profile)
-    expected_count = 5 + len(selected[0].get("extra_modes", []))
+    expected_count = 1 if args.validation_scope == "auto" else 5 + len(selected[0].get("extra_modes", []))
     print(f"Case: {args.case}; expected route records: {expected_count}", flush=True)
     print(f"Output: {output}", flush=True)
     print("[1/2] Running correctness checks and profiling; see runner.log", flush=True)
     runner_status = run_logged([
         sys.executable, str(HERE / "run_generalization_matrix.py"),
-        "--manifest", str(subset), "--include-explicit",
+        "--manifest", str(subset),
+        *(["--include-explicit"] if args.validation_scope == "all" else []),
         "--profile", str(profile),
         "--expected-bishengir", str(Path(compiler).resolve()),
         "--output-root", str(output),
@@ -115,6 +117,7 @@ def main() -> None:
             "--evidence-root", str(output),
             "--manifest", str(output / "generalization_matrix.json"),
             "--profile", str(output / "costmodel_profile.json"),
+            "--validation-scope", args.validation_scope,
             "--output-json", str(audit_json),
             "--output-markdown", str(audit_markdown),
         ], env, output / "audit.log")
@@ -131,6 +134,7 @@ def main() -> None:
     )
     result = {
         "case": args.case, "status": "PASS" if passed else "FAIL",
+        "validation_scope": args.validation_scope,
         "runner_exit_status": runner_status, "audit_exit_status": audit_status,
         "audit_all_pass": audit.get("all_pass") if audit else None,
         "expected_record_count": expected_count,

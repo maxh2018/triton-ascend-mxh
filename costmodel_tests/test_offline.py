@@ -58,6 +58,7 @@ class OfflineTests(unittest.TestCase):
             summary = root / "matrix_summary.json"
             summary.write_text(json.dumps({"records": records}))
             command = [sys.executable, str(GENERAL / "audit_generalization_matrix.py"),
+                       "--validation-scope", "all",
                        "--evidence-root", str(root), "--manifest", str(root / "manifest.json"),
                        "--profile", str(root / "profile.json"), "--output-json", str(root / "audit.json"),
                        "--output-markdown", str(root / "audit.md")]
@@ -71,6 +72,22 @@ class OfflineTests(unittest.TestCase):
             self.assertEqual(subprocess.run(command, capture_output=True).returncode, 1)
             report = json.loads((root / "audit.json").read_text())
             self.assertTrue(any("missing_matrix_record" in r["failure_reasons"] for r in report["results"]))
+
+            # Auto-only accepts the selected route even if an unselected route fails its prediction gate.
+            summary.write_text(json.dumps({"records": records}))
+            first.write_text(json.dumps({"returncode": 0, "benchmark": {
+                "correct": True, "profiler": {"average_us": 10}}}))
+            explicit = root / records[1]["name"] / "evidence.json"
+            explicit.write_text(json.dumps({"returncode": 0, "benchmark": {
+                "correct": True, "profiler": {"average_us": 100}}}))
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 1)
+            auto_command = command.copy()
+            del auto_command[2:4]  # Default audit scope is Auto, no explicit override.
+            self.assertEqual(subprocess.run(auto_command, capture_output=True).returncode, 0)
+            auto_report = json.loads((root / "audit.json").read_text())
+            self.assertEqual(auto_report["validation_scope"], "auto")
+            self.assertEqual(auto_report["expected_record_count"], 1)
+            self.assertEqual(auto_report["audited_record_count"], 1)
 
     def test_launcher_propagates_failed_batch(self):
         spec = importlib.util.spec_from_file_location("suite_runner", ROOT / "costmodel_tests/run.py")
@@ -119,8 +136,48 @@ class OfflineTests(unittest.TestCase):
                 else:
                     arguments = json.loads(stream.getvalue().splitlines()[-1].split(": ", 1)[1])
                     self.assertEqual(arguments[arguments.index("--manifest") + 1], str(manifest.resolve()))
+                    self.assertEqual(arguments[arguments.index("--validation-scope") + 1], "auto")
                     self.assertFalse((Path(directory) / suite).exists())
         self.assertEqual((GENERAL / "generalization_matrix.json").read_bytes(), original)
+
+    def test_single_case_forwards_scope_to_runner_and_audit(self):
+        spec = importlib.util.spec_from_file_location("single_case_scope", GENERAL / "run_generalization_case.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"cases": [{"name": "example", "extra_modes": [
+                {"route": "mixed", "factor": 4}]}]}))
+            profile = root / "profile.json"
+            profile.write_text("{}")
+            for scope, count in (("auto", 1), ("all", 6)):
+                output = root / scope
+
+                def fake_run(command, env, log):
+                    if Path(command[1]).name == "run_generalization_matrix.py":
+                        self.assertEqual("--include-explicit" in command, scope == "all")
+                        for name in ("matrix_summary.json", "generalization_matrix.json", "costmodel_profile.json"):
+                            (output / name).write_text("{}")
+                    else:
+                        self.assertEqual(command[command.index("--validation-scope") + 1], scope)
+                        (output / "generalization_audit.json").write_text(json.dumps({
+                            "all_pass": True, "expected_record_count": count, "audited_record_count": count}))
+                    return 0
+
+                command = ["case.py", "example", "--manifest", str(manifest), "--profile", str(profile),
+                           "--expected-bishengir", sys.executable, "--output-root", str(output)]
+                if scope == "all":
+                    command += ["--validation-scope", "all"]
+                with patch.object(sys, "argv", command), patch.object(module, "run_logged", side_effect=fake_run), \
+                        patch.dict("os.environ", {"TRITON_ASCEND_COMPILE_MODE": ""}), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as stopped:
+                        module.main()
+                self.assertEqual(stopped.exception.code, 0)
+                summary = json.loads((output / "single_case_summary.json").read_text())
+                self.assertEqual(summary["validation_scope"], scope)
+                self.assertEqual(summary["expected_record_count"], count)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ def main() -> None:
     parser.add_argument("--case", help="exact matrix case name; required for suite=case")
     parser.add_argument("--manifest", type=Path, default=GENERAL / "generalization_matrix.json",
                         help="matrix case list; use a separate manifest for custom cases")
+    parser.add_argument("--validation-scope", choices=("auto", "all"), default="auto",
+                        help="default: Auto selected route (PR table); all: explicit routes too")
     devices = parser.add_mutually_exclusive_group()
     devices.add_argument("--device", help="ASCEND_RT_VISIBLE_DEVICES")
     devices.add_argument("--devices", help="matrix device pool, e.g. 0,1,2,3; one case per device")
@@ -69,6 +71,7 @@ def main() -> None:
         evidence = output / "matrix"
         common = ["--output-root", str(evidence),
                   "--manifest", str(args.manifest.resolve()),
+                  "--validation-scope", args.validation_scope,
                   "--jobs", str(args.jobs), "--retries", str(args.retries),
                   "--triton-root", str(args.triton_root.resolve()),
                   "--npuir-root", str(args.npuir_root.resolve())]
