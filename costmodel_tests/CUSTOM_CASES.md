@@ -24,7 +24,7 @@ python costmodel_tests/run.py case \
 
 建议复制现有
 [bench_muls_add_costmodel.py](../third_party/ascend/unittest/costmodel_ut/costmodel_generalization/bench_muls_add_costmodel.py)，
-替换 kernel、输入和参考结果，保留参数解析、选路、正确性检查、计时和 JSON 输出部分。
+作为提交模板，只需替换其中 kernel、输入和参考结果，保留参数解析、选路、正确性检查、计时和 JSON 输出部分。
 
 ## 1. 文件放哪里
 
