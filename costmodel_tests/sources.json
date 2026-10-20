@@ -401,5 +401,7 @@
     "Explicit --profile also selects the compiler profile",
     "Added unified suite entry point and single-case runner/audit wrapper",
     "Added usage documentation and CPU-only integrity/audit tests"
-  ]
+  ],
+  "layout": "Tests-only branch; compiler/build/CI and unrelated files removed after initial import.",
+  "local_fixture_dependencies": "costmodel_tests/dependencies.json"
 }

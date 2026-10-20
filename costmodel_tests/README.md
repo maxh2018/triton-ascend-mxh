@@ -3,6 +3,12 @@
 本分支 `costmodel/test-cases` 用于保存和持续扩充 CostModel 测试资料。
 目标仓库为 <https://github.com/maxh2018/triton-ascend-mxh>。
 
+本分支已精简为测试资料仓：移除了编译器主体、构建系统、CI、其他后端和旧项目文档。
+少量测试直接读取 backend Python 或 C++ 源码做 AST/文本断言，这些文件作为必要测试
+fixture 保留；逐文件用途见 [dependencies.json](dependencies.json)。
+不要在本分支运行 `pip install .` 或尝试构建编译器，编译器需在独立环境安装。
+`LICENSE` 和 `Open_Source_Software_Notice` 保留用于收录代码的授权说明。
+
 ## 收录范围和来源
 
 | 测试集 | 路径 | 本次收录 |
@@ -33,8 +39,8 @@ Triton-Ascend 和 bishengir 环境。Python 建议使用原 PR 的 3.11 环境�
 部分测试还有额外依赖（例如 MindSpore），应按被测文件安装，不能把 collection 失败当作通过。
 原 PR 的离线残差诊断另需 `numpy`。
 
-**矩阵需要安装支持 PR #2528 compile options 和 route JSON 格式的 Triton-Ascend，以及匹配的
-bishengir/NPU-IR。直接安装本分支继承的 main 编译器，不保证能运行 PR 测试。**
+**矩阵需要另外安装支持 PR #2528 compile options 和 route JSON 格式的 Triton-Ascend，
+以及匹配的 bishengir/NPU-IR。本测试分支本身不提供可构建的编译器。**
 先准备编译器环境，再把本分支作为测试代码使用。默认 profile 对应 950PR/A5；950DT 快照
 仅为 bootstrap，不可用它声称完成生产 route selection 验收。其他目标需显式指定兼容 profile。
 

@@ -1,231 +1,27 @@
-<!-- markdownlint-disable-file MD041 -->
+# CostModel 测试资料仓
 
-<h3 align="center"><font size="68">
-Triton-Ascend
-</font></h3>
+本分支仅保存 CostModel 测试用例、测试依赖、profile 和说明文档。
+它不再包含可构建的完整 Triton-Ascend 编译器；请使用单独安装的兼容编译环境运行测试。
 
-<p align="center">
-  <a href="https://deepwiki.com/triton-lang/triton-ascend">
-    <img src="https://deepwiki.com/badge.svg" alt="Ask AI on DeepWiki">
-  </a>
-</p>
+- [测试脚本使用说明](costmodel_tests/README.md)
+- [用例来源记录](costmodel_tests/sources.json)
+- [必须保留的本地测试依赖](costmodel_tests/dependencies.json)
 
-<p align="center">
-<a href="README.md"><b>English</b></a> | <a href="README_zh.md"><b>中文</b></a>
-</p>
-
-<p align="center">
-| <a href="https://triton-ascend.readthedocs.io/en/latest/"><b>Official Documentation</b></a> | <a href="https://www.hiascend.com/cn/developer/operator?tag=triton&tab=triton"><b>Operator Development User Journey</b></a> | <a href="https://docs.google.com/document/d/1qfat2wZtO2nfZb5FC2dWAcR6sTqgTNSvvh7MzTDoI4s/edit?pli=1&tab=t.0"><b>Community Meetings</b></a> | <a href="https://www.hiascend.com/"><b>About Ascend</b></a> |
-</p>
-
----
-
-## 🔥 Latest News
-
-- [2026.10.15] Triton-Ascend 3.2.2.post2 and 3.6.0 official releases are now available
-- [2026.07.31] Triton-Ascend 3.2.2 official release is now available
-- [2026.04.30] Triton-Ascend 3.2.1 official release is now available
-- [2026.01.20] Triton-Ascend 3.2.0 official release is now available
-
-<div style="margin-left:1em">
-<details>
-<summary>More latest news</summary>
-
-- [2025.11.14] Triton-Ascend 3.2.0rc4 pre-release is now available:<br>- [Extended the tt.fp_to_fp interface to add FP8 type conversion support](https://gitcode.com/Ascend/triton-ascend/pull/891) <br>- [Added the scatter_ub_to_out interface to support efficient data scatter operations from UB to GM](https://gitcode.com/Ascend/triton-ascend/pull/864)
-- [2025.09.30] Improved Scan/Sort Triton Python APIs, supporting non-contiguous memory access, and completed adaptation of key Triton operators in vLLM and sglang open-source repositories
-- [2025.09.19] Supported Triton-Ascend [nightly package](https://test.pypi.org/project/triton-ascend/#history) extraction
-- [2025.08.15] Improved Atomic-class Triton Python API support, completed adaptation of key Triton operators in the Flaggems open-source repository, and provided reference examples for high-performance implementations of simple operators such as Matmul
-- [2025.06.30] Supported 85% of Triton Python APIs, supporting contiguous memory access, covering basic usage scenarios
-- [2025.05.20] Triton-Ascend is open-sourced, Gitcode repository is alive!
-
-</details>
-</div>
-
----
-
-## 📖 Quick Installation
-
-### Environment Preparation
-
-#### Hardware Requirements
-
-Supported operating systems: linux (aarch64/x86_64)
-
-Supported Ascend products: Atlas A2 products\Atlas A3 products\Ascend 950PR&950DT products
-
-Minimum hardware configuration: single card with 32GB memory (recommended)
-
-#### Software Dependencies
-
-Determine and install the Python, CANN, and TorchNPU software versions. This step must be completed before both package installation and source code compilation installation.
-
-- Python version selection: py3.10-py3.13 are all supported.
-
-- CANN version selection: You can visit the Ascend community website and follow the <a href="https://www.hiascend.com/cann/download" style="text-decoration: none; color: #0066cc;">community software installation guide</a> to complete the CANN installation and configuration. It is recommended to download and install version 9.2.0.
-
-- TorchNPU version selection: The currently bundled TorchNPU version is 2.10.0.post7.
-
-### Accessing Ascend NPU
-
-If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the HiDevLab platform to apply for free access.
-
-### Quick Installation
+包含 pytest_ut 的 374 个测试文件，以及 PR #2528 的 100-case 回归矩阵。
+加载 NPU 编译环境后，在仓库根目录执行：
 
 ```bash
-# Taking the installation of triton-ascend 3.6.0 as an example
-pip install triton-ascend --extra-index-url=https://mirrors.huaweicloud.com/ascend/repos/pypi
+python costmodel_tests/run.py list
+python costmodel_tests/run.py case --case softmax_original --device 0
+python costmodel_tests/run.py matrix --device 0
+python costmodel_tests/run.py pytest --device 0
 ```
 
-### Source Installation
+`backend/`、`python/triton/runtime/` 和 `LegacyMemoryAccess/` 下保留的少量文件是
+源码合同测试直接读取的 fixture，不构成编译器安装包。原编译器完整源码仍可从 main 分支取得。
 
-<div style="margin-left:1em">
-<details>
-<summary>More source installation</summary>
-
-#### Install Dependencies
+无需 NPU 的资料自检：
 
 ```bash
-apt update
-# Supported clang versions: clang-15, clang-17, clang-20.1.8
-apt install zlib1g-dev clang-15 lld-15
-apt install ccache # optional
-update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
-update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
-pip install ninja cmake wheel pybind11 # build-time dependencies
+python -m unittest discover -s costmodel_tests -p test_offline.py -v
 ```
-
-#### Build Triton-Ascend
-
-```bash
-git clone https://github.com/triton-lang/triton-ascend.git && cd triton-ascend
-git checkout main
-pip install -e .
-```
-
-#### Custom LLVM Build (Optional)
-
-```bash
-# If you need to customize the LLVM build process, you can execute this step first before compiling Triton-Ascend
-# Check out the specified version of LLVM source code and apply patches
-git clone --no-checkout https://github.com/llvm/llvm-project.git
-cd llvm-project
-git checkout f6ded0be897e2878612dd903f7e8bb85448269e5
-wget https://raw.githubusercontent.com/triton-lang/triton-ascend/main/third_party/ascend/patch/llvm_patch_f6ded0b.patch
-git apply llvm_patch_f6ded0b.patch
-
-export LLVM_INSTALL_PREFIX=/path/to/llvm-install
-
-# Build a custom LLVM version
-cd {PATH_TO}/llvm_project
-mkdir build
-cd build
-cmake ../llvm \
-    -G Ninja \
-    -DCMAKE_C_COMPILER=/usr/bin/clang-15 \
-    -DCMAKE_CXX_COMPILER=/usr/bin/clang++-15 \
-    -DCMAKE_LINKER=/usr/bin/lld-15 \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLVM_ENABLE_ASSERTIONS=ON \
-    -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld" \
-    -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" \
-    -DLLVM_ENABLE_LLD=ON \
-    -DCMAKE_INSTALL_PREFIX=${LLVM_INSTALL_PREFIX}
-ninja install
-
-# Compile Triton-Ascend
-git clone https://github.com/triton-lang/triton-ascend.git && cd triton-ascend
-
-LLVM_SYSPATH=${LLVM_INSTALL_PREFIX} \
-TRITON_BUILD_WITH_CCACHE=true \
-TRITON_BUILD_WITH_CLANG_LLD=true \
-TRITON_BUILD_PROTON=OFF \
-TRITON_WHEEL_NAME="triton-ascend" \
-TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF" \
-python3 setup.py install
-```
-
-</details>
-</div>
-
-### Docker Image Usage
-
-<div style="margin-left:1em">
-<details>
-<summary>More Docker image usage</summary>
-
-- We provide a Dockerfile to help you install the Docker environment image. The build process uses the `quay.io/ascend/cann` pre-built image as the base image, skipping the CANN installation step and significantly speeding up the build.
-
-- You need to specify the `CANN_BASE_IMAGE` parameter via `--build-arg` to select the appropriate CANN base image for your machine. Available CANN base image tags can be found at [quay.io/ascend/cann](https://quay.io/repository/ascend/cann?tab=tags).
-
-- You can check the NPU model on your system using the npu-smi command.
-
-```bash
-git clone https://github.com/triton-lang/triton-ascend.git && cd triton-ascend
-docker build \
---build-arg CANN_BASE_IMAGE=quay.io/ascend/cann:9.1.0-a3-ubuntu22.04-py3.12 \
--t triton-ascend-image:latest -f ./docker/Dockerfile .
-```
-
-- To start a container from this image, you can refer to the following command:
-
-```bash
-docker run -u 0 -dit --shm-size=512g --name=triton-ascend_container --net=host --privileged \
---security-opt seccomp=unconfined \
---device=/dev/davinci0 \
---device=/dev/davinci1 \
---device=/dev/davinci2 \
---device=/dev/davinci3 \
---device=/dev/davinci4 \
---device=/dev/davinci5 \
---device=/dev/davinci6 \
---device=/dev/davinci7 \
---device=/dev/davinci_manager \
---device=/dev/devmm_svm \
---device=/dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /home:/home \
--v /etc/ascend_install.info:/etc/ascend_install.info \
-triton-ascend-image:latest \
-/bin/bash
-
-# Enter the container
-docker exec -u root -it triton-ascend_container /bin/bash
-```
-
-</details>
-</div>
-
-## ✏️ Documentation Entry
-
-- [Quick Start](./docs/en/quick_start.md)
-
-- [Complete Online Documentation (Recommended)](https://triton-ascend.readthedocs.io/en/latest/index.html)
-
-- [Installation Guide](./docs/en/installation_guide.md)
-
-- [Architecture Design and Core Features](./docs/en/architecture_design_and_core_features.md)
-
-- [Operator Development Guide](./docs/en/programming_guide/index.md)
-
-- [Operator Migration Guide](./docs/en/migration_guide/migrate_from_gpu.md)
-
-- [Operator Debugging Guide](./docs/en/debug_guide/debugging.md#)
-
-- [Performance Tuning Guide](./docs/en/debug_guide/profiling.md#)
-
-- [Environment Variables Reference](./docs/en/environment_variable_and_compiler_options_reference.md)
-
-- [FAQ](./docs/en/FAQ.md)
-
-## 🏘️ Community Activities
-
-1. [Meeting Time, Link, and Minutes](https://docs.google.com/document/d/1qfat2wZtO2nfZb5FC2dWAcR6sTqgTNSvvh7MzTDoI4s/edit?pli=1&tab=t.0)
-
-## 🤝 Community and Contribution
-
-- Welcome to participate in Triton-Ascend development and code contribution. For details, please refer to the [Contribution Guide](./docs/en/community/CONTRIBUTING.md)
-
-- Please report any bugs you encounter via [Issue](https://github.com/triton-lang/triton-ascend/issues).
