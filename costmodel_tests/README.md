@@ -9,7 +9,13 @@
 
 ### 清单怎么选
 
-每个分类目录都有一份 `manifest.json`。不指定分类时使用 `ci`；不指定清单时使用所选分类的默认清单。
+**显式清单优先，分类只提供默认清单。**
+
+1. 指定 `--manifest`：完全按该清单执行，`--category` 不参与选择，也不限制用例目录。
+2. 未指定 `--manifest`：读取 `cases/<category>/manifest.json`。
+3. 两者都未指定：读取 `cases/ci/manifest.json`（原始 100 个 case）。
+
+显式清单不存在或格式错误时直接报错，不会回退到其他清单。以下是未指定 `--manifest` 时的默认值：
 
 | 分类 | 默认清单 | 内容 |
 |---|---|---|
@@ -33,8 +39,8 @@ python costmodel_tests/run.py [run | list] [选项]
 
 | 选项 | 默认值 | 含义 |
 |---|---|---|
-| `--category <分类>` | `ci` | 选择 `cases/` 下的分类目录 |
-| `--manifest <JSON路径>` | 分类目录的 `manifest.json` | 改用指定清单；相对路径以当前目录为准，也支持绝对路径 |
+| `--manifest <JSON路径>` | 未指定时使用分类默认值 | 最高优先级；相对路径以当前目录为准，也支持绝对路径 |
+| `--category <分类>` | `ci` | 仅在没有 `--manifest` 时选择默认清单，取值 `ci`、`personal`、`operator_repos` |
 | `--case <名称>` | 整份清单 | 只运行指定条目，可重复填写；名称来自清单的 `name` |
 | `--device <卡号>` | 继承环境 | 使用指定 NPU，例如 `--device 0` |
 | `--devices <卡号列表>` | 无 | 多卡设备池，例如 `0,1`；与 `--device` 互斥 |
@@ -43,7 +49,7 @@ python costmodel_tests/run.py [run | list] [选项]
 | `--output-root <目录>` | 自动生成 | 结果目录，必须是新目录或空目录 |
 | `--dry-run` | 关闭 | 只打印计划，不运行测试、不创建结果目录 |
 
-**清单中的 `driver` 相对于清单所在目录。** 只上传脚本还不够，需要把脚本和参数登记到清单。
+**清单中的 `driver` 相对于清单所在目录，也支持绝对路径。** 一份清单可同时引用 CI、个人和算子仓用例；分类用于存放文件，清单决定本次执行哪些用例。
 字段说明和最小例子见 [自定义用例提交规范](CUSTOM_CASES.md)。
 
 <details>
@@ -74,13 +80,28 @@ pytest 通过公共适配器保留原断言并捕获 JIT kernel；每种启动�
 
 ## 2. 运行测试
 
+### 运行自己的清单（优先）
+
+```bash
+python costmodel_tests/run.py --manifest my_tests.json --device 0
+```
+
+无需指定 `--category`。可先用仓库自带的 [跨目录示例清单](mixed_manifest.example.json) 查看组合：
+
+```bash
+python costmodel_tests/run.py list --manifest costmodel_tests/mixed_manifest.example.json
+```
+
+这份示例同时引用个人向量加法 benchmark 和 CI 的 pytest 向量加法文件，尚未进行 NPU 验证。
+将 `list` 去掉即可按清单执行；清单可以保存在分类目录之外。
+
 ### 默认运行：CI 原始 100 个 case
 
 ```bash
 python costmodel_tests/run.py --device 0
 ```
 
-等价于显式选择 `--category ci --manifest cases/ci/manifest.json`。
+等价于显式选择 `--manifest cases/ci/manifest.json`。
 
 ### 查看或只运行指定 case
 
@@ -123,8 +144,7 @@ python costmodel_tests/run.py --category personal --device 0
 python costmodel_tests/run.py --category operator_repos --device 0
 
 # 使用仓库提供的个人向量加法示例清单
-python costmodel_tests/run.py --category personal \
-  --manifest cases/personal/examples/custom_manifest.example.json --device 0
+python costmodel_tests/run.py --manifest cases/personal/examples/custom_manifest.example.json --device 0
 ```
 
 默认清单为空时，可用 `list` 查看；登记用例后才能运行。
@@ -156,13 +176,15 @@ python costmodel_tests/run.py --device 0 --retries 0
 
 | 文件 | 用途 |
 |---|---|
-| `summary.json` | **整次运行的 PASS/FAIL**、输入清单和退出码 |
+| `summary.json` | **整次运行的 PASS/FAIL**、实际清单、选择来源和退出码 |
 | `report.md` | **优先阅读**：每个条目的精度、耗时、尝试次数，以及预测/实测/误差 |
 | `report.json` | 完整结果，供程序读取 |
 | `batch_summary.json` | `failed_cases`、每次日志路径和最终尝试目录 |
 | `batch_summary.partial.json` | 执行中的完成进度 |
 | `manifest.json`、`costmodel_profile.json` | 本次清单和 profile 快照 |
 | `cases/<名称>/attempt_01.log` | 首次日志；重试依次生成 `attempt_02.log` 等 |
+
+`summary.json` 的 `manifest_source` 为 `explicit`（显式指定）或 `category_default`（分类默认值）。显式清单的 `category` 为 `null`，表示这次运行不归属于某个分类目录。
 
 <details>
 <summary>单条用例的原始证据</summary>

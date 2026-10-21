@@ -58,6 +58,85 @@ class ManifestTests(unittest.TestCase):
                                     cwd=ROOT, capture_output=True)
             self.assertEqual(result.returncode, 2)
 
+    def test_explicit_manifest_overrides_category_and_can_mix_ci_and_personal(self):
+        manifest = ROOT / 'costmodel_tests/mixed_manifest.example.json'
+        cases = load_manifest(manifest)['cases']
+        self.assertTrue(Path(cases[0]['driver']).is_relative_to(ROOT / 'cases/personal'))
+        self.assertTrue(Path(cases[1]['driver']).is_relative_to(ROOT / 'cases/ci'))
+        for category in (None, 'ci', 'personal', 'operator_repos', 'unused-category'):
+            command = [sys.executable, str(ROOT / 'costmodel_tests/run.py'), 'list', '--manifest', str(manifest)]
+            if category is not None:
+                command += ['--category', category]
+            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Manifest source: explicit', result.stdout)
+            self.assertIn('Cases: 2', result.stdout)
+            self.assertNotIn('Category:', result.stdout)
+            self.assertIn('custom_add_f32_n1024', result.stdout)
+            self.assertIn('pytest_ci_vector_add', result.stdout)
+
+    def test_driver_paths_are_relative_to_json_not_cwd_or_category(self):
+        for category in ('ci', 'personal', 'operator_repos'):
+            directory = self.root / category
+            directory.mkdir()
+            (directory / 'driver.py').write_text('# driver\n')
+        folder = self.root / 'manifests'
+        folder.mkdir()
+        manifest = folder / 'mixed.json'
+        manifest.write_text(json.dumps({'cases': [
+            {'name': 'ci', 'driver': '../ci/driver.py'},
+            {'name': 'personal', 'driver': '../personal/driver.py'},
+            {'name': 'operators', 'driver': str(self.root / 'operator_repos/driver.py')},
+        ]}))
+        result = subprocess.run([sys.executable, str(ROOT / 'costmodel_tests/run.py'), 'list',
+                                 '--category', 'ci', '--manifest', str(manifest)],
+                                cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Cases: 3', result.stdout)
+        for category in ('ci', 'personal', 'operator_repos'):
+            self.assertIn(str((self.root / category / 'driver.py').resolve()), result.stdout)
+
+    def test_explicit_run_summary_does_not_assign_cases_to_fallback_category(self):
+        spec = importlib.util.spec_from_file_location('manifest_priority_launcher', ROOT / 'costmodel_tests/run.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        manifest = ROOT / 'costmodel_tests/mixed_manifest.example.json'
+        output = self.root / 'output'
+
+        def fake_run(command, **kwargs):
+            self.assertEqual(command[command.index('--manifest') + 1], str(manifest))
+            self.assertNotIn('--category', command)
+            output.mkdir()
+            (output / 'batch_summary.json').write_text('{"status": "PASS"}')
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(sys, 'argv', ['run.py', '--manifest', str(manifest), '--category', 'personal',
+                                       '--output-root', str(output)]), \
+                patch.object(module.subprocess, 'run', side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as stopped:
+                module.main()
+        self.assertEqual(stopped.exception.code, 0)
+        summary = json.loads((output / 'summary.json').read_text())
+        self.assertEqual(summary['manifest_source'], 'explicit')
+        self.assertIsNone(summary['category'])
+        self.assertEqual(summary['case_count'], 2)
+
+    def test_bad_explicit_manifest_never_falls_back_and_category_is_checked_only_for_defaults(self):
+        invalid = self.root / 'invalid.json'
+        invalid.write_text('{"cases": "invalid"}')
+        for manifest in (self.root / 'missing.json', invalid):
+            result = subprocess.run([sys.executable, str(ROOT / 'costmodel_tests/run.py'),
+                                     '--manifest', str(manifest), '--category', 'ci', '--dry-run'],
+                                    cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertNotIn('Cases: 100', result.stdout)
+        for category in ('missing-category', ''):
+            result = subprocess.run([sys.executable, str(ROOT / 'costmodel_tests/run.py'),
+                                     '--category', category, '--dry-run'],
+                                    cwd=ROOT, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+
     def test_manifest_validation_rejects_duplicate_unknown_runner_missing_driver_and_bad_arguments(self):
         driver = self.root / 'driver.py'
         driver.write_text('# driver\n')
@@ -117,11 +196,13 @@ def test_add(n):
         output = self.root / 'output'
         env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1', 'TRITON_ASCEND_COMPILE_MODE': ''}
         command = [sys.executable, 'costmodel_tests/run.py', '--manifest', str(manifest),
-                   '--profile', str(profile), '--output-root', str(output), '--retries', '2']
+                   '--category', 'operator_repos', '--profile', str(profile), '--output-root', str(output), '--retries', '2']
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         summary = json.loads((output / 'summary.json').read_text())
         self.assertEqual(summary['status'], 'PASS')
+        self.assertEqual(summary['manifest_source'], 'explicit')
+        self.assertIsNone(summary['category'])
         batch = json.loads((output / 'batch_summary.json').read_text())
         case = batch['cases'][0]
         self.assertEqual(case['attempt_count'], 2)

@@ -27,7 +27,6 @@ python costmodel_tests/run.py --category personal --device 0
 `examples/` 是可复制的向量加法示例，默认不加入个人用例清单；运行示例时显式指定：
 
 ```bash
-python costmodel_tests/run.py --category personal \
-  --manifest cases/personal/examples/custom_manifest.example.json \
+python costmodel_tests/run.py --manifest cases/personal/examples/custom_manifest.example.json \
   --case custom_add_f32_n1024 --device 0
 ```

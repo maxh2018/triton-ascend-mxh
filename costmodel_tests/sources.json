@@ -420,5 +420,6 @@
     "default": false,
     "inventory": "100 original benchmark configurations plus all 375 CI test_*.py files; pytest parameters collected at runtime"
   },
-  "local_manifest_workflow": "costmodel_tests/run.py selects a category default or explicit manifest; benchmark/pytest dispatch and retries share the same scheduler. CI all manifest remains unverified and opt-in."
+  "local_manifest_workflow": "costmodel_tests/run.py selects a category default or explicit manifest; benchmark/pytest dispatch and retries share the same scheduler. CI all manifest remains unverified and opt-in.",
+  "manifest_selection": "Explicit --manifest is authoritative and can combine drivers from different directories. Only when absent does --category choose a default; absent both defaults to cases/ci/manifest.json. Driver paths are relative to their manifest, not category."
 }

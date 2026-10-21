@@ -1,6 +1,7 @@
 # 自定义测试用例提交规范
 
 **只需提交两部分：一个能独立运行的 Python 脚本，以及清单中的一条配置。**
+文件仍按来源分类保存；执行时由清单选择用例，同一清单可以引用多个目录。显式 `--manifest` 优先于 `--category`。
 
 ## 现成的最小例子：向量加法
 
@@ -16,7 +17,7 @@
 | `runner`（可选） | `benchmark` | 脚本接口：默认 `benchmark`；保留原始 pytest 写法时填 `pytest`。运行命令相同。 |
 | `family` | `elementwise` | 算子类别，用于分类和按类别统计；这里表示逐元素计算。 |
 | `split` | `holdout` | 数据用途：`train` 表示用于模型开发，`holdout` 表示留出验证；新提交默认填 `holdout`，不改变运行方式。 |
-| `driver` | `bench_custom_add_example.py` | 执行该 case 的 Python 脚本路径，相对于清单所在目录；示例脚本和清单都在 `cases/personal/examples/`。 |
+| `driver` | `bench_custom_add_example.py` | 执行该 case 的 Python 脚本路径，相对于清单所在目录，可用 `../` 引用其他目录或填写绝对路径；示例脚本和清单都在 `cases/personal/examples/`。 |
 | `arguments` | `["--n-elements", "1024"]` | 传给脚本的自定义命令行参数，按顺序填写，所有元素均为字符串；这里表示测试 1024 个元素。 |
 
 例如，上述 `driver` 和 `arguments` 会组成
@@ -26,8 +27,7 @@ report 等公共参数。相同脚本可以登记多个 case，例如修改 `nam
 加载兼容的 NPU 编译环境后，在仓库根目录直接运行：
 
 ```bash
-python costmodel_tests/run.py --category personal \
-  --manifest cases/personal/examples/custom_manifest.example.json \
+python costmodel_tests/run.py --manifest cases/personal/examples/custom_manifest.example.json \
   --case custom_add_f32_n1024 --device 0
 ```
 
@@ -35,6 +35,8 @@ python costmodel_tests/run.py --category personal \
 统一入口默认只运行 Auto 最终选中的路线，负责失败重试和 ±10% 耗时预测验收。
 例子展示完整接口，不表示当前 profile 对这个新 shape 已经实测通过。
 添加自己的算子时，复制这两个文件，主要替换 kernel、参考结果和清单里的名字/参数。
+
+跨目录组合可参考 [混合清单示例](mixed_manifest.example.json)；其中的 `driver` 指向 CI 和个人目录，均相对于示例 JSON 所在目录。
 
 ## 提交规则
 
@@ -59,7 +61,8 @@ cases/personal/
 用例名用英文字母、数字、下划线，且不重名，例如 `custom_my_add_f32_n1024`。
 脚本头部用注释注明来源、额外依赖和适用芯片；输入尽量在脚本里生成。
 如果需要辅助文件，一起提交并使用相对脚本位置的路径读取。
-不要提交机器绝对路径、编译缓存、profiler 数据和运行日志。
+提交仓库的清单使用相对路径，方便他人复现；本机临时清单可使用绝对路径。
+不要提交编译缓存、profiler 数据和运行日志。
 
 ## 2. 脚本遵守什么接口
 

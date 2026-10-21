@@ -6,6 +6,8 @@ import re
 
 
 def load_manifest(path: Path) -> dict:
+    # Drivers are relative to this JSON file, not the selected category.
+    # Absolute paths and ../ references to other directories are supported.
     path = path.resolve()
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("cases"), list):

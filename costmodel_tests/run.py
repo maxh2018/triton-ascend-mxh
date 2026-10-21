@@ -19,9 +19,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", nargs="?", choices=("run", "list"), default="run",
                         help="run the manifest (default), or list its entries")
-    parser.add_argument("--category", choices=("ci", "personal", "operator_repos"), default="ci",
-                        help="case directory under cases/ (default: ci)")
-    parser.add_argument("--manifest", type=Path, help="manifest path; default: cases/<category>/manifest.json")
+    parser.add_argument("--manifest", type=Path,
+                        help="highest priority: execute this manifest; may reference any case directories")
+    parser.add_argument("--category", metavar="{ci,personal,operator_repos}",
+                        help="only without --manifest: choose cases/<category>/manifest.json (default: ci)")
     parser.add_argument("--case", action="append", default=[], help="select an exact manifest name; repeat for several")
     devices = parser.add_mutually_exclusive_group()
     devices.add_argument("--device", help="one shared NPU device")
@@ -42,17 +43,29 @@ def main() -> None:
     pool = [d.strip() for d in args.devices.split(",")] if args.devices is not None else None
     if pool is not None and (not all(pool) or len(set(pool)) != len(pool) or args.jobs > len(pool)):
         parser.error("--devices must be unique/nonempty and contain at least --jobs devices")
-    manifest_path = (args.manifest or ROOT / "cases" / args.category / "manifest.json").resolve()
+    # An explicit manifest is authoritative. Category only supplies a fallback
+    # location, so it is neither validated nor applied in the explicit branch.
+    if args.manifest is not None:
+        manifest_path = args.manifest.resolve()
+        manifest_source, default_category = "explicit", None
+    else:
+        default_category = args.category if args.category is not None else "ci"
+        if default_category not in ("ci", "personal", "operator_repos"):
+            parser.error("--category must be ci, personal or operator_repos when --manifest is omitted")
+        manifest_path = (ROOT / "cases" / default_category / "manifest.json").resolve()
+        manifest_source = "category_default"
     try:
         manifest = load_manifest(manifest_path)
         cases = select_cases(manifest, args.case)
     except (OSError, ValueError, TypeError) as error:
         parser.error(str(error))
-    print(f"Category: {args.category}", flush=True)
     print(f"Manifest: {manifest_path}", flush=True)
+    print(f"Manifest source: {manifest_source}", flush=True)
+    if default_category is not None:
+        print(f"Category: {default_category}", flush=True)
     print(f"Cases: {len(cases)}", flush=True)
     if manifest.get("validation_status") == "unverified":
-        print("Validation: UNVERIFIED (explicitly selected; not the default manifest)", flush=True)
+        print("Validation: UNVERIFIED", flush=True)
     if args.action == "list":
         for case in cases:
             print(f"{case['name']}\t{case['runner']}\t{case['driver']}")
@@ -87,7 +100,8 @@ def main() -> None:
         passed = False
     # Save launcher failures too, even if the worker could not start its run.
     output.mkdir(parents=True, exist_ok=True)
-    summary = {"status": "PASS" if passed else "FAIL", "category": args.category,
+    summary = {"status": "PASS" if passed else "FAIL", "category": default_category,
+               "manifest_source": manifest_source,
                "manifest": str(manifest_path), "case_count": len(cases),
                "returncode": completed.returncode, "command": command,
                "batch_summary": str(output / "batch_summary.json")}
