@@ -31,7 +31,7 @@ from triton.compiler.compiler import ASTSource
 from triton.compiler.code_generator import ast_to_ttir
 from triton._C.libtriton import ir, buffer_ir
 from triton._C.libtriton.ascend import ir as ascend_ir
-from triton.backends.ascend.utils import is_compile_on_910_95
+from costmodel_tests.compat import is_compile_on_910_95
 
 os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
 

@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from costmodel_tests.pytest_costmodel import CostModelPytest
+from costmodel_tests.pytest_costmodel import CostModelPytest, pytest_configure
 from costmodel_tests.pytest_npu import LaunchCapture, NpuBackend, resolve_grid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +66,23 @@ class PytestCostModelTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.profile = self.root / 'profile.json'
         self.profile.write_text('{}')
+
+    def test_pytest_configuration_snapshots_shared_profile_dependency(self):
+        dependency = self.root / 'microbench/hardware.json'
+        dependency.parent.mkdir()
+        dependency.write_text('{"measurements": {}}')
+        self.profile.write_text(json.dumps({'microbenchmark_profile': 'microbench/hardware.json'}))
+        output = self.root / 'output'
+        options = {'costmodel_output': output, 'costmodel_expected_bishengir': None,
+                   'costmodel_profile': self.profile, 'costmodel_functional_only': False}
+        config = MagicMock()
+        config.getoption.side_effect = options.__getitem__
+        config.option.numprocesses = 0
+        with patch.dict(os.environ, {'TRITON_ASCEND_COMPILE_MODE': ''}):
+            pytest_configure(config)
+        snapshot = json.loads((output / 'costmodel_profile.json').read_text())
+        self.assertEqual((output / snapshot['microbenchmark_profile']).read_bytes(), dependency.read_bytes())
+        self.assertEqual(config._costmodel_adapter.profile, (output / 'costmodel_profile.json').resolve())
 
     def test_callable_grid_kwargs_and_no_replayed_in_place_launch(self):
         backend, kernel = FakeBackend(), FakeJit()
@@ -133,7 +150,7 @@ class PytestCostModelTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invalid profiler time'):
                 backend.measure(lambda: None, self.root, 'vector_kernel')
 
-    def run_pytest(self, source):
+    def run_pytest(self, source, functional_only=False):
         tests = self.root / 'tests'
         tests.mkdir()
         (tests / 'test_adapter.py').write_text(source)
@@ -142,7 +159,7 @@ class PytestCostModelTests(unittest.TestCase):
         kernel = FakeJit()
         fake = types.ModuleType('fake_costmodel_runtime')
         fake.kernel = kernel
-        adapter = CostModelPytest(output, self.profile, FakeBackend)
+        adapter = CostModelPytest(output, self.profile, FakeBackend, functional_only=functional_only)
         before = FakeJit.run
         with patch.dict(sys.modules, {'fake_costmodel_runtime': fake}), \
                 patch.dict(os.environ, {'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}), \
@@ -152,6 +169,29 @@ class PytestCostModelTests(unittest.TestCase):
                                   f'--junitxml={self.root / "pytest.xml"}'], plugins=[adapter])
         self.assertIs(FakeJit.run, before)
         return int(status), json.loads((output / 'summary.json').read_text()), kernel
+
+    def test_functional_only_preserves_calls_and_assertions_without_timing_pass(self):
+        status, report, kernel = self.run_pytest('''
+from fake_costmodel_runtime import kernel
+
+def test_kernel():
+    kernel.run(3, grid=(1,), warmup=False)
+    assert kernel.actual[-1] == 3
+
+def test_host():
+    assert 1 + 1 == 2
+
+def test_wrong_result():
+    assert False, 'incorrect result'
+''', functional_only=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(report['validation_scope'], 'functional')
+        self.assertIsNone(report['maximum_absolute_relative_error'])
+        self.assertEqual(report['counts']['PASS'], 2)
+        self.assertEqual(report['counts']['FAIL'], 1)
+        self.assertTrue(all(row['timing_pass'] is None for row in report['results']))
+        self.assertEqual(kernel.actual, [3])
+        self.assertEqual(kernel.compiles, [])
 
     def test_real_pytest_and_junit_fail_on_timing_missing_data_or_unsupported_tests(self):
         status, report, kernel = self.run_pytest('''

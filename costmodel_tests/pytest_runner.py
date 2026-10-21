@@ -74,11 +74,14 @@ def run_pytest_case(case, args, env, device):
             print(f"RETRY {case['name']} ({number}/{args.retries})", flush=True)
     results = list(merged.values())
     active = [r for r in results if r["status"] != "SKIP"]
+    functional_only = "--costmodel-functional-only" in case.get("arguments", [])
     final = {"case": case["name"], "runner": "pytest", "status": attempts[-1]["status"],
+             "validation_scope": "functional" if functional_only else "auto",
              "device": device, "attempt_count": len(attempts), "attempts": attempts,
              "final_output_root": attempts[-1]["output_root"],
              "precision_pass": bool(active) and all(r.get("precision_pass") is True for r in active),
-             "timing_pass": bool(active) and all(r.get("timing_pass") is True for r in active),
+             "timing_pass": None if functional_only else
+                            bool(active) and all(r.get("timing_pass") is True for r in active),
              "pytest_results": results}
     (directory / "pytest_summary.json").write_text(json.dumps(final, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return final

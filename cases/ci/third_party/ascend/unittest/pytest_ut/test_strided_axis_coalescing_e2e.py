@@ -30,7 +30,7 @@ import triton
 import triton.language as tl
 
 try:
-    from triton.backends.ascend.utils import is_compile_on_910_95
+    from costmodel_tests.compat import is_compile_on_910_95
 except Exception:
     # Keep collection safe in generic CI images where the Ascend device helper
     # is unavailable.  The actual test must never run without the real gate.

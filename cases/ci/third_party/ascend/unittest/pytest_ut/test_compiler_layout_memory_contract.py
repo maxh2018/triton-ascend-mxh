@@ -180,7 +180,15 @@ def compiler_module():
     debug_line_rewriter_name = "triton.backends.ascend.debug_line_rewriter"
     previous_debug_line_rewriter = sys.modules.get(debug_line_rewriter_name)
     sys.modules.pop(debug_line_rewriter_name, None)
+    program_grid_name = "triton.backends.ascend.program_grid"
+    previous_program_grid = sys.modules.get(program_grid_name)
     try:
+        program_grid_spec = importlib.util.spec_from_file_location(
+            program_grid_name, compiler_path.with_name("program_grid.py"))
+        assert program_grid_spec is not None and program_grid_spec.loader is not None
+        program_grid = importlib.util.module_from_spec(program_grid_spec)
+        sys.modules[program_grid_name] = program_grid
+        program_grid_spec.loader.exec_module(program_grid)
         debug_line_rewriter_path = compiler_path.with_name("debug_line_rewriter.py")
         debug_line_rewriter_spec = importlib.util.spec_from_file_location(debug_line_rewriter_name,
                                                                           debug_line_rewriter_path)
@@ -194,6 +202,10 @@ def compiler_module():
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
     finally:
+        if previous_program_grid is None:
+            sys.modules.pop(program_grid_name, None)
+        else:
+            sys.modules[program_grid_name] = previous_program_grid
         if previous_debug_line_rewriter is None:
             sys.modules.pop(debug_line_rewriter_name, None)
         else:

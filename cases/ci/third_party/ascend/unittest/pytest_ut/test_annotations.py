@@ -25,7 +25,7 @@ import torch
 import triton
 import triton.language as tl
 import pytest
-from triton.backends.ascend.utils import is_compile_on_910_95
+from costmodel_tests.compat import is_compile_on_910_95
 
 
 def annotated_function(return_type=None, **arg_types):

@@ -24,7 +24,7 @@ import torch_npu
 import triton
 import triton.language as tl
 from triton.runtime.libentry import libentry
-from triton.backends.ascend.utils import is_compile_on_910_95
+from costmodel_tests.compat import is_compile_on_910_95
 
 from test_common import _all_dtypes_no_bool, _uint_dtypes, validate_cmp
 

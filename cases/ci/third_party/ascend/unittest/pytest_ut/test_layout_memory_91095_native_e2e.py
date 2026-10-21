@@ -31,7 +31,7 @@ import pytest
 
 try:
     import triton
-    from triton.backends.ascend.utils import is_compile_on_910_95
+    from costmodel_tests.compat import is_compile_on_910_95
     _target_arch = triton.runtime.driver.active.get_current_target().arch
 except Exception:
     _target_arch = ""

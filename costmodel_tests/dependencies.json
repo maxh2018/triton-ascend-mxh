@@ -14,6 +14,7 @@
     "cases/ci/third_party/ascend/lib/TritonToGraph/LegacyMemoryAccess/StridedAxisCoalescing.cpp": "test_layout_memory_895_closure_differential.py reads source text",
     "cases/ci/third_party/ascend/lib/TritonToGraph/LegacyMemoryAccess/ChunkCoalescing.cpp": "test_layout_memory_895_closure_differential.py reads source text",
     "cases/ci/third_party/ascend/lib/TritonToGraph/LegacyMemoryAccess/StridedLoadStoreRewrite.cpp": "test_layout_memory_895_closure_differential.py reads source text",
-    "cases/ci/third_party/ascend/lib/TritonToGraph/LegacyMemoryAccess/RowCoalescing.cpp": "test_layout_memory_895_closure_differential.py reads source text"
+    "cases/ci/third_party/ascend/lib/TritonToGraph/LegacyMemoryAccess/RowCoalescing.cpp": "test_layout_memory_895_closure_differential.py reads source text",
+    "cases/ci/third_party/ascend/backend/program_grid.py": "test_compiler_layout_memory_contract.py loads the sibling compiler and its program-grid helper as source fixtures"
   }
 }

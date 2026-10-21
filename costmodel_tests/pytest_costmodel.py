@@ -16,6 +16,7 @@ import shutil
 import pytest
 
 from .pytest_npu import LaunchCapture, NpuBackend
+from .profiles import snapshot_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROFILE = ROOT / "cases/ci/third_party/ascend/costmodel/profiles/simd_simt/ascend_950pr_simd_simt_v1.json"
@@ -32,6 +33,8 @@ def pytest_addoption(parser):
     group.addoption("--costmodel-output", type=Path, help="enable strict Auto-route timing audit; write evidence here")
     group.addoption("--costmodel-profile", type=Path, help="profile used for compilation and timing audit")
     group.addoption("--costmodel-expected-bishengir", type=Path, help="expected compiler executable on PATH")
+    group.addoption("--costmodel-functional-only", action="store_true",
+                    help="run original pytest assertions without launch instrumentation or timing gates")
 
 
 def pytest_configure(config):
@@ -56,15 +59,16 @@ def pytest_configure(config):
         raise pytest.UsageError(f"CostModel output must be new or empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     snapshot = output / "costmodel_profile.json"
-    snapshot.write_bytes(profile.read_bytes())
-    plugin = CostModelPytest(output, snapshot)
+    snapshot_profile(profile, snapshot)
+    plugin = CostModelPytest(output, snapshot, functional_only=config.getoption("costmodel_functional_only"))
     config.pluginmanager.register(plugin, "costmodel-audit")
     config._costmodel_adapter = plugin
 
 
 class CostModelPytest:
-    def __init__(self, output, profile, backend_factory=NpuBackend):
+    def __init__(self, output, profile, backend_factory=NpuBackend, functional_only=False):
         self.output, self.profile = output, profile
+        self.functional_only = functional_only
         self.backend_factory = backend_factory
         self.backend = self.original = self.active = None
         self.items = {}
@@ -97,10 +101,12 @@ class CostModelPytest:
         directory = self.output / "cases" / f"{name}_{suffix}"
         directory.mkdir(parents=True, exist_ok=True)
         self.current = {"nodeid": item.nodeid, "status": "PENDING", "precision_pass": None,
-                        "timing_pass": False, "failure_reasons": [], "evidence_dir": str(directory)}
+                        "timing_pass": None if self.functional_only else False,
+                        "failure_reasons": [], "evidence_dir": str(directory)}
         self.items[item.nodeid] = self.current
-        self.install()
-        self.active = LaunchCapture(directory, self.profile, self.backend)
+        if not self.functional_only:
+            self.install()
+            self.active = LaunchCapture(directory, self.profile, self.backend)
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_runtest_makereport(self, item, call):
@@ -110,7 +116,8 @@ class CostModelPytest:
         if record is None:
             # A different setup hook may fail/skip before ours runs.
             record = {"nodeid": item.nodeid, "status": "PENDING", "precision_pass": None,
-                      "timing_pass": False, "failure_reasons": [], "evidence_dir": None}
+                      "timing_pass": None if self.functional_only else False,
+                      "failure_reasons": [], "evidence_dir": None}
             self.items[item.nodeid] = record
         capture = self.active if self.current is record else None
         launches = capture.public_records() if capture else []
@@ -119,9 +126,12 @@ class CostModelPytest:
             record.update(status="SKIP", skip_reason=str(report.longrepr))
         elif report.when == "call":
             record["precision_pass"] = report.passed
-            record["timing_pass"] = bool(launches) and all(r["pass"] for r in launches)
+            record["timing_pass"] = (None if self.functional_only else
+                                     bool(launches) and all(r["pass"] for r in launches))
             if report.passed:
-                if not launches:
+                if self.functional_only:
+                    record["status"] = "PASS"
+                elif not launches:
                     record.update(status="UNSUPPORTED", failure_reasons=["no_runtime_jit_kernel_captured"])
                 elif not record["timing_pass"]:
                     record.update(status="FAIL", failure_reasons=["kernel_timing_audit_failed"])
@@ -133,7 +143,8 @@ class CostModelPytest:
                                        f"Evidence: {record['evidence_dir']}")
             else:
                 record.update(status="FAIL", failure_reasons=["original_test_failed"])
-        elif report.when == "teardown" and report.passed and record["status"] == "PASS":
+        elif (report.when == "teardown" and report.passed and record["status"] == "PASS"
+              and not self.functional_only):
             record["timing_pass"] = bool(launches) and all(r["pass"] for r in launches)
             if not record["timing_pass"]:
                 record.update(status="FAIL", failure_reasons=["teardown_kernel_timing_audit_failed"])
@@ -164,14 +175,16 @@ class CostModelPytest:
             status = "PASS" if passed else "FAIL"
             if not passed and session.exitstatus == 0:
                 session.exitstatus = 1
-        summary = {"status": status, "validation_scope": "auto", "maximum_absolute_relative_error": 0.10,
+        summary = {"status": status, "validation_scope": "functional" if self.functional_only else "auto",
+                   "maximum_absolute_relative_error": None if self.functional_only else 0.10,
                    "collected_case_count": len(session.items), "counts": counts, "results": results}
         write_json(self.output / "summary.json", summary)
         lines = ["# Pytest CostModel audit", "", f"Status: {status}", "",
                  "| Test | Precision | Timing | Status |", "|---|---|---|---|"]
         for r in results:
             node = r["nodeid"].replace("|", "\\|").replace("\n", " ")
-            lines.append(f"| {node} | {r['precision_pass']} | {r['timing_pass']} | {r['status']} |")
+            timing = "Not checked" if self.functional_only else r['timing_pass']
+            lines.append(f"| {node} | {r['precision_pass']} | {timing} | {r['status']} |")
         lines += ["", "## Kernel timing", "",
                   "| Test | Kernel | Predicted (us) | Measured (us) | Error | Gate |",
                   "|---|---|---:|---:|---:|---|"]
@@ -189,6 +202,10 @@ class CostModelPytest:
         (self.output / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def pytest_terminal_summary(self, terminalreporter):
+        if self.functional_only:
+            terminalreporter.write_sep("=", "Pytest functionality: original assertions; timing not checked")
+            terminalreporter.write_line(f"Report: {self.output / 'report.md'}")
+            return
         terminalreporter.write_sep("=", "CostModel pytest: precision + Auto timing error <= 10%")
         terminalreporter.write_line(f"Report: {self.output / 'report.md'}")
         terminalreporter.write_line("UNSUPPORTED means no runtime kernel was measured; it is not a timing PASS.")

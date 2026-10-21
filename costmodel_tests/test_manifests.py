@@ -163,6 +163,27 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn('Cases: 0', result.stdout)
 
+    def test_functional_pytest_manifest_reports_timing_not_checked(self):
+        driver = self.root / 'test_host.py'
+        driver.write_text('def test_add():\n    assert 1 + 1 == 2\n')
+        manifest = self.root / 'manifest.json'
+        manifest.write_text(json.dumps({'cases': [{'name': 'functional', 'runner': 'pytest',
+            'driver': 'test_host.py', 'arguments': ['--costmodel-functional-only']}]}))
+        profile = self.root / 'profile.json'
+        profile.write_text('{}')
+        output = self.root / 'output'
+        result = subprocess.run([sys.executable, 'costmodel_tests/run.py', '--manifest', str(manifest),
+            '--profile', str(profile), '--retries', '0', '--output-root', str(output)], cwd=ROOT,
+            env={**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1', 'TRITON_ASCEND_COMPILE_MODE': ''},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        case = json.loads((output / 'report.json').read_text())['cases'][0]
+        self.assertEqual(json.loads((output / 'report.json').read_text())['validation_scope'], 'functional')
+        self.assertEqual(case['validation_scope'], 'functional')
+        self.assertTrue(case['precision_pass'])
+        self.assertIsNone(case['timing_pass'])
+        self.assertIn('Not checked', (output / 'report.md').read_text())
+
     def test_real_pytest_manifest_retries_only_failed_parameterized_node(self):
         tests = self.root / 'tests'
         tests.mkdir()

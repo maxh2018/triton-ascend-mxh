@@ -24,7 +24,7 @@ import triton
 import triton.language as tl
 import numpy as np
 import test_common
-from triton.backends.ascend.utils import is_compile_on_910_95
+from costmodel_tests.compat import is_compile_on_910_95
 
 # Chained dot_scaled: first matmul with zero init, second accumulates via acc=.
 # Mirrors normalize-matmul.mlir @test_mmadmx_chain_no_elemwise_decompose:

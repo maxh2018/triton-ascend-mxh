@@ -53,7 +53,7 @@ import torch
 import torch_npu
 import triton
 import triton.language as tl
-from triton.backends.ascend.utils import is_compile_on_910_95
+from costmodel_tests.compat import is_compile_on_910_95
 
 _TARGET_ARCH = triton.runtime.driver.active.get_current_target().arch
 

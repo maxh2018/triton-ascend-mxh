@@ -178,8 +178,10 @@ def main() -> None:
             slots.put(device)
 
     def batch_summary():
+        functional_only = all(c["runner"] == "pytest" and
+                              "--costmodel-functional-only" in c.get("arguments", []) for c in selected)
         return {"schema": "costmodel-batch-run-v1", "jobs": args.jobs, "retries": args.retries,
-                "validation_scope": args.validation_scope,
+                "validation_scope": "functional" if functional_only else args.validation_scope,
                 "case_count": len(selected), "completed_case_count": len(results),
                 "cases": [results[c["name"]] for c in selected if c["name"] in results]}
 
@@ -236,8 +238,11 @@ def main() -> None:
     lines = ["# CostModel test report", "", f"Status: {summary['status']}", "",
              "| Case | Precision | Timing | Attempts | Status |", "|---|---|---|---:|---|"]
     for result in summary["cases"]:
+        timing = result.get("timing_pass", False)
+        if timing is None:
+            timing = "Not checked"
         lines.append(f"| {result['case']} | {result.get('precision_pass', False)} | "
-                     f"{result.get('timing_pass', False)} | {result['attempt_count']} | {result['status']} |")
+                     f"{timing} | {result['attempt_count']} | {result['status']} |")
     lines += ["", "## Timing details", "",
               "| Case / node | Kernel / route | Predicted (us) | Measured (us) | Error | Gate |",
               "|---|---|---:|---:|---:|---|"]

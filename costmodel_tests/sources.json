@@ -408,7 +408,7 @@
   "validation_scope": "Default auto: match PR 100-case Auto table. Optional all: original complete-route audit.",
   "checkout_prefix": "cases/ci",
   "custom_example_path": "cases/personal/examples",
-  "local_pytest_adapter": "costmodel_tests/pytest_costmodel.py and pytest_npu.py: retain pytest assertions, capture Auto JIT launches and profiler time, fail missing timing/prediction or unsupported host-only tests; CPU-only regressions, NPU execution pending.",
+  "local_pytest_adapter": "costmodel_tests/pytest_costmodel.py and pytest_npu.py: default Auto JIT launch/profiler audit; optional --costmodel-functional-only preserves original pytest calls/assertions without timing gates or route instrumentation.",
   "default_manifests": {
     "ci": "cases/ci/manifest.json",
     "personal": "cases/personal/manifest.json",
@@ -421,5 +421,6 @@
     "inventory": "100 original benchmark configurations plus all 375 CI test_*.py files; pytest parameters collected at runtime"
   },
   "local_manifest_workflow": "costmodel_tests/run.py selects a category default or explicit manifest; benchmark/pytest dispatch and retries share the same scheduler. CI all manifest remains unverified and opt-in.",
-  "manifest_selection": "Explicit --manifest is authoritative and can combine drivers from different directories. Only when absent does --category choose a default; absent both defaults to cases/ci/manifest.json. Driver paths are relative to their manifest, not category."
+  "manifest_selection": "Explicit --manifest is authoritative and can combine drivers from different directories. Only when absent does --category choose a default; absent both defaults to cases/ci/manifest.json. Driver paths are relative to their manifest, not category.",
+  "local_pytest_compatibility": "Hardware predicates in tests that pass the current arch use costmodel_tests/compat.py to support installed backends with zero-argument or arch-argument is_compile_on_910_95. Source compiler contracts load the retained program_grid.py fixture from the pinned base commit."
 }

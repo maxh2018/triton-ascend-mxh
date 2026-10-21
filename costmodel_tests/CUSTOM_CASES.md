@@ -158,4 +158,6 @@ print(json.dumps({
 
 pytest 适配器保留原断言，并验收 Auto 耗时预测。用例需实际运行 kernel 并检查精度；直接调用编译后 kernel 等特殊形式可能需要专门适配。`UNSUPPORTED` 不算通过。
 
+**可选：只检查功能。** 将条目的 `arguments` 设为 `["--costmodel-functional-only"]`，按原 pytest 调用和断言执行，不注入 Auto 选路、不采集或验收耗时。报告中的 Timing 显示 `Not checked`；省略此选项时仍按默认标准验收。
+
 

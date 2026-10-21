@@ -24,7 +24,7 @@ import torch
 import pytest
 import math
 import test_common
-from triton.backends.ascend.utils import is_compile_on_910_95
+from costmodel_tests.compat import is_compile_on_910_95
 
 
 @triton.jit

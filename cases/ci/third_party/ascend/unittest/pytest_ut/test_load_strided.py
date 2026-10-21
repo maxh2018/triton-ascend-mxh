@@ -40,7 +40,7 @@ import pytest
 import test_common
 
 try:
-    from triton.backends.ascend.utils import is_compile_on_910_95
+    from costmodel_tests.compat import is_compile_on_910_95
 except Exception:
 
     def is_compile_on_910_95(_arch):
