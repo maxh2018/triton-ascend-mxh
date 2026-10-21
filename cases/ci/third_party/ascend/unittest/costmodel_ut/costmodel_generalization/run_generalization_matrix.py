@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[4]
+sys.path.insert(0, str(HERE.parents[6]))
+from costmodel_tests.profiles import snapshot_profile
 
 
 def capture(command: list[str], cwd: Path | None = None) -> dict:
@@ -187,7 +189,7 @@ def main() -> None:
     os.environ["PYTHONPATH"] = str(HERE) + (os.pathsep + os.environ["PYTHONPATH"]
                                          if os.environ.get("PYTHONPATH") else "")
     profile_snapshot = args.output_root / "costmodel_profile.json"
-    shutil.copy2(args.profile, profile_snapshot)
+    snapshot_profile(args.profile, profile_snapshot)
     manifest_snapshot = args.output_root / "generalization_matrix.json"
     manifest_snapshot.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     # Freeze and record the two debug-affecting values once for all routes.

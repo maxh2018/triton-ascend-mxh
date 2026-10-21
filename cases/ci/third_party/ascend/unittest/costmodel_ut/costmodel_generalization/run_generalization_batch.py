@@ -21,6 +21,7 @@ SINGLE_CASE_SCRIPT = HERE / "run_generalization_case.py"
 ROOT = HERE.parents[6]
 sys.path.insert(0, str(ROOT))
 from costmodel_tests.manifests import load_manifest, select_cases
+from costmodel_tests.profiles import snapshot_profile
 from costmodel_tests.pytest_runner import run_pytest_case
 
 
@@ -162,7 +163,7 @@ def main() -> None:
     manifest["cases"] = selected
     write_json(args.output_root / "manifest.json", manifest)
     write_json(args.output_root / "generalization_matrix.json", manifest)
-    shutil.copyfile(profile, args.output_root / "costmodel_profile.json")
+    snapshot_profile(profile, args.output_root / "costmodel_profile.json")
     env["TRITON_ASCEND_AUTO_SIMT_PROFILE"] = str(args.output_root / "costmodel_profile.json")
     results = {}
     slots = Queue()

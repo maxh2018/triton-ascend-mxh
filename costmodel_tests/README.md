@@ -182,6 +182,7 @@ python costmodel_tests/run.py --manifest my_tests.json --device 0 --jobs 2 --ret
 | `batch_summary.json` | `failed_cases`、每次日志路径、最后一次尝试目录 |
 | `batch_summary.partial.json` | 正在执行时的完成进度 |
 | `manifest.json`、`costmodel_profile.json` | 本次清单和 profile 快照 |
+| `profile_dependencies/` | profile 引用的共享 microbenchmark 数据；归档结果时一起保存 |
 | `cases/<名称>/attempt_01.log` | 首次日志，重试依次生成 `attempt_02.log` 等 |
 
 `summary.json` 的 `manifest_source` 为 `explicit`（显式清单）或 `category_default`（默认清单）。
@@ -210,6 +211,14 @@ relative_error = predicted_us / measured_us - 1
 2. 在 `batch_summary.json` 查 `failed_cases`，按 `attempts[].log` 查看日志。
 3. 对照原始报告中的 `predicted_us`、`measured_us`、`relative_error`、`failure_reasons` 定位问题。
 
+需要缩小范围时，可使用 [3-case 调试清单](../cases/ci/manifest.debug.json)，不改动默认 100-case 清单：
+
+```bash
+python costmodel_tests/run.py --manifest cases/ci/manifest.debug.json --device 1 --jobs 1 --retries 0
+```
+
+若出现 `failed to read microbenchmark profile`，先检查 profile 引用的数据文件。运行器生成快照时会将该文件复制到 `profile_dependencies/` 并更新引用，避免因移动 profile 导致路径失效。
+
 <details>
 <summary>原始证据在哪里</summary>
 
@@ -226,5 +235,5 @@ pytest 跨重试合并后的节点结果保存为 `cases/<名称>/pytest_summary
 ---
 
 上传规范见 [CUSTOM_CASES.md](CUSTOM_CASES.md)，来源见 [sources.json](sources.json)。
-本地仅完成 CPU 回归与文档校验，未进行 NPU 实测；示例不表示当前 profile 已通过相应 shape 的误差验收。
+已完成 CPU 回归和 3-case 调试清单的 NPU 实测；完整 100-case 和 CI 全量清单尚未完成本轮验收。示例不表示其他 shape 已通过误差验收。
 新增 CI 文件后，可用 `python costmodel_tests/update_ci_manifests.py` 更新清单；该操作不进行测试验证。

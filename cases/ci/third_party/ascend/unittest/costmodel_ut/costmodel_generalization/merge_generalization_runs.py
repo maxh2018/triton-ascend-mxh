@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[7]))
+from costmodel_tests.profiles import snapshot_profile
 
 
 def main() -> None:
@@ -87,7 +91,7 @@ def main() -> None:
     }
     args.output_root.mkdir(parents=True, exist_ok=True)
     merged_profile = args.output_root / "costmodel_profile.json"
-    shutil.copy2(profile_snapshots[0], merged_profile)
+    snapshot_profile(profile_snapshots[0], merged_profile)
     merged_manifest = args.output_root / "generalization_matrix.json"
     shutil.copy2(manifest_snapshots[0], merged_manifest)
     result["profile_snapshot"] = str(merged_profile.resolve())

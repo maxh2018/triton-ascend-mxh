@@ -25,6 +25,9 @@ p.add_argument('--manifest', type=Path)
 p.add_argument('--profile', type=Path)
 p.add_argument('--validation-scope', choices=('auto', 'all'), default='auto')
 a, unused = p.parse_known_args()
+profile = json.loads(a.profile.read_text())
+if profile.get('microbenchmark_profile'):
+    assert (a.profile.parent / profile['microbenchmark_profile']).is_file()
 output = a.output_root
 output.mkdir()
 number = int(output.name.split('_')[-1])
@@ -128,6 +131,18 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len(records), 11)  # Mixed record remains included.
         self.assertTrue(all("attempt_02" in r["evidence_dir"] for r in records if r["name"].startswith("flaky__")))
         self.assertTrue(json.loads((output / "generalization_audit.json").read_text())["all_pass"])
+
+    def test_batch_profile_snapshot_keeps_shared_microbenchmark_dependency(self):
+        dependency = self.root / "microbench/hardware.json"
+        dependency.parent.mkdir()
+        dependency.write_text('{"measurements": {}}')
+        profile = json.loads(self.profile.read_text())
+        profile["microbenchmark_profile"] = "microbench/hardware.json"
+        self.profile.write_text(json.dumps(profile))
+        output = self.run_batch(mode="stable", scope="auto")
+        snapshot = json.loads((output / "costmodel_profile.json").read_text())
+        self.assertEqual((output / snapshot["microbenchmark_profile"]).read_bytes(), dependency.read_bytes())
+        self.assertTrue(json.loads((output / "report.json").read_text())["status"] == "PASS")
 
     def test_default_three_retries_stop_after_four_attempts(self):
         output = self.run_batch("--case", "flaky", mode="always", expected_status=1)
