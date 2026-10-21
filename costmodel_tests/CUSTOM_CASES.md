@@ -60,7 +60,7 @@ cases/personal/
 
 ## 3. 清单怎么写
 
-在 `cases/personal/manifest.json` 的 `cases` 列表中追加条目，**保留已有用例和原 PR 的 100-case 清单**：
+在 `cases/personal/manifest.json` 的 `cases` 列表中追加个人用例，**保留清单中已有的条目**：
 
 ```json
 {
