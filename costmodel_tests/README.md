@@ -13,7 +13,6 @@ python costmodel_tests/run.py --manifest my_tests.json --device 0
 ```
 
 运行器按清单执行用例，检查**计算精度**和**耗时预测误差**，最后生成结果报告。
-清单可以同时引用 CI、个人、vLLM 等不同目录的用例，无需指定 `--category`。
 
 以下命令均在**仓库根目录**执行。实际测试需要已加载兼容的 NPU 编译环境；
 `list` 和 `--dry-run` 不需要 NPU。
@@ -48,8 +47,6 @@ python costmodel_tests/run.py --manifest my_tests.json --device 0
 | `split` | `holdout` | `train` 为模型开发用例，`holdout` 为留出验证用例；作为标签记录 |
 
 同一个脚本可以登记多个 shape 配置，分别设置不同的 `name` 和 `arguments`。
-清单为空时只能查看；脚本接口和上传位置详见 [自定义用例提交规范](CUSTOM_CASES.md)。
-仓库还提供 [单 case 示例](../cases/personal/examples/custom_manifest.example.json) 和 [跨目录示例](mixed_manifest.example.json)。
 
 可选顶层字段：`description` 是清单说明；`validation_status: "unverified"` 标记尚未验证，不代表测试已通过。
 
@@ -73,7 +70,6 @@ python costmodel_tests/run.py [run | list] [选项]
 | `--output-root <目录>` | 自动生成 | 保存结果的位置，必须是新目录或空目录 |
 | `--dry-run` | 关闭 | 只打印执行计划，不运行测试、不生成结果目录 |
 
-**选择顺序：显式清单 → 分类默认清单 → CI 原始 100-case 清单。**
 指定 `--manifest` 后忽略 `--category`；清单出错时直接报错，不会回退。
 
 <details>
