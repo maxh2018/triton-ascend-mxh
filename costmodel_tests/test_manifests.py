@@ -151,7 +151,10 @@ class ManifestTests(unittest.TestCase):
                 load_manifest(path)
 
     def test_empty_category_can_be_listed_but_cannot_run(self):
+        manifest = self.root / 'empty.json'
+        manifest.write_text('{"cases": []}')
         command = [sys.executable, 'costmodel_tests/run.py', '--category', 'personal',
+                   '--manifest', str(manifest),
                    '--output-root', str(self.root / 'output')]
         self.assertEqual(subprocess.run(command, cwd=ROOT, capture_output=True).returncode, 2)
         self.assertFalse((self.root / 'output').exists())

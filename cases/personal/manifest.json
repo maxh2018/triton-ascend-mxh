@@ -1,3 +1,12 @@
 {
-  "cases": []
+  "cases": [
+    {
+      "name": "maxh2018_indirect_store_i8_2x256_w8",
+      "runner": "benchmark",
+      "driver": "maxh2018/bench_indirect_store_i8.py",
+      "arguments": ["--seed", "90521000"],
+      "family": "indirect_memory_store",
+      "split": "holdout"
+    }
+  ]
 }

@@ -31,8 +31,9 @@ class OfflineTests(unittest.TestCase):
         for path in sources["pytest_base_files"] + sources["pytest_added_from_pr"]:
             self.assertTrue((ROOT / "cases/ci" / path).is_file(), path)
 
-    def test_category_defaults_and_empty_reserved_manifests(self):
-        for category, count in (("ci", 100), ("personal", 0), ("operator_repos", 0)):
+    def test_category_defaults_follow_registered_manifests(self):
+        for category in ("ci", "personal", "operator_repos"):
+            count = len(json.loads((ROOT / "cases" / category / "manifest.json").read_text())["cases"])
             result = subprocess.run([sys.executable, str(ROOT / "costmodel_tests/run.py"),
                                      "list", "--category", category], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
