@@ -32,7 +32,7 @@ class OfflineTests(unittest.TestCase):
             self.assertTrue((ROOT / "cases/ci" / path).is_file(), path)
 
     def test_category_defaults_and_empty_reserved_manifests(self):
-        for category, count in (("ci", 100), ("personal", 0), ("suanzhen", 0)):
+        for category, count in (("ci", 100), ("personal", 0), ("operator_repos", 0)):
             result = subprocess.run([sys.executable, str(ROOT / "costmodel_tests/run.py"),
                                      "list", "--category", category], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

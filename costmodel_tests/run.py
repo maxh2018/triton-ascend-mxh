@@ -21,7 +21,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("list", "pytest", "matrix", "case", "all"))
     parser.add_argument("--case", help="exact matrix case name; required for suite=case")
-    parser.add_argument("--category", choices=("ci", "personal", "suanzhen"), default="ci",
+    parser.add_argument("--category", choices=("ci", "personal", "operator_repos"), default="ci",
                         help="case collection (default: ci)")
     parser.add_argument("--manifest", type=Path,
                         help="matrix case list; use a separate manifest for custom cases")
@@ -45,7 +45,7 @@ def main() -> None:
         args.manifest = (GENERAL / "generalization_matrix.json" if args.category == "ci" else
                          ROOT / "cases" / args.category / "manifest.json")
     if args.suite in ("pytest", "all") and args.category != "ci":
-        parser.error("pytest/all use the CI pytest corpus; personal/suanzhen use list, case or matrix")
+        parser.error("pytest/all use the CI pytest corpus; personal/operator_repos use list, case or matrix")
     if args.jobs < 1 or args.retries < 0:
         parser.error("--jobs must be positive and --retries must be nonnegative")
     if args.suite == "pytest" and (args.devices is not None or args.jobs != 1 or args.retries != 3):

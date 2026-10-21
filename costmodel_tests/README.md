@@ -20,9 +20,10 @@ cases/
     manifest.json           # 个人用例清单（初始为空）
     <姓名>/                 # 个人算子上传位置
     examples/               # 向量加法示例，供复制
-  suanzhen/
-    manifest.json           # 算珍仓用例清单（初始为空）
-    <算子名>/               # 后续导入的算珍仓算子
+  operator_repos/
+    manifest.json           # 算子仓用例清单（初始为空）
+    vllm/<算子名>/          # vLLM 来源用例
+    sglang/<算子名>/        # SGLang 来源用例
 ```
 
 默认分类为 `ci`，原命令仍可运行。个人算子不要放到 CI 目录：上传到
@@ -32,13 +33,13 @@ cases/
 ```bash
 python costmodel_tests/run.py list --category ci
 python costmodel_tests/run.py list --category personal
-python costmodel_tests/run.py list --category suanzhen
+python costmodel_tests/run.py list --category operator_repos
 python costmodel_tests/run.py case --category personal --case zhangsan_add_f32_n1024 --device 0
-python costmodel_tests/run.py matrix --category suanzhen --device 0
+python costmodel_tests/run.py matrix --category operator_repos --device 0
 ```
 
 空清单只能查看，登记用例后才能运行。`--manifest` 可覆盖分类默认清单。
-`pytest` 和 `all` 对应 CI 原始 pytest 集；个人/算珍仓使用 `case` 或 `matrix`。
+`pytest` 和 `all` 对应 CI 原始 pytest 集；个人/算子仓使用 `case` 或 `matrix`。
 不同目录的脚本运行时可以直接 `from profile_utils import profile_kernel`，运行器会提供共享 helper 路径。
 
 | 测试集 | 路径 | 本次收录 |
@@ -275,7 +276,7 @@ profiler 数据优先；没有 profiler 时原审计脚本会退回 Event median
 按 [自定义测试用例提交规范](CUSTOM_CASES.md) 提交：**一个 Python 脚本 + 一条清单配置**。
 文档包含文件位置、必需参数、结果格式和运行命令。
 个人 case 登记在 `cases/personal/manifest.json`，使用 `--category personal` 选择；
-算珍仓 case 登记在 `cases/suanzhen/manifest.json`，使用 `--category suanzhen` 选择。
+算子仓 case 登记在 `cases/operator_repos/manifest.json`，使用 `--category operator_repos` 选择。
 也可用 `--manifest` 指定独立清单，原 PR 的
 `generalization_matrix.json` 和 `generalization_matrix_v140_all_100.json` 保持不变。
 

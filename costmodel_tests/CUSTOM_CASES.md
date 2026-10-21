@@ -53,7 +53,7 @@ cases/personal/
     bench_custom_my_add.py       # 你的 kernel 和测试脚本
 ```
 
-不要把个人算子放进 `cases/ci/`；算珍仓用例放到 `cases/suanzhen/`，两者与个人用例分开保存。
+不要把个人算子放进 `cases/ci/`；算子仓用例放到 `cases/operator_repos/`，两者与个人用例分开保存。
 运行器会提供共享 `profile_utils.py` 的导入路径，不需要把 helper 再复制一份。
 用例名用英文字母、数字、下划线，且不重名，例如 `custom_my_add_f32_n1024`。
 脚本头部用注释注明来源、额外依赖和适用芯片；输入尽量在脚本里生成。

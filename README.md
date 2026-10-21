@@ -12,9 +12,9 @@
 |---|---|---|
 | CI 用例 | [cases/ci/](cases/ci/README.md) | 现有 pytest_ut、PR 的 100-case 和测试依赖 |
 | 个人用例 | [cases/personal/](cases/personal/README.md) | 个人算子上传到 `<姓名>/` 子目录，登记到此处 `manifest.json` |
-| 算珍仓用例 | [cases/suanzhen/](cases/suanzhen/README.md) | 预留后续算珍仓导入用例 |
+| 算子仓用例 | [cases/operator_repos/](cases/operator_repos/README.md) | 按 vLLM、SGLang 等来源仓库分目录保存 |
 
-默认仍运行 CI 用例；运行个人用例使用 `--category personal`，算珍仓使用 `--category suanzhen`。
+默认仍运行 CI 用例；运行个人用例使用 `--category personal`，算子仓使用 `--category operator_repos`。
 
 无需 NPU 的资料自检：
 
