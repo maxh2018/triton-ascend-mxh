@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERAL = ROOT / "third_party/ascend/unittest/costmodel_ut/costmodel_generalization"
+GENERAL = ROOT / "cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization"
 
 
 class OfflineTests(unittest.TestCase):
@@ -29,7 +29,18 @@ class OfflineTests(unittest.TestCase):
             self.assertTrue((GENERAL / case["driver"]).is_file())
         sources = json.loads((ROOT / "costmodel_tests/sources.json").read_text())
         for path in sources["pytest_base_files"] + sources["pytest_added_from_pr"]:
-            self.assertTrue((ROOT / path).is_file(), path)
+            self.assertTrue((ROOT / "cases/ci" / path).is_file(), path)
+
+    def test_category_defaults_and_empty_reserved_manifests(self):
+        for category, count in (("ci", 100), ("personal", 0), ("suanzhen", 0)):
+            result = subprocess.run([sys.executable, str(ROOT / "costmodel_tests/run.py"),
+                                     "list", "--category", category], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"Category: {category}", result.stdout)
+            self.assertIn(f"Matrix: {count} cases", result.stdout)
+        personal_example = ROOT / "cases/personal/examples/custom_manifest.example.json"
+        example = json.loads(personal_example.read_text())
+        self.assertTrue((personal_example.parent / example["cases"][0]["driver"]).is_file())
 
     def test_real_audit_rejects_wrong_results_errors_and_missing_routes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -147,7 +158,9 @@ class OfflineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = root / "manifest.json"
-            manifest.write_text(json.dumps({"cases": [{"name": "example", "extra_modes": [
+            (root / "drivers").mkdir()
+            (root / "drivers/example.py").write_text("# personal driver\n")
+            manifest.write_text(json.dumps({"cases": [{"name": "example", "driver": "drivers/example.py", "extra_modes": [
                 {"route": "mixed", "factor": 4}]}]}))
             profile = root / "profile.json"
             profile.write_text("{}")
@@ -157,6 +170,8 @@ class OfflineTests(unittest.TestCase):
                 def fake_run(command, env, log):
                     if Path(command[1]).name == "run_generalization_matrix.py":
                         self.assertEqual("--include-explicit" in command, scope == "all")
+                        subset = json.loads(Path(command[command.index("--manifest") + 1]).read_text())
+                        self.assertEqual(subset["cases"][0]["driver"], str((root / "drivers/example.py").resolve()))
                         for name in ("matrix_summary.json", "generalization_matrix.json", "costmodel_profile.json"):
                             (output / name).write_text("{}")
                     else:

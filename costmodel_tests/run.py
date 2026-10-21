@@ -12,15 +12,18 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-PYTEST = ROOT / "third_party/ascend/unittest/pytest_ut"
-GENERAL = ROOT / "third_party/ascend/unittest/costmodel_ut/costmodel_generalization"
+CI = ROOT / "cases/ci"
+PYTEST = CI / "third_party/ascend/unittest/pytest_ut"
+GENERAL = CI / "third_party/ascend/unittest/costmodel_ut/costmodel_generalization"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("list", "pytest", "matrix", "case", "all"))
     parser.add_argument("--case", help="exact matrix case name; required for suite=case")
-    parser.add_argument("--manifest", type=Path, default=GENERAL / "generalization_matrix.json",
+    parser.add_argument("--category", choices=("ci", "personal", "suanzhen"), default="ci",
+                        help="case collection (default: ci)")
+    parser.add_argument("--manifest", type=Path,
                         help="matrix case list; use a separate manifest for custom cases")
     parser.add_argument("--validation-scope", choices=("auto", "all"), default="auto",
                         help="default: Auto selected route (PR table); all: explicit routes too")
@@ -38,6 +41,11 @@ def main() -> None:
     parser.add_argument("--pytest-args", nargs=argparse.REMAINDER,
                         help="pytest arguments; place this option last, e.g. -k atomic --collect-only")
     args = parser.parse_args()
+    if args.manifest is None:
+        args.manifest = (GENERAL / "generalization_matrix.json" if args.category == "ci" else
+                         ROOT / "cases" / args.category / "manifest.json")
+    if args.suite in ("pytest", "all") and args.category != "ci":
+        parser.error("pytest/all use the CI pytest corpus; personal/suanzhen use list, case or matrix")
     if args.jobs < 1 or args.retries < 0:
         parser.error("--jobs must be positive and --retries must be nonnegative")
     if args.suite == "pytest" and (args.devices is not None or args.jobs != 1 or args.retries != 3):
@@ -48,7 +56,9 @@ def main() -> None:
         parser.error("--case is only supported with suite=case")
     if args.suite == "list":
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        print(f"pytest_ut: {len(list(PYTEST.rglob('test_*.py')))} test files (parameterized case count needs pytest collection)")
+        print(f"Category: {args.category}")
+        if args.category == "ci":
+            print(f"pytest_ut: {len(list(PYTEST.rglob('test_*.py')))} test files (parameterized case count needs pytest collection)")
         print(f"Matrix: {len(manifest['cases'])} cases ({args.manifest})")
         for case in manifest["cases"]:
             print(f"{case['name']}\t{case['family']}\t{case['driver']}")
@@ -96,7 +106,8 @@ def main() -> None:
         completed = subprocess.run(command, cwd=ROOT, env=env, check=False)
         records.append({"step": name, "command": command, "returncode": completed.returncode})
     passed = bool(records) and len(records) == len(commands) and all(r["returncode"] == 0 for r in records)
-    summary = {"status": "PASS" if passed else "FAIL", "suite": args.suite, "steps": records}
+    summary = {"status": "PASS" if passed else "FAIL", "suite": args.suite,
+               "category": args.category, "steps": records}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"{args.suite}: {summary['status']} ({output / 'summary.json'})", flush=True)
     raise SystemExit(0 if passed else 1)

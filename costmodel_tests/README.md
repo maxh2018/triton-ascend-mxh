@@ -3,7 +3,7 @@
 本分支 `costmodel/test-cases` 用于保存和持续扩充 CostModel 测试资料。
 目标仓库为 <https://github.com/maxh2018/triton-ascend-mxh>。
 
-本分支已精简为测试资料仓：移除了编译器主体、构建系统、CI、其他后端和旧项目文档。
+本分支已精简为测试资料仓：移除了编译器主体、构建系统、CI 配置、其他后端和旧项目文档。
 少量测试直接读取 backend Python 或 C++ 源码做 AST/文本断言，这些文件作为必要测试
 fixture 保留；逐文件用途见 [dependencies.json](dependencies.json)。
 不要在本分支运行 `pip install .` 或尝试构建编译器，编译器需在独立环境安装。
@@ -11,12 +11,42 @@ fixture 保留；逐文件用途见 [dependencies.json](dependencies.json)。
 
 ## 收录范围和来源
 
+所有用例统一放在 `cases/`，按来源分三类：
+
+```text
+cases/
+  ci/                       # 现有 CI 用例，内部保留原相对目录层级
+  personal/
+    manifest.json           # 个人用例清单（初始为空）
+    <姓名>/                 # 个人算子上传位置
+    examples/               # 向量加法示例，供复制
+  suanzhen/
+    manifest.json           # 算珍仓用例清单（初始为空）
+    <算子名>/               # 后续导入的算珍仓算子
+```
+
+默认分类为 `ci`，原命令仍可运行。个人算子不要放到 CI 目录：上传到
+`cases/personal/<姓名>/`，在 `cases/personal/manifest.json` 登记。
+清单中的 `driver` 路径相对于**清单所在目录**，例如 `zhangsan/bench_my_add.py`。
+
+```bash
+python costmodel_tests/run.py list --category ci
+python costmodel_tests/run.py list --category personal
+python costmodel_tests/run.py list --category suanzhen
+python costmodel_tests/run.py case --category personal --case zhangsan_add_f32_n1024 --device 0
+python costmodel_tests/run.py matrix --category suanzhen --device 0
+```
+
+空清单只能查看，登记用例后才能运行。`--manifest` 可覆盖分类默认清单。
+`pytest` 和 `all` 对应 CI 原始 pytest 集；个人/算珍仓使用 `case` 或 `matrix`。
+不同目录的脚本运行时可以直接 `from profile_utils import profile_kernel`，运行器会提供共享 helper 路径。
+
 | 测试集 | 路径 | 本次收录 |
 |---|---|---|
-| pytest_ut 全集 | `third_party/ascend/unittest/pytest_ut/` | 保留目标 main 原有 361 个 `test_*.py`，补入 PR 快照独有的 13 个文件，共 374 个测试文件 |
-| PR #2528 回归矩阵 | `third_party/ascend/unittest/costmodel_ut/costmodel_generalization/` | 100 个具名 case、19 个 benchmark 驱动，以及 FZE/solve_tril kernel |
+| pytest_ut 全集 | `cases/ci/third_party/ascend/unittest/pytest_ut/` | 保留目标 main 原有 361 个 `test_*.py`，补入 PR 快照独有的 13 个文件，共 374 个测试文件 |
+| PR #2528 回归矩阵 | `cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization/` | 100 个具名 case、19 个 benchmark 驱动，以及 FZE/solve_tril kernel |
 | PR 测试脚本 | 同上 | 运行、审计、分片、合并、合同校验、残差诊断、profile 采集和后端证据采集脚本 |
-| Profile 快照 | `third_party/ascend/costmodel/profiles/` | SIMD/SIMT selection profile、microbench JSON 和 schema；包含 pytest 校准测试所需 validator |
+| Profile 快照 | `cases/ci/third_party/ascend/costmodel/profiles/` | SIMD/SIMT selection profile、microbench JSON 和 schema；包含 pytest 校准测试所需 validator |
 | 新增统一入口 | `costmodel_tests/run.py` | pytest 全集、矩阵全量、单 case、组合执行及命令预览 |
 | 新增并发入口 | `costmodel_generalization/run_generalization_batch.py` | case 级并发、仅失败 case 重试、隔离尝试日志、最终汇总审计 |
 | 新增单 case 入口 | `costmodel_generalization/run_generalization_case.py` | 自动生成单 case 清单，默认运行 Auto 最终选择的路线并审计 |
@@ -90,7 +120,7 @@ python costmodel_tests/run.py case --case atomic_discrete_i32_p1_b256 --device 0
 也可以直接使用单 case 脚本（支持 `--warmup`、`--repeats`、`--measurement-processes`）：
 
 ```bash
-python third_party/ascend/unittest/costmodel_ut/costmodel_generalization/run_generalization_case.py \
+python cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization/run_generalization_case.py \
   softmax_original --device 0
 ```
 
@@ -157,7 +187,7 @@ python costmodel_tests/run.py case --case softmax_original --device 0 --retries 
 仅批跑指定的几个 case，可直接使用新 batch 脚本：
 
 ```bash
-python third_party/ascend/unittest/costmodel_ut/costmodel_generalization/run_generalization_batch.py \
+python cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization/run_generalization_batch.py \
   --case softmax_original --case atomic_discrete_i32_p1_b256 \
   --devices 0,1 --jobs 2 --retries 3 --output-root /tmp/costmodel_selected_new
 ```
@@ -221,7 +251,7 @@ profiler 数据优先；没有 profiler 时原审计脚本会退回 Event median
 
 ## 原 PR 脚本索引
 
-目录：`third_party/ascend/unittest/costmodel_ut/costmodel_generalization/`。
+目录：`cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization/`。
 
 | 脚本 | 用途 |
 |---|---|
@@ -244,7 +274,9 @@ profiler 数据优先；没有 profiler 时原审计脚本会退回 Event median
 
 按 [自定义测试用例提交规范](CUSTOM_CASES.md) 提交：**一个 Python 脚本 + 一条清单配置**。
 文档包含文件位置、必需参数、结果格式和运行命令。
-自定义 case 使用独立的 `custom_manifest.json`，通过 `--manifest` 选择，原 PR 的
+个人 case 登记在 `cases/personal/manifest.json`，使用 `--category personal` 选择；
+算珍仓 case 登记在 `cases/suanzhen/manifest.json`，使用 `--category suanzhen` 选择。
+也可用 `--manifest` 指定独立清单，原 PR 的
 `generalization_matrix.json` 和 `generalization_matrix_v140_all_100.json` 保持不变。
 
 ## 本次验证范围

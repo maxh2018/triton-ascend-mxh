@@ -48,6 +48,9 @@ def main() -> None:
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    for case in manifest["cases"]:
+        if "driver" in case:
+            case["driver"] = str((args.manifest.resolve().parent / case["driver"]).resolve())
     selected = [case for case in manifest["cases"] if case["name"] == args.case]
     if len(selected) != 1:
         parser.error(
@@ -58,6 +61,7 @@ def main() -> None:
         parser.error("warmup must be nonnegative; repeats and measurement-processes must be positive")
 
     env = os.environ.copy()
+    env["PYTHONPATH"] = str(HERE) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     if env.get("TRITON_ASCEND_COMPILE_MODE"):
         parser.error("unset TRITON_ASCEND_COMPILE_MODE so it cannot override the tested routes")
     if args.device is not None:

@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-GENERAL = Path(__file__).resolve().parents[1] / "third_party/ascend/unittest/costmodel_ut/costmodel_generalization"
+GENERAL = Path(__file__).resolve().parents[1] / "cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization"
 
 FAKE_WORKER = r'''
 import argparse, json, os
@@ -35,6 +35,8 @@ if mode == 'missing':
     raise SystemExit(1)
 cases = json.loads(a.manifest.read_text())
 case = next(c for c in cases['cases'] if c['name'] == a.case)
+assert Path(case['driver']).is_absolute() and Path(case['driver']).is_file()
+assert str(Path(os.environ['BATCH_TEST_AUDIT']).parent) in os.environ['PYTHONPATH'].split(os.pathsep)
 cases['cases'] = [case]
 (output / 'manifest.json').write_text(json.dumps(cases))
 fail = mode == 'always' or (a.case == 'flaky' and number == 1)
@@ -82,10 +84,13 @@ class BatchTests(unittest.TestCase):
         self.profile.write_text(json.dumps({"kernel_timing": {"system_counter_frequency_mhz": 1,
             "boundary_residual_system_cycles_by_physical_program_count": {"1": 0, "2": 0}}}))
         self.manifest = self.root / "manifest.json"
+        (self.root / "drivers").mkdir()
+        (self.root / "drivers/worker.py").write_text("# custom benchmark placeholder\n")
         self.manifest.write_text(json.dumps({"cases": [
             {"name": "stable", "family": "example", "split": "holdout",
+             "driver": "drivers/worker.py",
              "extra_modes": [{"route": "mixed", "factor": 4}]},
-            {"name": "flaky", "family": "example", "split": "holdout"}]}))
+            {"name": "flaky", "family": "example", "split": "holdout", "driver": "drivers/worker.py"}]}))
         spec = importlib.util.spec_from_file_location("batch_under_test", GENERAL / "run_generalization_batch.py")
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)

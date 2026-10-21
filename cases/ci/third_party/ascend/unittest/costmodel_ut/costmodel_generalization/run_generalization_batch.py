@@ -122,6 +122,10 @@ def main() -> None:
     if pool is not None and (not all(pool) or len(set(pool)) != len(pool) or args.jobs > len(pool)):
         parser.error("--devices must be unique/nonempty and contain at least --jobs devices")
     manifest = read_json(args.manifest)
+    # Resolve before copying the manifest into attempt directories.
+    for case in manifest["cases"]:
+        if "driver" in case:
+            case["driver"] = str((args.manifest.resolve().parent / case["driver"]).resolve())
     names = [c["name"] for c in manifest["cases"]]
     if not names or len(names) != len(set(names)):
         parser.error("manifest cases must be nonempty and unique")
@@ -132,6 +136,7 @@ def main() -> None:
     if any(not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", c["name"]) for c in selected):
         parser.error("case names must be safe directory names")
     env = os.environ.copy()
+    env["PYTHONPATH"] = str(HERE) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     if env.get("TRITON_ASCEND_COMPILE_MODE"):
         parser.error("unset TRITON_ASCEND_COMPILE_MODE so it cannot override tested routes")
     if args.device is not None:

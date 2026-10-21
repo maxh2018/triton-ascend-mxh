@@ -161,6 +161,8 @@ def main() -> None:
     if args.measurement_processes <= 0:
         parser.error("--measurement-processes must be positive")
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    for case in manifest["cases"]:
+        case["driver"] = str((args.manifest.resolve().parent / case["driver"]).resolve())
     cases_by_name = {case["name"]: case for case in manifest["cases"]}
     if len(cases_by_name) != len(manifest["cases"]):
         parser.error("manifest contains duplicate case names")
@@ -182,10 +184,12 @@ def main() -> None:
         raise FileNotFoundError(args.profile)
     # The compiler and audit must use the same profile, even with --profile.
     os.environ["TRITON_ASCEND_AUTO_SIMT_PROFILE"] = str(args.profile.resolve())
+    os.environ["PYTHONPATH"] = str(HERE) + (os.pathsep + os.environ["PYTHONPATH"]
+                                         if os.environ.get("PYTHONPATH") else "")
     profile_snapshot = args.output_root / "costmodel_profile.json"
     shutil.copy2(args.profile, profile_snapshot)
     manifest_snapshot = args.output_root / "generalization_matrix.json"
-    shutil.copy2(args.manifest, manifest_snapshot)
+    manifest_snapshot.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     # Freeze and record the two debug-affecting values once for all routes.
     os.environ.setdefault("TRITON_DEBUG", "0")
     os.environ.setdefault("TRITON_DISABLE_LINE_INFO", "0")
@@ -247,7 +251,7 @@ def main() -> None:
             name = f"{case['name']}__{route}_f{factor}"
             report = args.output_root / f"{name}.route.json"
             report.unlink(missing_ok=True)
-            driver = (HERE / case["driver"]).resolve()
+            driver = Path(case["driver"])
             factor_flag = case.get("factor_argument", "--factor")
             command = [
                 sys.executable,

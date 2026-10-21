@@ -2,7 +2,7 @@
 
 本目录收录 PR #2528 固定提交的 100-case 矩阵、benchmark、运行和验收脚本。
 
-完整说明：[CostModel 测试用例与脚本使用说明](../../../../../costmodel_tests/README.md)。
+完整说明：[CostModel 测试用例与脚本使用说明](../../../../../../../costmodel_tests/README.md)。
 
 在仓库根目录执行：
 
