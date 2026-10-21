@@ -418,7 +418,8 @@
     "path": "cases/ci/manifest_all.json",
     "validation_status": "unverified",
     "default": false,
-    "inventory": "100 original benchmark configurations plus all 375 CI test_*.py files; pytest parameters collected at runtime"
+    "inventory": "100 original benchmark configurations plus 339 active CI pytest files; 36 of the 375 source test files temporarily excluded after the 2026-10-21 functionality check. Pytest parameters collected at runtime.",
+    "excluded_manifest": "cases/ci/manifest_excluded.json"
   },
   "local_manifest_workflow": "costmodel_tests/run.py selects a category default or explicit manifest; benchmark/pytest dispatch and retries share the same scheduler. CI all manifest remains unverified and opt-in.",
   "manifest_selection": "Explicit --manifest is authoritative and can combine drivers from different directories. Only when absent does --category choose a default; absent both defaults to cases/ci/manifest.json. Driver paths are relative to their manifest, not category.",

@@ -115,8 +115,11 @@ python costmodel_tests/run.py --device 0 --jobs 2 --retries 3
 <details>
 <summary>可选：CI 全量清单（尚未验证，不默认运行）</summary>
 
-[manifest_all.json](../cases/ci/manifest_all.json) 包含 100 个 benchmark 配置和 CI 目录下的 375 个测试文件。
-475 是清单条目数；pytest 函数和参数化节点在运行时展开，不代表 475 个独立算子。
+[manifest_all.json](../cases/ci/manifest_all.json) 当前包含 **100 个 benchmark 配置 + 339 个 pytest 文件，共 439 个条目**。
+pytest 函数和参数化节点在运行时展开，条目数不代表独立算子数。
+
+2026-10-21 功能检查中失败的 **36 个文件**已暂时移到 [manifest_excluded.json](../cases/ci/manifest_excluded.json)：
+7 个精度失败、26 个其他功能失败、3 个收集失败。按文件整体排除，源码保留，生成清单时也会继续排除。
 
 ```bash
 # 显式选择，单卡执行
@@ -127,7 +130,10 @@ python costmodel_tests/run.py --manifest cases/ci/manifest_all.json \
   --device 0 --jobs 2 --retries 3
 ```
 
-这份清单保留待验证条目，不表示所有文件已完成适配；`UNSUPPORTED` 会导致严格验收失败。
+Auto 选路及耗时验收仍待验证；`UNSUPPORTED` 会导致严格验收失败。
+
+修复后，从 `manifest_excluded.json` 的 `cases` 中删除对应条目，再执行
+`python costmodel_tests/update_ci_manifests.py`，即可恢复到全量清单。
 
 </details>
 

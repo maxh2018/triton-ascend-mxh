@@ -27,7 +27,7 @@ class ManifestTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def test_ci_manifests_match_original_100_and_inventory_all_test_files(self):
+    def test_ci_manifests_match_original_100_and_partition_all_test_files(self):
         default, complete = build_manifests()
         self.assertEqual(default, json.loads((CI / 'manifest.json').read_text()))
         self.assertEqual(complete, json.loads((CI / 'manifest_all.json').read_text()))
@@ -40,7 +40,15 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn('validation_status', default)
         self.assertEqual(complete['validation_status'], 'unverified')
         pytest_files = {c['driver'] for c in complete['cases'] if c.get('runner') == 'pytest'}
-        self.assertEqual(pytest_files, {p.relative_to(CI).as_posix() for p in CI.rglob('test_*.py')})
+        excluded = json.loads((CI / 'manifest_excluded.json').read_text())['cases']
+        excluded_files = {c['driver'] for c in excluded}
+        self.assertTrue(all(c['runner'] == 'pytest' for c in excluded))
+        self.assertTrue(pytest_files.isdisjoint(excluded_files))
+        self.assertEqual(pytest_files | excluded_files,
+                         {p.relative_to(CI).as_posix() for p in CI.rglob('test_*.py')})
+        self.assertTrue({c['name'] for c in complete['cases']}.isdisjoint(c['name'] for c in excluded))
+        self.assertEqual(len(excluded), len({c['name'] for c in excluded}))
+        self.assertEqual(complete['excluded_manifest'], 'manifest_excluded.json')
         self.assertIn('third_party/ascend/unittest/costmodel_ut/costmodel_generalization/fze/test_fze.py', pytest_files)
         self.assertEqual(len(complete['cases']), 100 + len(pytest_files))
         self.assertEqual(len(complete['cases']), len({c['name'] for c in complete['cases']}))

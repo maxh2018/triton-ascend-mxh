@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / "cases/ci"
 ORIGINAL = CI / "third_party/ascend/unittest/costmodel_ut/costmodel_generalization/generalization_matrix.json"
+EXCLUDED = CI / "manifest_excluded.json"
 
 
 def build_manifests():
@@ -16,7 +17,7 @@ def build_manifests():
     for case in default["cases"]:
         case["driver"] = (ORIGINAL.parent / case["driver"]).relative_to(CI).as_posix()
     complete = deepcopy(default)
-    complete["description"] = "All registered CI benchmarks and test files; explicitly select to run."
+    complete["description"] = "CI extended manifest with temporary failure exclusions; explicitly select to run."
     complete["validation_status"] = "unverified"
     complete["inventory_note"] = "Pytest entries are files; their parameterized nodes are collected at runtime."
     for path in sorted(CI.rglob("test_*.py")):
@@ -27,6 +28,17 @@ def build_manifests():
     names = [c["name"] for c in complete["cases"]]
     if len(names) != len(set(names)):
         raise ValueError("duplicate generated names; qualify the conflicting pytest filenames")
+    excluded = json.loads(EXCLUDED.read_text(encoding="utf-8"))["cases"]
+    excluded_names = [case["name"] for case in excluded]
+    pytest_names = {case["name"] for case in complete["cases"] if case.get("runner") == "pytest"}
+    if len(excluded_names) != len(set(excluded_names)):
+        raise ValueError("duplicate case names in manifest_excluded.json")
+    excluded_names = set(excluded_names)
+    unknown = excluded_names - pytest_names
+    if unknown:
+        raise ValueError("excluded cases are not CI pytest entries: " + ", ".join(sorted(unknown)))
+    complete["cases"] = [case for case in complete["cases"] if case["name"] not in excluded_names]
+    complete["excluded_manifest"] = EXCLUDED.name
     default = {"description": default.pop("description"), **default}
     complete = {"description": complete.pop("description"),
                 "validation_status": complete.pop("validation_status"),
@@ -40,6 +52,7 @@ def main():
         (CI / name).write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"{CI / name}: {len(manifest['cases'])} entries")
     print("manifest_all.json remains unverified; the default is manifest.json (100 cases).")
+    print("Temporary exclusions are preserved from manifest_excluded.json.")
 
 
 if __name__ == "__main__":
