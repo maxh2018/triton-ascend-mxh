@@ -14,7 +14,13 @@
 | 个人用例 | [cases/personal/](cases/personal/README.md) | 个人算子上传到 `<姓名>/` 子目录，登记到此处 `manifest.json` |
 | 算子仓用例 | [cases/operator_repos/](cases/operator_repos/README.md) | 按 vLLM、SGLang 等来源仓库分目录保存 |
 
-默认仍运行 CI 用例；运行个人用例使用 `--category personal`，算子仓使用 `--category operator_repos`。
+默认执行 `cases/ci/manifest.json`（原始 100 个 case）。个人、算子仓分别用 `--category personal`、`--category operator_repos` 读取各自的 `manifest.json`。
+`cases/ci/manifest_all.json` 是尚未验证的 CI 全量清单，只有显式指定才运行。
+
+```bash
+python costmodel_tests/run.py --device 0
+python costmodel_tests/run.py --manifest cases/ci/manifest_all.json --device 0
+```
 
 无需 NPU 的资料自检：
 

@@ -13,6 +13,7 @@
 |---|---|---|
 | `cases` | `[{...}]` | 用例列表，每个对象代表一个测试配置；增加对象即可登记多个 case。 |
 | `name` | `custom_add_f32_n1024` | 唯一的用例名，运行命令的 `--case` 就填写这个值。 |
+| `runner`（可选） | `benchmark` | 脚本接口：默认 `benchmark`；保留原始 pytest 写法时填 `pytest`。运行命令相同。 |
 | `family` | `elementwise` | 算子类别，用于分类和按类别统计；这里表示逐元素计算。 |
 | `split` | `holdout` | 数据用途：`train` 表示用于模型开发，`holdout` 表示留出验证；新提交默认填 `holdout`，不改变运行方式。 |
 | `driver` | `bench_custom_add_example.py` | 执行该 case 的 Python 脚本路径，相对于清单所在目录；示例脚本和清单都在 `cases/personal/examples/`。 |
@@ -25,7 +26,7 @@ report 等公共参数。相同脚本可以登记多个 case，例如修改 `nam
 加载兼容的 NPU 编译环境后，在仓库根目录直接运行：
 
 ```bash
-python costmodel_tests/run.py case --category personal \
+python costmodel_tests/run.py --category personal \
   --manifest cases/personal/examples/custom_manifest.example.json \
   --case custom_add_f32_n1024 --device 0
 ```
@@ -129,15 +130,15 @@ print(json.dumps({
 ```bash
 # 查看清单及命令（不运行 NPU 测试）
 python costmodel_tests/run.py list --category personal
-python costmodel_tests/run.py case --category personal \
+python costmodel_tests/run.py --category personal \
   --case custom_my_add_f32_n1024 --device 0 --dry-run
 
 # 运行并验收一个自定义 case
-python costmodel_tests/run.py case --category personal \
+python costmodel_tests/run.py --category personal \
   --case custom_my_add_f32_n1024 --device 0 --retries 3
 
 # 批跑该清单；并发和重试沿用现有参数
-python costmodel_tests/run.py matrix --category personal \
+python costmodel_tests/run.py --category personal \
   --devices 0,1 --jobs 2 --retries 3
 ```
 
@@ -145,6 +146,22 @@ python costmodel_tests/run.py matrix --category personal \
 该路线计算结果正确且预测耗时误差不超过 ±10% 才通过。
 需要额外检查 SIMD、SIMT F1/F2/F4 等路线时，加 `--validation-scope all`。
 “Auto 是否实测最快”不属于当前审计条件。
-如果只有原始 pytest、尚未接入上述接口，也放在 `cases/personal/<姓名>/`，可用
-`python -m pytest cases/personal/<姓名>/` 按原有断言运行；接入以上接口并登记清单后，
-才具备统一入口的 CostModel 计时审计能力。
+如果上传的是已有 pytest 文件，可以保留原精度断言，使用下面的清单条目，无需改成 benchmark 接口：
+
+```json
+{
+  "name": "zhangsan_add",
+  "runner": "pytest",
+  "driver": "zhangsan/test_add.py",
+  "arguments": []
+}
+```
+
+将条目放进个人 `manifest.json` 的 `cases` 列表后，仍用同一命令：
+
+```bash
+python costmodel_tests/run.py --category personal --case zhangsan_add --device 0
+```
+
+pytest 适配器保留原断言并验收 Auto 耗时预测。没有运行 kernel、未提供有效精度断言、
+或直接调用编译后 kernel 等特殊形式，需要补充实际测试或专门适配；`UNSUPPORTED` 不算通过。

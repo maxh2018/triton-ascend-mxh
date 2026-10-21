@@ -19,15 +19,15 @@ cases/personal/
 
 ```bash
 python costmodel_tests/run.py list --category personal
-python costmodel_tests/run.py case --category personal --case zhangsan_add_f32_n1024 --device 0
-python costmodel_tests/run.py matrix --category personal --device 0
+python costmodel_tests/run.py --category personal --case zhangsan_add_f32_n1024 --device 0
+python costmodel_tests/run.py --category personal --device 0
 ```
 
 `manifest.json` 初始为空，登记用例后才能运行。
 `examples/` 是可复制的向量加法示例，默认不加入个人用例清单；运行示例时显式指定：
 
 ```bash
-python costmodel_tests/run.py case --category personal \
+python costmodel_tests/run.py --category personal \
   --manifest cases/personal/examples/custom_manifest.example.json \
   --case custom_add_f32_n1024 --device 0
 ```

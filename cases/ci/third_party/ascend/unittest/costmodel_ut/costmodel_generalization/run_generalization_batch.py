@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run matrix cases concurrently, retry failed cases, and audit final attempts."""
+"""Run manifest entries concurrently, retry only failures, and audit final attempts."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ import time
 
 HERE = Path(__file__).resolve().parent
 SINGLE_CASE_SCRIPT = HERE / "run_generalization_case.py"
+ROOT = HERE.parents[6]
+sys.path.insert(0, str(ROOT))
+from costmodel_tests.manifests import load_manifest, select_cases
+from costmodel_tests.pytest_runner import run_pytest_case
 
 
 def read_json(path: Path) -> dict:
@@ -32,6 +36,8 @@ def write_json(path: Path, value: dict) -> None:
 
 def run_case(case: dict, args: argparse.Namespace, env: dict, device: str | None) -> dict:
     """One case owns an isolated directory; successful cases are never rerun."""
+    if case.get("runner", "benchmark") == "pytest":
+        return run_pytest_case(case, args, env, device)
     attempts = []
     expected = 1 if args.validation_scope == "auto" else 5 + len(case.get("extra_modes", []))
     for number in range(1, args.retries + 2):
@@ -64,6 +70,7 @@ def run_case(case: dict, args: argparse.Namespace, env: dict, device: str | None
                 status = 1
                 failure = str(error)
                 stream.write(failure + "\n")
+        audit, matrix = {}, {}
         try:
             summary = read_json(output / "single_case_summary.json")
             audit = read_json(output / "generalization_audit.json")
@@ -90,14 +97,20 @@ def run_case(case: dict, args: argparse.Namespace, env: dict, device: str | None
             break
         if number <= args.retries:
             print(f"RETRY {case['name']} ({number}/{args.retries})", flush=True)
-    return {"case": case["name"], "status": attempts[-1]["status"], "device": device,
+    try:
+        evidence = [read_json(Path(r["evidence_dir"]) / "evidence.json") for r in matrix.get("records", [])]
+        precision_pass = bool(evidence) and all((e.get("benchmark") or {}).get("correct") is True for e in evidence)
+    except (OSError, ValueError, KeyError, TypeError):
+        precision_pass = False
+    return {"case": case["name"], "runner": "benchmark", "status": attempts[-1]["status"], "device": device,
             "attempt_count": len(attempts), "final_output_root": attempts[-1]["output_root"],
-            "attempts": attempts}
+            "precision_pass": precision_pass, "timing_pass": audit.get("all_pass") is True,
+            "audit_results": audit.get("results", []), "attempts": attempts}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=HERE / "generalization_matrix.json")
+    parser.add_argument("--manifest", type=Path, default=ROOT / "cases/ci/manifest.json")
     parser.add_argument("--case", action="append", default=[], help="exact case name; repeat to select a batch")
     parser.add_argument("--validation-scope", choices=("auto", "all"), default="auto")
     parser.add_argument("--output-root", type=Path, required=True)
@@ -108,8 +121,8 @@ def main() -> None:
     devices.add_argument("--devices", help="comma-separated device pool; one active case per device")
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--expected-bishengir", type=Path)
-    parser.add_argument("--triton-root", type=Path, default=HERE.parents[4])
-    parser.add_argument("--npuir-root", type=Path, default=HERE.parents[4] / "third_party/ascend/AscendNPU-IR")
+    parser.add_argument("--triton-root", type=Path, default=ROOT)
+    parser.add_argument("--npuir-root", type=Path, default=ROOT / "third_party/ascend/AscendNPU-IR")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--measurement-processes", type=int, default=3)
@@ -121,22 +134,15 @@ def main() -> None:
     pool = [d.strip() for d in args.devices.split(",")] if args.devices is not None else None
     if pool is not None and (not all(pool) or len(set(pool)) != len(pool) or args.jobs > len(pool)):
         parser.error("--devices must be unique/nonempty and contain at least --jobs devices")
-    manifest = read_json(args.manifest)
-    # Resolve before copying the manifest into attempt directories.
-    for case in manifest["cases"]:
-        if "driver" in case:
-            case["driver"] = str((args.manifest.resolve().parent / case["driver"]).resolve())
-    names = [c["name"] for c in manifest["cases"]]
-    if not names or len(names) != len(set(names)):
-        parser.error("manifest cases must be nonempty and unique")
-    unknown = sorted(set(args.case) - set(names))
-    if unknown:
-        parser.error(f"unknown case(s): {', '.join(unknown)}")
-    selected = [c for c in manifest["cases"] if not args.case or c["name"] in args.case]
-    if any(not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", c["name"]) for c in selected):
-        parser.error("case names must be safe directory names")
+    try:
+        manifest = load_manifest(args.manifest)
+        selected = select_cases(manifest, args.case)
+    except (OSError, ValueError, TypeError) as error:
+        parser.error(str(error))
+    if not selected:
+        parser.error("manifest cases must be nonempty")
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(HERE) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONPATH"] = str(ROOT) + os.pathsep + str(HERE) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     if env.get("TRITON_ASCEND_COMPILE_MODE"):
         parser.error("unset TRITON_ASCEND_COMPILE_MODE so it cannot override tested routes")
     if args.device is not None:
@@ -146,14 +152,15 @@ def main() -> None:
     if not profile.is_file():
         parser.error(f"profile does not exist: {profile}")
     compiler = args.expected_bishengir or shutil.which("bishengir-compile")
-    if not compiler or not Path(compiler).is_file():
+    if any(c["runner"] == "benchmark" for c in selected) and (not compiler or not Path(compiler).is_file()):
         parser.error("bishengir-compile was not found; load your toolchain or pass --expected-bishengir")
-    args.expected_bishengir = Path(compiler).resolve()
+    args.expected_bishengir = Path(compiler).resolve() if compiler else None
     args.output_root = args.output_root.resolve()
     if args.output_root.exists() and (not args.output_root.is_dir() or any(args.output_root.iterdir())):
         parser.error(f"output directory must be new or empty: {args.output_root}")
     args.output_root.mkdir(parents=True, exist_ok=True)
     manifest["cases"] = selected
+    write_json(args.output_root / "manifest.json", manifest)
     write_json(args.output_root / "generalization_matrix.json", manifest)
     shutil.copyfile(profile, args.output_root / "costmodel_profile.json")
     env["TRITON_ASCEND_AUTO_SIMT_PROFILE"] = str(args.output_root / "costmodel_profile.json")
@@ -190,7 +197,7 @@ def main() -> None:
     records = []
     for case in selected:
         result = results[case["name"]]
-        if result["final_output_root"] is None:
+        if case["runner"] != "benchmark" or result["final_output_root"] is None:
             continue
         try:
             matrix = read_json(Path(result["final_output_root"]) / "matrix_summary.json")
@@ -204,23 +211,54 @@ def main() -> None:
         "validation_scope": args.validation_scope,
         "batch_summary": str(args.output_root / "batch_summary.json"),
     })
-    audit_command = [sys.executable, str(HERE / "audit_generalization_matrix.py"),
-                     "--evidence-root", str(args.output_root),
-                     "--manifest", str(args.output_root / "generalization_matrix.json"),
-                     "--profile", str(args.output_root / "costmodel_profile.json"),
-                     "--validation-scope", args.validation_scope,
-                     "--output-json", str(args.output_root / "generalization_audit.json"),
-                     "--output-markdown", str(args.output_root / "generalization_audit.md")]
-    with (args.output_root / "audit.log").open("w", encoding="utf-8") as stream:
-        audit_status = subprocess.run(audit_command, env=env, stdout=stream,
-                                      stderr=subprocess.STDOUT, check=False).returncode
+    benchmark_manifest = {**manifest, "cases": [c for c in selected if c["runner"] == "benchmark"]}
+    audit_status = 0
+    if benchmark_manifest["cases"]:
+        write_json(args.output_root / "benchmark_manifest.json", benchmark_manifest)
+        audit_command = [sys.executable, str(HERE / "audit_generalization_matrix.py"),
+                         "--validation-scope", args.validation_scope,
+                         "--evidence-root", str(args.output_root),
+                         "--manifest", str(args.output_root / "benchmark_manifest.json"),
+                         "--profile", str(args.output_root / "costmodel_profile.json"),
+                         "--output-json", str(args.output_root / "generalization_audit.json"),
+                         "--output-markdown", str(args.output_root / "generalization_audit.md")]
+        with (args.output_root / "audit.log").open("w", encoding="utf-8") as stream:
+            audit_status = subprocess.run(audit_command, env=env, stdout=stream,
+                                          stderr=subprocess.STDOUT, check=False).returncode
     summary = batch_summary()
     passed = audit_status == 0 and all(r["status"] == "PASS" for r in results.values())
     summary.update(status="PASS" if passed else "FAIL", audit_exit_status=audit_status,
                    failed_cases=[c["name"] for c in selected if results[c["name"]]["status"] != "PASS"])
     write_json(args.output_root / "batch_summary.json", summary)
     print(f"Batch {summary['status']}; failed_cases={summary['failed_cases']}", flush=True)
-    print(f"Report: {args.output_root / 'generalization_audit.md'}", flush=True)
+    write_json(args.output_root / "report.json", summary)
+    lines = ["# CostModel test report", "", f"Status: {summary['status']}", "",
+             "| Case | Precision | Timing | Attempts | Status |", "|---|---|---|---:|---|"]
+    for result in summary["cases"]:
+        lines.append(f"| {result['case']} | {result.get('precision_pass', False)} | "
+                     f"{result.get('timing_pass', False)} | {result['attempt_count']} | {result['status']} |")
+    lines += ["", "## Timing details", "",
+              "| Case / node | Kernel / route | Predicted (us) | Measured (us) | Error | Gate |",
+              "|---|---|---:|---:|---:|---|"]
+    for result in summary["cases"]:
+        details = []
+        if result.get("runner") == "pytest":
+            for node in result.get("pytest_results", []):
+                for launch in node.get("launches", []):
+                    details.append({**launch, "case": node["nodeid"], "label": launch["kernel"]})
+        else:
+            details = [{**r, "label": r.get("mode", "auto")} for r in result.get("audit_results", [])]
+        for detail in details:
+            predicted = detail.get("predicted_us")
+            measured = detail.get("measured_us")
+            error = detail.get("relative_error")
+            values = [f"{v:.3f}" if v is not None else "N/A" for v in (predicted, measured)]
+            error_text = f"{error:+.2%}" if error is not None else "N/A"
+            name = detail.get("case", result["case"]).replace("|", "\\|").replace("\n", " ")
+            gate = "PASS" if detail.get("pass") else "FAIL"
+            lines.append(f"| {name} | {detail['label']} | {values[0]} | {values[1]} | {error_text} | {gate} |")
+    (args.output_root / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Report: {args.output_root / 'report.md'}", flush=True)
     raise SystemExit(0 if passed else 1)
 
 

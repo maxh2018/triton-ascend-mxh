@@ -253,44 +253,40 @@ def test_correct(work):
         self.assertEqual(again.returncode, 4)
         self.assertIn('new or empty', again.stderr)
 
-    def test_launcher_can_collect_only_one_pytest_file_without_other_dependencies(self):
-        command = [sys.executable, str(ROOT / 'costmodel_tests/run.py'), 'pytest',
-                   '--pytest-target', 'test_01_vector_add.py::test_vector_addition', '--dry-run']
+    def test_launcher_selects_pytest_entry_from_explicit_all_manifest(self):
+        command = [sys.executable, str(ROOT / 'costmodel_tests/run.py'),
+                   '--manifest', 'cases/ci/manifest_all.json',
+                   '--case', 'pytest_test_01_vector_add', '--dry-run']
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('UNVERIFIED', result.stdout)
         arguments = json.loads(result.stdout.splitlines()[-1].split(': ', 1)[1])
-        self.assertTrue(arguments[3].endswith('test_01_vector_add.py::test_vector_addition'))
-        for target in ('../../../../../costmodel_tests/run.py', 'test_missing.py'):
-            bad = command.copy()
-            bad[bad.index('--pytest-target') + 1] = target
-            self.assertEqual(subprocess.run(bad, cwd=ROOT, capture_output=True).returncode, 2)
+        self.assertEqual(arguments[arguments.index('--case') + 1], 'pytest_test_01_vector_add')
+        self.assertTrue(arguments[arguments.index('--manifest') + 1].endswith('manifest_all.json'))
 
-    def test_launcher_requires_pytest_audit_and_keeps_pytest_args_last(self):
+    def test_launcher_requires_batch_audit_even_when_process_exit_is_zero(self):
         spec = importlib.util.spec_from_file_location('adapted_launcher', ROOT / 'costmodel_tests/run.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        for audit_status, expected in [('PASS', 0), ('FAIL', 1), ('MISSING', 1), ('NOT_RUN', 0)]:
+        for audit_status, expected in [('PASS', 0), ('FAIL', 1), ('MISSING', 1), ('NOT_RUN', 1)]:
             output = self.root / audit_status
 
             def fake_run(command, **kwargs):
-                self.assertIn('costmodel_tests.pytest_costmodel', command)
-                self.assertEqual(command[-2:], ['-k', 'vector_addition'])
-                self.assertIn('--costmodel-profile', command)
+                self.assertIn('run_generalization_batch.py', command[1])
+                self.assertIn('--profile', command)
                 if audit_status != 'MISSING':
-                    directory = output / 'pytest_costmodel'
-                    directory.mkdir()
-                    (directory / 'summary.json').write_text(json.dumps({'status': audit_status}))
+                    output.mkdir()
+                    (output / 'batch_summary.json').write_text(json.dumps({'status': audit_status}))
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch.object(sys, 'argv', ['run.py', 'pytest', '--profile', str(self.profile),
-                                           '--output-root', str(output), '--pytest-args', '-k', 'vector_addition']), \
+            with patch.object(sys, 'argv', ['run.py', '--profile', str(self.profile), '--output-root', str(output)]), \
                     patch.object(module.subprocess, 'run', side_effect=fake_run), \
                     contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(SystemExit) as stopped:
                     module.main()
             self.assertEqual(stopped.exception.code, expected)
             self.assertEqual(json.loads((output / 'summary.json').read_text())['status'],
-                             'FAIL' if audit_status == 'MISSING' else audit_status)
+                             'PASS' if audit_status == 'PASS' else 'FAIL')
 
 
 if __name__ == '__main__':

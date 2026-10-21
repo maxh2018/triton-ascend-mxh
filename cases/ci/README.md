@@ -1,17 +1,22 @@
 # CI 用例
 
-现有 pytest_ut、PR #2528 的 100-case 和必要依赖统一保存在本目录。
-内部保留原相对目录层级，避免破坏已有测试的源码读取和导入关系。
+| 清单 | 内容 | 默认运行 |
+|---|---|---|
+| [manifest.json](manifest.json) | 原始 PR 100 个 case | 是 |
+| [manifest_all.json](manifest_all.json) | 100 个配置 + CI 目录下 375 个测试文件 | 否，尚未验证 |
 
-在仓库根目录运行：
+在仓库根目录执行：
 
 ```bash
-python costmodel_tests/run.py list --category ci
-python costmodel_tests/run.py matrix --category ci --device 0
-python costmodel_tests/run.py pytest --category ci --device 0
+# 默认：只运行原始 100 个 case
+python costmodel_tests/run.py --device 0
+
+# 查看全量清单；运行时去掉 list
+python costmodel_tests/run.py list --manifest cases/ci/manifest_all.json
 ```
 
-`ci` 是默认分类，不加 `--category` 的命令仍运行 CI 用例。
-个人上传的算子放到 `cases/personal/`，不要混入本目录。
+完整目录层级保留用于测试依赖。原始 PR 清单仍保存在深层目录，根目录 `manifest.json` 是路径已调整的副本。
+全量清单通过显式 `--manifest` 选择，不会自动启用。更新清单：`python costmodel_tests/update_ci_manifests.py`。
+个人算子放到 `cases/personal/<姓名>/`。
 
-[完整使用说明](../../costmodel_tests/README.md)
+[使用说明](../../costmodel_tests/README.md)

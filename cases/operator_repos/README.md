@@ -17,7 +17,7 @@ cases/operator_repos/
 
 ```bash
 python costmodel_tests/run.py list --category operator_repos
-python costmodel_tests/run.py matrix --category operator_repos --device 0
+python costmodel_tests/run.py --category operator_repos --device 0
 ```
 
 当前清单为空，登记用例后才能运行。每个脚本头部注明原仓库、原文件路径和版本。

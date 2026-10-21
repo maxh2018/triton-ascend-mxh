@@ -37,7 +37,7 @@ class OfflineTests(unittest.TestCase):
                                      "list", "--category", category], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"Category: {category}", result.stdout)
-            self.assertIn(f"Matrix: {count} cases", result.stdout)
+            self.assertIn(f"Cases: {count}", result.stdout)
         personal_example = ROOT / "cases/personal/examples/custom_manifest.example.json"
         example = json.loads(personal_example.read_text())
         self.assertTrue((personal_example.parent / example["cases"][0]["driver"]).is_file())
@@ -109,19 +109,20 @@ class OfflineTests(unittest.TestCase):
 
             def fake_run(command, **kwargs):
                 if Path(command[1]).name == "run_generalization_batch.py":
-                    (output / "matrix").mkdir()
-                    (output / "matrix/matrix_summary.json").write_text("{}")
+                    output.mkdir()
+                    (output / "batch_summary.json").write_text('{"status": "FAIL"}')
                     return subprocess.CompletedProcess(command, 1)
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch.object(sys, "argv", ["run.py", "matrix", "--output-root", str(output)]), \
+            with patch.object(sys, "argv", ["run.py", "--output-root", str(output)]), \
                     patch.object(module.subprocess, "run", side_effect=fake_run):
                 with self.assertRaises(SystemExit) as stopped:
                     module.main()
             self.assertEqual(stopped.exception.code, 1)
             summary = json.loads((output / "summary.json").read_text())
             self.assertEqual(summary["status"], "FAIL")
-            self.assertEqual([r["step"] for r in summary["steps"]], ["matrix"])
+            self.assertEqual(summary["returncode"], 1)
+            self.assertEqual(summary["case_count"], 100)
 
     def test_custom_manifest_can_be_listed_and_forwarded_without_modifying_original(self):
         spec = importlib.util.spec_from_file_location("custom_suite_runner", ROOT / "costmodel_tests/run.py")
@@ -132,18 +133,19 @@ class OfflineTests(unittest.TestCase):
             manifest = Path(directory) / "custom_manifest.json"
             manifest.write_text(json.dumps({"cases": [{"name": "custom_add", "family": "elementwise",
                                                        "driver": "bench_custom_add.py"}]}))
-            for suite in ("list", "case", "matrix"):
-                command = ["run.py", suite, "--manifest", str(manifest)]
+            (Path(directory) / "bench_custom_add.py").write_text("# driver\n")
+            for suite in ("list", "run", "selected"):
+                command = ["run.py", "list" if suite == "list" else "run", "--manifest", str(manifest)]
                 if suite != "list":
                     command += ["--dry-run", "--output-root", str(Path(directory) / suite)]
-                if suite == "case":
+                if suite == "selected":
                     command += ["--case", "custom_add"]
                 stream = io.StringIO()
                 with patch.object(sys, "argv", command), contextlib.redirect_stdout(stream):
                     module.main()
                 if suite == "list":
                     self.assertIn("custom_add", stream.getvalue())
-                    self.assertIn("Matrix: 1 cases", stream.getvalue())
+                    self.assertIn("Cases: 1", stream.getvalue())
                 else:
                     arguments = json.loads(stream.getvalue().splitlines()[-1].split(": ", 1)[1])
                     self.assertEqual(arguments[arguments.index("--manifest") + 1], str(manifest.resolve()))
