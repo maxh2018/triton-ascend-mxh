@@ -1,11 +1,11 @@
 {
   "cases": [
     {
-      "name": "maxh2018_indirect_store_i8_2x256_w8",
+      "name": "maxh2018_indirect_load_i16_n16_w2",
       "runner": "benchmark",
-      "driver": "maxh2018/bench_indirect_store_i8.py",
+      "driver": "maxh2018/bench_indirect_load_i16.py",
       "arguments": ["--seed", "90521000"],
-      "family": "indirect_memory_store",
+      "family": "indirect_memory_load",
       "split": "holdout"
     }
   ]
