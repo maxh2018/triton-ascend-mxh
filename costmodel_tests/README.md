@@ -1,13 +1,6 @@
 # CostModel 测试用例与脚本使用说明
 
 本分支 `costmodel/test-cases` 用于保存和持续扩充 CostModel 测试资料。
-目标仓库为 <https://github.com/maxh2018/triton-ascend-mxh>。
-
-本分支已精简为测试资料仓：移除了编译器主体、构建系统、CI 配置、其他后端和旧项目文档。
-少量测试直接读取 backend Python 或 C++ 源码做 AST/文本断言，这些文件作为必要测试
-fixture 保留；逐文件用途见 [dependencies.json](dependencies.json)。
-不要在本分支运行 `pip install .` 或尝试构建编译器，编译器需在独立环境安装。
-`LICENSE` 和 `Open_Source_Software_Notice` 保留用于收录代码的授权说明。
 
 ## 收录范围和来源
 
