@@ -10,7 +10,7 @@
 python costmodel_tests/run.py list
 python costmodel_tests/run.py --case softmax_original --device 0
 python costmodel_tests/run.py --device 0
-python costmodel_tests/run.py --devices 0,1 --jobs 2 --retries 3
+python costmodel_tests/run.py --device 0 --jobs 2 --retries 3
 python costmodel_tests/run.py --manifest cases/ci/manifest_all.json --device 0
 ```
 

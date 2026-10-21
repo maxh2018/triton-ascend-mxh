@@ -63,8 +63,7 @@ python costmodel_tests/run.py [run | list] [选项]
 | `--manifest <JSON路径>` | 无 | **最高优先级**，按指定清单执行；相对路径以当前目录为准，也支持绝对路径 |
 | `--category <分类>` | `ci` | 仅在未指定清单时，读取 `cases/<分类>/manifest.json`；支持 `ci`、`personal`、`operator_repos` |
 | `--case <名称>` | 整份清单 | 只选指定条目，可重复填写；填 `name`，不填 `.py` 文件名 |
-| `--device <卡号>` | 继承环境 | 单卡，例如 `--device 0` |
-| `--devices <卡号列表>` | 无 | 多卡设备池，例如 `--devices 0,1`；与 `--device` 互斥 |
+| `--device <卡号>` | 继承环境 | 使用的卡号，例如 `--device 0`；并发用例共用这张卡 |
 | `--jobs <数量>` | `1` | 同时执行的清单条目数 |
 | `--retries <次数>` | `3` | 失败后的**额外**重试次数；默认最多尝试 4 次，`0` 关闭重试 |
 | `--output-root <目录>` | 自动生成 | 保存结果的位置，必须是新目录或空目录 |
@@ -95,8 +94,8 @@ unset TRITON_ASCEND_COMPILE_MODE
 
 ## 2. 快速验证命令
 
-下面每组提供**单卡执行**和**多卡并发、失败重试**两种选择。卡号按服务器实际情况修改。
-`--devices` 的卡数不得少于 `--jobs`，且卡号不能重复；同卡并发会影响耗时测量，建议多卡隔离。
+下面每组提供**单卡串行**和**单卡并发、失败重试**两种选择。卡号按服务器实际情况修改。
+`--jobs 2` 表示最多同时执行两个用例，共用 `--device` 指定的卡；并发可能影响实测耗时，严格验收耗时误差时使用串行命令。
 
 只重试失败用例，已通过的条目不会重跑；同一 pytest 文件内也只重试失败的参数化节点。
 收集阶段失败、尚无节点结果时重试该文件；已有通过结果但无法定位失败节点时，不会全量重放。
@@ -107,8 +106,8 @@ unset TRITON_ASCEND_COMPILE_MODE
 # 单卡串行；默认清单为 cases/ci/manifest.json
 python costmodel_tests/run.py --device 0
 
-# 可选：两张卡并发，失败后额外重试 3 次
-python costmodel_tests/run.py --devices 0,1 --jobs 2 --retries 3
+# 可选：单卡并发，失败后额外重试 3 次
+python costmodel_tests/run.py --device 0 --jobs 2 --retries 3
 ```
 
 只测一个 case 时追加 `--case softmax_original`；只查看清单用 `python costmodel_tests/run.py list`。
@@ -123,9 +122,9 @@ python costmodel_tests/run.py --devices 0,1 --jobs 2 --retries 3
 # 显式选择，单卡执行
 python costmodel_tests/run.py --manifest cases/ci/manifest_all.json --device 0
 
-# 可选：两张卡并发，失败后额外重试 3 次
+# 可选：单卡并发，失败后额外重试 3 次
 python costmodel_tests/run.py --manifest cases/ci/manifest_all.json \
-  --devices 0,1 --jobs 2 --retries 3
+  --device 0 --jobs 2 --retries 3
 ```
 
 这份清单保留待验证条目，不表示所有文件已完成适配；`UNSUPPORTED` 会导致严格验收失败。
@@ -148,8 +147,8 @@ python costmodel_tests/run.py --manifest cases/ci/manifest_all.json \
 # 个人目录：单卡执行
 python costmodel_tests/run.py --category personal --device 0
 
-# 可选：个人目录，两张卡并发，失败后额外重试 3 次
-python costmodel_tests/run.py --category personal --devices 0,1 --jobs 2 --retries 3
+# 可选：个人目录，单卡并发，失败后额外重试 3 次
+python costmodel_tests/run.py --category personal --device 0 --jobs 2 --retries 3
 ```
 
 运行算子仓用例时，将 `personal` 换成 `operator_repos`；个人脚本放在 `cases/personal/<姓名>/`。
@@ -162,8 +161,8 @@ python costmodel_tests/run.py --category personal --devices 0,1 --jobs 2 --retri
 # 使用自己的清单，单卡执行
 python costmodel_tests/run.py --manifest my_tests.json --device 0
 
-# 可选：多个条目时，两张卡并发，失败后额外重试 3 次
-python costmodel_tests/run.py --manifest my_tests.json --devices 0,1 --jobs 2 --retries 3
+# 可选：多个条目时，单卡并发，失败后额外重试 3 次
+python costmodel_tests/run.py --manifest my_tests.json --device 0 --jobs 2 --retries 3
 ```
 
 清单可以跨目录，也可以放在分类目录之外。一个条目时不会因为 `--jobs 2` 而重复运行。

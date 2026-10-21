@@ -26,7 +26,7 @@ def main() -> None:
     parser.add_argument("--case", action="append", default=[], help="select an exact manifest name; repeat for several")
     devices = parser.add_mutually_exclusive_group()
     devices.add_argument("--device", help="one shared NPU device")
-    devices.add_argument("--devices", help="isolated device pool, e.g. 0,1; at least --jobs cards")
+    devices.add_argument("--devices", help=argparse.SUPPRESS)
     parser.add_argument("--jobs", type=int, default=1, help="concurrent entries (default: 1)")
     parser.add_argument("--retries", type=int, default=3, help="extra attempts after failure (default: 3)")
     parser.add_argument("--output-root", type=Path, help="new or empty result directory")

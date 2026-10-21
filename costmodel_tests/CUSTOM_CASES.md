@@ -140,9 +140,9 @@ python costmodel_tests/run.py --category personal \
 python costmodel_tests/run.py --category personal \
   --case custom_my_add_f32_n1024 --device 0 --retries 3
 
-# 批跑该清单；并发和重试沿用现有参数
+# 单卡并发执行该清单，失败后额外重试 3 次
 python costmodel_tests/run.py --category personal \
-  --devices 0,1 --jobs 2 --retries 3
+  --device 0 --jobs 2 --retries 3
 ```
 
 默认与原 PR 的 100-case Auto 结果表保持一致：只测试 Auto 最终选择的路线，

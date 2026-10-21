@@ -118,7 +118,7 @@ def main() -> None:
     parser.add_argument("--retries", type=int, default=3, help="extra attempts after failure; 0 disables retries")
     devices = parser.add_mutually_exclusive_group()
     devices.add_argument("--device", help="shared ASCEND_RT_VISIBLE_DEVICES for all workers")
-    devices.add_argument("--devices", help="comma-separated device pool; one active case per device")
+    devices.add_argument("--devices", help=argparse.SUPPRESS)
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--expected-bishengir", type=Path)
     parser.add_argument("--triton-root", type=Path, default=ROOT)
