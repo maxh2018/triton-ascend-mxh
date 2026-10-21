@@ -19,21 +19,89 @@ cases/
     sglang/<算子名>/        # SGLang 来源用例
 ```
 
-默认分类为 `ci`，原命令仍可运行。个人算子不要放到 CI 目录：上传到
-`cases/personal/<姓名>/`，在 `cases/personal/manifest.json` 登记。
-清单中的 `driver` 路径相对于**清单所在目录**，例如 `zhangsan/bench_my_add.py`。
+### 第一次使用：先选用例，再选运行方式
+
+`costmodel_tests/run.py` 是统一运行入口。下面的命令都在**仓库根目录**执行；
+查看用例不需要 NPU，实际运行前需准备下文的 NPU 编译环境。
+
+**1. 选哪一类用例？**
+
+`--category` 表示用例来源，不填时默认选 `ci`。
+
+| 参数 | 会读取哪份用例清单 | 当前内容 |
+|---|---|---|
+| `--category ci` | `cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization/generalization_matrix.json` | 已登记的 PR 100 个 case |
+| `--category personal` | `cases/personal/manifest.json` | 个人用例，初始为空 |
+| `--category operator_repos` | `cases/operator_repos/manifest.json` | vLLM、SGLang 等算子仓用例，初始为空 |
+
+“清单”是一个 JSON 文件，记录每个 case 的名字、要执行的 Python 脚本和输入参数。
+**只把脚本放进目录还不够，必须在清单中添加配置，运行器才知道如何执行它。**
+例如个人脚本放在 `cases/personal/zhangsan/bench_my_add.py`，
+就在 `cases/personal/manifest.json` 中登记，`driver` 填 `zhangsan/bench_my_add.py`。
+完整配置示例见 [自定义用例提交规范](CUSTOM_CASES.md)。
+
+**2. 查看、运行一个，还是运行整份清单？**
+
+| 命令 | 作用 |
+|---|---|
+| `list` | 查看所选清单的 case 名称，不执行测试 |
+| `case --case <名称>` | 只运行清单中指定名字的一个 case；名称来自 JSON 的 `name`，不是 Python 文件名 |
+| `matrix` | 运行所选清单中的全部 case |
+| `pytest` | 运行 CI 目录下原始 `pytest_ut` 测试集，不读取上述 case 清单 |
+| `all` | 先运行 CI 原始 pytest 测试集，再运行所选清单的 CostModel 测试；仅支持 CI 分类 |
+
+个人和算子仓用例使用 `list`、`case`、`matrix`。
+清单为空（`"cases": []`）时，`list` 会显示 0 个 case；此时没有可运行的测试，
+应先登记用例。仓库提供了一份已登记一个向量加法 case 的示例清单，可用于首次尝试。
 
 ```bash
-python costmodel_tests/run.py list --category ci
+# 查看已有的 CI 100 个 case
+python costmodel_tests/run.py list
+
+# 从中选一个运行：softmax_original 是清单里的 case 名
+python costmodel_tests/run.py case --case softmax_original --device 0
+
+# 运行 CI 清单中的全部 100 个 case
+python costmodel_tests/run.py matrix --device 0
+
+# 查看自己登记的个人用例；未登记时显示 0 个
 python costmodel_tests/run.py list --category personal
-python costmodel_tests/run.py list --category operator_repos
-python costmodel_tests/run.py case --category personal --case zhangsan_add_f32_n1024 --device 0
-python costmodel_tests/run.py matrix --category operator_repos --device 0
 ```
 
-空清单只能查看，登记用例后才能运行。`--manifest` 可覆盖分类默认清单。
-`pytest` 和 `all` 对应 CI 原始 pytest 集；个人/算子仓使用 `case` 或 `matrix`。
-不同目录的脚本运行时可以直接 `from profile_utils import profile_kernel`，运行器会提供共享 helper 路径。
+**3. 不想使用分类默认清单，怎么运行另一份清单？**
+
+加 `--manifest <JSON路径>`，本次就读取指定文件，代替表格中的默认清单；
+不会修改任何清单文件。比如，运行仓库自带的个人向量加法示例：
+
+```bash
+python costmodel_tests/run.py case --category personal \
+  --manifest cases/personal/examples/custom_manifest.example.json \
+  --case custom_add_f32_n1024 --device 0
+```
+
+个人用例登记到默认清单后，则不需要 `--manifest`，例如：
+
+```bash
+# 以下命令需先登记名为 zhangsan_add_f32_n1024 的 case
+python costmodel_tests/run.py case --category personal \
+  --case zhangsan_add_f32_n1024 --device 0
+
+# 批跑个人默认清单中的全部 case
+python costmodel_tests/run.py matrix --category personal --device 0
+```
+
+**编写测试脚本时，如何复用计时函数？**
+
+仓库已有 `profile_utils.py`，其中的 `profile_kernel` 用来采集 NPU 实际运行耗时。
+通过上述统一入口运行时，你的个人或算子仓脚本可以直接写：
+
+```python
+from profile_utils import profile_kernel
+```
+
+运行器会设置 Python 的模块搜索路径，所以不需要把 `profile_utils.py` 复制到自己的目录。
+这只说明如何导入计时函数；完整调用方式请参考 [向量加法示例](../cases/personal/examples/bench_custom_add_example.py)。
+直接用 `python 你的脚本.py` 启动时，不保证有这个搜索路径，建议使用统一入口运行。
 
 | 测试集 | 路径 | 本次收录 |
 |---|---|---|
