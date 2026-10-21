@@ -56,7 +56,7 @@ cases/personal/
 - **命名**：建议用字母、数字和下划线，清单中的用例名不能重复。
 - **来源与依赖**：在脚本头部注明来源、额外依赖和适用芯片；输入尽量在脚本中生成。
 - **辅助文件**：随脚本一起提交，按脚本所在位置读取；不要提交编译缓存、profiler 数据和日志。
-- **共享 helper**：运行器已提供导入路径，可直接使用 `from profile_utils import profile_kernel`，无需复制文件。
+- **复用计时工具**：通过 `costmodel_tests/run.py` 启动测试时，个人脚本可以直接导入 `from profile_utils import profile_kernel`，使用仓库已有的计时函数，无需复制工具文件。
 
 ## 3. 清单怎么写
 
