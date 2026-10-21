@@ -17,7 +17,7 @@
 |---|---|---|
 | `cases` | `[{...}]` | 用例列表；每个对象代表一个测试配置 |
 | `name` | `custom_add_f32_n1024` | 清单内唯一的用例名，`--case` 填这个值 |
-| `runner` | `benchmark` | 可选，默认 `benchmark`；已有 pytest 文件填 `pytest` |
+| `runner`（可选） | `benchmark` | 告诉运行器如何执行脚本；省略时为 `benchmark`，已有 pytest 文件可选 `pytest`，区别见第 4 节 |
 | `driver` | `bench_custom_add_example.py` | Python 脚本路径，相对于清单所在目录 |
 | `arguments` | `["--n-elements", "1024"]` | 脚本参数，按顺序填写，所有元素均为字符串；这里表示 1024 个元素 |
 | `family` | `elementwise` | 算子类别，用于分类统计；这里表示逐元素计算 |
@@ -87,7 +87,20 @@ cases/personal/
 
 ## 4. 脚本需要满足什么接口
 
+`runner` 选择脚本的执行方式。两种方式都检查计算精度和耗时预测误差，按脚本写法选一种即可。
+
+| 对比项 | `benchmark`（默认） | `pytest`（可选） |
+|---|---|---|
+| 适合谁 | 按本仓库模板编写独立测试脚本的用户 | 已有 `test_*.py`、`test_*()` 测试的用户 |
+| 执行方式 | `python bench_custom_my_add.py ...` | `python -m pytest test_add.py ...` |
+| 脚本要做什么 | 接收公共参数，检查精度、采集耗时并输出约定 JSON | 保留 pytest 测试函数和精度断言，由适配器采集耗时及生成报告 |
+| 清单怎么填 | `"runner": "benchmark"`，也可省略 | `"runner": "pytest"` |
+
+新写用例可以从 benchmark 示例开始；已有 pytest 文件时，可直接看下面的可选接入说明。
+
 ### 新写 benchmark 脚本
+
+`benchmark` 表示独立脚本接口，精度检查和计时都由脚本完成。
 
 建议复制 [向量加法示例](../cases/personal/examples/bench_custom_add_example.py) 或 [现有 benchmark 模板](../cases/ci/third_party/ascend/unittest/costmodel_ut/costmodel_generalization/bench_muls_add_costmodel.py)，保留参数解析、选路、精度检查、计时和 JSON 输出部分。
 
@@ -128,9 +141,11 @@ print(json.dumps({
 
 `profiler` 包含实测耗时 `average_us`，单位为微秒。可以在此前打印日志，最终结果后不要再打印其他 JSON。
 
-### 接入已有 pytest 文件
+### 可选：接入已有 pytest 文件
 
-保留原有 pytest 写法和精度断言，将清单条目的 `runner` 设为 `pytest` 即可，无需实现上面的 benchmark 接口：
+**仅在你已经有 pytest 测试时使用；采用 benchmark 写法的用户可跳过本节。**
+
+这种方式让已有测试直接加入清单，不必改写为 benchmark 脚本。保留原有 pytest 写法和精度断言，将条目的 `runner` 设为 `pytest`：
 
 ```json
 {
