@@ -407,5 +407,6 @@
   "local_batch_runner": "run_generalization_batch.py: per-case concurrency, selective failure retries and final-attempt audit; tested with simulated subprocesses",
   "validation_scope": "Default auto: match PR 100-case Auto table. Optional all: original complete-route audit.",
   "checkout_prefix": "cases/ci",
-  "custom_example_path": "cases/personal/examples"
+  "custom_example_path": "cases/personal/examples",
+  "local_pytest_adapter": "costmodel_tests/pytest_costmodel.py and pytest_npu.py: retain pytest assertions, capture Auto JIT launches and profiler time, fail missing timing/prediction or unsupported host-only tests; CPU-only regressions, NPU execution pending."
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Entry point for pytest_ut, the PR #2528 matrix, and single-case audits."""
+"""Run CI pytest and manifest cases with correctness and CostModel timing audits."""
 
 from __future__ import annotations
 
@@ -21,12 +21,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=("list", "pytest", "matrix", "case", "all"))
     parser.add_argument("--case", help="exact matrix case name; required for suite=case")
+    parser.add_argument("--pytest-target", help="file or node ID relative to CI pytest_ut; default: entire directory")
     parser.add_argument("--category", choices=("ci", "personal", "operator_repos"), default="ci",
                         help="case collection (default: ci)")
     parser.add_argument("--manifest", type=Path,
                         help="matrix case list; use a separate manifest for custom cases")
     parser.add_argument("--validation-scope", choices=("auto", "all"), default="auto",
-                        help="default: Auto selected route (PR table); all: explicit routes too")
+                        help="matrix routes: default Auto (PR table); all adds explicit routes; pytest always Auto")
     devices = parser.add_mutually_exclusive_group()
     devices.add_argument("--device", help="ASCEND_RT_VISIBLE_DEVICES")
     devices.add_argument("--devices", help="matrix device pool, e.g. 0,1,2,3; one case per device")
@@ -48,6 +49,15 @@ def main() -> None:
         parser.error("pytest/all use the CI pytest corpus; personal/operator_repos use list, case or matrix")
     if args.jobs < 1 or args.retries < 0:
         parser.error("--jobs must be positive and --retries must be nonnegative")
+    pytest_target = str(PYTEST)
+    if args.pytest_target is not None:
+        if args.suite not in ("pytest", "all"):
+            parser.error("--pytest-target applies to pytest/all only")
+        filename, separator, node = args.pytest_target.partition("::")
+        target = (PYTEST / filename).resolve()
+        if not target.is_relative_to(PYTEST.resolve()) or not target.exists():
+            parser.error("--pytest-target must exist inside CI pytest_ut")
+        pytest_target = str(target) + (separator + node if separator else "")
     if args.suite == "pytest" and (args.devices is not None or args.jobs != 1 or args.retries != 3):
         parser.error("--jobs/--retries/--devices apply to matrix cases; use --pytest-args for pytest options")
     if args.suite == "case" and not args.case:
@@ -74,9 +84,15 @@ def main() -> None:
         env["ASCEND_RT_VISIBLE_DEVICES"] = args.devices
     commands = []
     if args.suite in ("pytest", "all"):
-        commands.append(("pytest", [sys.executable, "-m", "pytest", str(PYTEST),
-                                   "-v", f"--junitxml={output / 'pytest.xml'}",
-                                   *(args.pytest_args or [])]))
+        pytest_command = [sys.executable, "-m", "pytest", pytest_target,
+                          "-p", "costmodel_tests.pytest_costmodel",
+                          "--costmodel-output", str(output / "pytest_costmodel"),
+                          "-v", f"--junitxml={output / 'pytest.xml'}"]
+        if args.profile is not None:
+            pytest_command += ["--costmodel-profile", str(args.profile.resolve())]
+        if args.expected_bishengir is not None:
+            pytest_command += ["--costmodel-expected-bishengir", str(args.expected_bishengir.resolve())]
+        commands.append(("pytest", [*pytest_command, *(args.pytest_args or [])]))
     if args.suite in ("matrix", "case", "all"):
         evidence = output / "matrix"
         common = ["--output-root", str(evidence),
@@ -104,13 +120,23 @@ def main() -> None:
         print(f"Running {name}...", flush=True)
         # Inherit terminal output; the PR collector also retains per-case logs.
         completed = subprocess.run(command, cwd=ROOT, env=env, check=False)
-        records.append({"step": name, "command": command, "returncode": completed.returncode})
-    passed = bool(records) and len(records) == len(commands) and all(r["returncode"] == 0 for r in records)
-    summary = {"status": "PASS" if passed else "FAIL", "suite": args.suite,
+        record = {"step": name, "command": command, "returncode": completed.returncode}
+        if name == "pytest":
+            try:
+                audit = json.loads((output / "pytest_costmodel/summary.json").read_text(encoding="utf-8"))
+                record["costmodel_audit_status"] = audit["status"]
+            except (OSError, ValueError, KeyError, TypeError):
+                record["costmodel_audit_status"] = "MISSING"
+        records.append(record)
+    passed = bool(records) and len(records) == len(commands) and all(
+        r["returncode"] == 0 and r.get("costmodel_audit_status", "PASS") == "PASS" for r in records)
+    not_run = (args.suite == "pytest" and len(records) == 1 and records[0]["returncode"] == 0
+               and records[0].get("costmodel_audit_status") == "NOT_RUN")
+    summary = {"status": "PASS" if passed else "NOT_RUN" if not_run else "FAIL", "suite": args.suite,
                "category": args.category, "steps": records}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"{args.suite}: {summary['status']} ({output / 'summary.json'})", flush=True)
-    raise SystemExit(0 if passed else 1)
+    raise SystemExit(0 if passed or not_run else 1)
 
 
 if __name__ == "__main__":
