@@ -1,10 +1,10 @@
 # 自定义测试用例提交规范
 
-**准备一个 Python 测试脚本，在 JSON 清单中登记，再按清单运行。**
+**自定义测试用例提交流程可概括为先准备一个 Python 测试脚本，然后在 JSON 清单中登记，再按清单运行。**
 
 [运行示例](#1-先运行一个示例) · [上传位置](#2-文件放在哪里) · [清单填写](#3-清单怎么写) · [脚本接口](#4-脚本需要满足什么接口) · [运行与验收](#5-运行与查看结果)
 
-## 1. 先运行一个示例
+## 1. 示例
 
 仓库提供一个向量加法 `x + y` 示例：
 
@@ -32,7 +32,7 @@ python costmodel_tests/run.py --manifest cases/personal/examples/custom_manifest
 
 执行流程：**生成输入 → 运行 kernel → 检查精度 → 采集耗时 → 输出结果**。
 
-添加自己的算子时，可以复制这两个文件，替换 kernel、参考结果和清单中的名字、参数。示例展示接口，不代表当前 profile 对该 shape 已实测通过。
+添加自己的算子时，可以复制这两个文件，替换 kernel、参考结果和清单中的名字、参数。
 
 ## 2. 文件放在哪里
 
@@ -158,49 +158,4 @@ print(json.dumps({
 
 pytest 适配器保留原断言，并验收 Auto 耗时预测。用例需实际运行 kernel 并检查精度；直接调用编译后 kernel 等特殊形式可能需要专门适配。`UNSUPPORTED` 不算通过。
 
-## 5. 运行与查看结果
 
-以下命令在仓库根目录执行。先完成个人清单登记，再按需选择：
-
-### 查看清单与执行计划
-
-```bash
-# 只查看，不运行 NPU 测试
-python costmodel_tests/run.py list --category personal
-python costmodel_tests/run.py --category personal \
-  --case custom_my_add_f32_n1024 --device 0 --dry-run
-```
-
-### 运行一个用例
-
-```bash
-python costmodel_tests/run.py --category personal \
-  --case custom_my_add_f32_n1024 --device 0 --retries 3
-```
-
-运行上面的 pytest 示例时，将 case 名换为 `zhangsan_add`。
-
-### 运行个人清单中的全部用例
-
-```bash
-# 单卡串行
-python costmodel_tests/run.py --category personal --device 0
-
-# 可选：单卡并发，失败后额外重试 3 次
-python costmodel_tests/run.py --category personal --device 0 --jobs 2 --retries 3
-```
-
-`--retries` 默认 `3`，只重试失败用例；设为 `0` 可关闭重试。并发可能影响实测耗时，严格验收耗时误差时使用串行命令。
-
-### 查看结果
-
-打开终端打印的结果目录，优先阅读 `report.md`：
-
-| 检查项 | 当前运行器的判定 |
-|---|---|
-| 计算精度 | 满足参考结果和用例自身的精度容差 |
-| 耗时预测 | 默认检查 Auto 所选路线，预测耗时误差的绝对值 ≤ 10% |
-
-benchmark 可用 `--validation-scope all` 增加显式路线检查；pytest 仍验收 Auto。当前不要求 Auto 是实测最快路线。
-
-完整参数、结果文件和排查方法见 [测试使用说明](README.md)。
