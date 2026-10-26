@@ -16,6 +16,7 @@
 #include "llvm/Support/Error.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -526,7 +527,10 @@ struct StageModeProfile {
   bool isValid(StageMode mode) const;
 };
 
+class IndirectMemoryParameters;
+
 struct HardwareProfile {
+  std::shared_ptr<const IndirectMemoryParameters> indirectMemoryParameters;
   std::string profileVersion;
   std::string target;
   /// Explicit opt-in to a target-specific random-address, matched-ALU fit.
@@ -540,10 +544,8 @@ struct HardwareProfile {
   /// an explicit profile prior; reuse additionally requires workload evidence.
   std::string simtIndirectStoreModel;
   std::string simdIndirectStoreModel;
-  /// Versioned short affine partial-memory fits from static TTIR geometry.
-  /// SIMD prices a native fragment; SIMT a matched-baseline increment.
-  /// The factor-20261017 version adds full F2/F4 SIMT load group increments;
-  /// its static/no-runtime-sampling individual errors remain above 20%.
+  /// Static partial-memory fits: native SIMD fragments and complete SIMT
+  /// F-program matched-baseline increments. No runtime index sampling.
   std::string partialStructuredMemoryModel;
   /// Base warp count of one logical SIMT program.
   int64_t baseSimtWarpCount = 1;

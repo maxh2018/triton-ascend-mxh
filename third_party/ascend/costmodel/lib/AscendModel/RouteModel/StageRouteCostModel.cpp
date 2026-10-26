@@ -3568,6 +3568,11 @@ mlir::ascend::solveStageRoutes(const StageCostTable &costTable,
   };
   const bool hasUnlowerableSimdMaskedLoadedIndexVector =
       llvm::any_of(costTable.stages, [](const LogicalStageCost &stage) {
+        // All-D GM stages support masked scalar-loop SIMD lowering. Keep the
+        // historical row-coalescing protection for other stage kinds: model
+        // applicability (and density knowledge) is not backend legality.
+        if (stage.model == "indirect_gather_memory")
+          return false;
         return llvm::any_of(
             stage.workload.memoryAccesses, [](const StageMemoryAccess &access) {
               if (!access.addressDependsOnLoadedIndex || !access.masked ||

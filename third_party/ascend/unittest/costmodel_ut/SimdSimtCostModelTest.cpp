@@ -1588,19 +1588,14 @@ TEST(SimdSimtCostModelTest, GenericSemanticStagesDoNotRequireAWorkloadDomain) {
 
   ASSERT_TRUE(partition->operationOwnershipComplete);
   EXPECT_EQ(partition->modeledOperationCount, 4);
-  ASSERT_EQ(partition->stages.size(), 3u);
+  ASSERT_EQ(partition->stages.size(), 4u);
   EXPECT_EQ(partition->stages[0].costModelKind,
             StageCostModelKind::ScalarIssue);
   EXPECT_EQ(partition->stages[1].costModelKind,
             StageCostModelKind::ContinuousTileMemory);
-  // Structural grouping keeps the load-dependent comparison with its load;
-  // source locations no longer force a separate predicate stage (#2601).
-  ASSERT_EQ(partition->stages[1].operations.size(), 2u);
-  EXPECT_EQ(partition->stages[1].operations[0]->getName().getStringRef(),
-            "tt.load");
-  EXPECT_EQ(partition->stages[1].operations[1]->getName().getStringRef(),
-            "arith.cmpf");
   EXPECT_EQ(partition->stages[2].costModelKind,
+            StageCostModelKind::PredicateMask);
+  EXPECT_EQ(partition->stages[3].costModelKind,
             StageCostModelKind::ContinuousTileStore);
 }
 

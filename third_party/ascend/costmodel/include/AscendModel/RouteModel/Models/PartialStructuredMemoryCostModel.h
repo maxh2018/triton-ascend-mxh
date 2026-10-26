@@ -5,8 +5,6 @@
 namespace mlir::ascend {
 class PartialStructuredMemoryCostModel final : public StageCostModel {
 public:
-  StageMemoryCost costStatic(const LogicalStage &, const HardwareProfile &,
-                             const StageImplementation &) const;
   StageMemoryCost cost(const LogicalStage &, const HardwareProfile &,
                        const StageImplementation &) const override;
 };

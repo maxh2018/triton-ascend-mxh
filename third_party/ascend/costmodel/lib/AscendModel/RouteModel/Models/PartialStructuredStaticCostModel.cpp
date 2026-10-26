@@ -13,11 +13,13 @@ using namespace mlir;
 using namespace mlir::ascend;
 #include "PartialStructuredStaticAnalysis.h"
 
-StageMemoryCost PartialStructuredMemoryCostModel::costStatic(
-    const LogicalStage &stage, const HardwareProfile &profile,
-    const StageImplementation &impl) const {
+StageMemoryCost
+PartialStructuredMemoryCostModel::cost(const LogicalStage &stage,
+                                       const HardwareProfile &profile,
+                                       const StageImplementation &impl) const {
   StageMemoryCost result;
-  if (profile.target != "Ascend950PR/dav-c310" || impl.localScope ||
+  if (profile.partialStructuredMemoryModel != "ttir_static_partial_20261020" ||
+      profile.target != "Ascend950PR/dav-c310" || impl.localScope ||
       impl.aivSubblocks != 1 || stage.features.hasLoop ||
       stage.features.hasAtomicMemory ||
       stage.workload.privateStackLoadInstructions ||

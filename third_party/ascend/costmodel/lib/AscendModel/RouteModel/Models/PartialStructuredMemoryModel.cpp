@@ -1,11 +1,10 @@
-// One selected affine formula in SYS_CNT ticks, from static TTIR geometry.
+// Deterministic TTIR geometry used by the active partial-memory formulas.
 #include "AscendModel/RouteModel/Models/PartialStructuredMemoryModel.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <numeric>
 #include <set>
-#include <string_view>
 
 using namespace mlir::ascend::partial_memory;
 namespace {
@@ -24,23 +23,6 @@ double tileElements(const Segments &s) {
     r *= s[i].first;
   return r;
 }
-struct Formula {
-  const char *group;
-  std::array<uint16_t, 10> features;
-  std::array<double, 10> coefficients;
-  uint8_t count;
-};
-struct Decision {
-  uint16_t feature;
-  double threshold;
-  int16_t left, right; // Negative: -1-formula index.
-};
-struct ShortModel {
-  const Decision *decisions;
-  const Formula *formulas;
-  size_t count;
-};
-#include "PartialStructuredMemoryModels.inc"
 } // namespace
 
 Features mlir::ascend::partial_memory::extractFeatures(const Geometry &g) {
@@ -243,63 +225,4 @@ Features mlir::ascend::partial_memory::extractFeatures(const Geometry &g) {
   f["S_basis_work128"] = dp * structured.size();
   f["basis_waves128"] = waves;
   return f;
-}
-
-std::optional<double> mlir::ascend::partial_memory::predict(const Geometry &g,
-                                                            Model m) {
-  if (static_cast<size_t>(m) >= 4 || g.axes.empty() || g.axes.size() > 5 ||
-      g.warps < 1 || g.warps > 64 || (g.warps & (g.warps - 1)) ||
-      (g.bits != 8 && g.bits != 16 && g.bits != 32 && g.bits != 64))
-    return std::nullopt;
-  int64_t E = 1;
-  size_t discrete = 0;
-  for (const auto &a : g.axes) {
-    if (a.extent < 2 || (a.extent & (a.extent - 1)) || a.extent > 2048 ||
-        a.pitch <= 0 || a.pitch > (int64_t(1) << 31) || E > 2048 / a.extent)
-      return std::nullopt;
-    E *= a.extent;
-    discrete += a.discrete;
-  }
-  if (!discrete || (g.axes.size() > 1 && discrete == g.axes.size()) ||
-      E != 32 * g.warps)
-    return std::nullopt;
-  Features f = extractFeatures(g);
-  std::vector<double> values;
-  for (auto name : kFeatureNames) {
-    auto it = f.find(name);
-    if (it == f.end() || !std::isfinite(it->second))
-      return std::nullopt;
-    values.push_back(it->second);
-  }
-  const auto &model = kModels[static_cast<size_t>(m)];
-  const Formula *formula = nullptr;
-  if (model.decisions) {
-    int16_t n = 0;
-    while (n >= 0) {
-      const auto &node = model.decisions[n];
-      n = values[node.feature] <= node.threshold ? node.left : node.right;
-    }
-    formula = &model.formulas[-1 - n];
-  } else {
-    std::string key = std::to_string(g.bits) + "_" +
-                      std::to_string(int(f.at("regular_rank"))) + "_" +
-                      std::to_string(int(f.at("tail_kind"))) + "_" +
-                      std::to_string(int(f.at("tile_large")));
-    for (size_t i = 0; i < model.count; ++i) {
-      if (std::string_view(model.formulas[i].group) == "all")
-        formula = &model.formulas[i];
-    }
-    for (size_t i = 0; i < model.count; ++i)
-      if (key == model.formulas[i].group) {
-        formula = &model.formulas[i];
-        break;
-      }
-  }
-  if (!formula)
-    return std::nullopt;
-  double result = 0;
-  for (size_t i = 0; i < formula->count; ++i)
-    result += formula->coefficients[i] * values[formula->features[i]];
-  return std::isfinite(result) ? std::optional<double>(std::max(1.0, result))
-                               : std::nullopt;
 }

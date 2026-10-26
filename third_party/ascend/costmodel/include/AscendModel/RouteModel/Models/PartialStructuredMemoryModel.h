@@ -29,8 +29,5 @@ struct Geometry {
 using Features = std::unordered_map<std::string, double>;
 // Deterministic TTIR geometry only. No index samples or backend instructions.
 Features extractFeatures(const Geometry &geometry);
-// Nullopt preserves legacy pricing outside the calibrated q=1 domain.
-std::optional<double> predict(const Geometry &geometry, Model model);
-
 } // namespace mlir::ascend::partial_memory
 #endif

@@ -1551,22 +1551,24 @@ def _auto_simt_asset_hash(path: str, default_name: str) -> str:
     digest.update(selection_bytes)
     try:
         profile = json.loads(selection_bytes)
-        shared_ref = (profile.get("microbenchmark_profile") if isinstance(profile, dict) else None)
     except (TypeError, ValueError, UnicodeError):
-        shared_ref = None
-    if shared_ref is not None and not isinstance(shared_ref, str):
-        digest.update(b"\0invalid-shared-microbenchmark-reference\0")
-        digest.update(repr(shared_ref).encode())
-        return digest.hexdigest()
-    if shared_ref:
-        shared_asset = Path(shared_ref)
-        if not shared_asset.is_absolute():
-            shared_asset = asset.parent / shared_asset
-        digest.update(b"\0shared-microbenchmark\0")
+        profile = {}
+    for key, label in [("microbenchmark_profile", b"shared-microbenchmark"),
+                       ("indirect_memory_profile", b"indirect-memory")]:
+        reference = profile.get(key) if isinstance(profile, dict) else None
+        if reference is None:
+            continue
+        digest.update(b"\0" + label + b"\0")
+        if not isinstance(reference, str) or not reference:
+            digest.update(b"invalid-reference\0" + repr(reference).encode())
+            continue
+        dependency = Path(reference)
+        if not dependency.is_absolute():
+            dependency = asset.parent / dependency
         try:
-            digest.update(shared_asset.read_bytes())
+            digest.update(dependency.read_bytes())
         except OSError:
-            digest.update(f"missing:{shared_asset}".encode())
+            digest.update(f"missing:{dependency}".encode())
     return digest.hexdigest()
 
 
@@ -1888,22 +1890,25 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
             if opt.shared_mem_dynamic_size is not None:
                 _compile_option_list += [f"--shared-mem-dynamic-size={opt.shared_mem_dynamic_size}"]
 
-        cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])
         vf_merge_level = metadata["vf_merge_level"]
         if vf_merge_level is not None:
-            cmd_list += [f"--enable-vf-merge-level={vf_merge_level}"]
+            _compile_option_list += [f"--enable-vf-merge-level={vf_merge_level}"]
 
         hfusion_enable_multiple_consumer_fusion = metadata["hfusion_enable_multiple_consumer_fusion"]
         if hfusion_enable_multiple_consumer_fusion:
-            cmd_list += [f"--hfusion-enable-multiple-consumer-fusion={hfusion_enable_multiple_consumer_fusion}"]
+            _compile_option_list += [
+                f"--hfusion-enable-multiple-consumer-fusion={hfusion_enable_multiple_consumer_fusion}"
+            ]
 
         enable_cross_if_fusion = metadata["enable_cross_if_fusion"]
         if enable_cross_if_fusion:
-            cmd_list += [f"--hfusion-enable-cross-if-fusion={enable_cross_if_fusion}"]
+            _compile_option_list += [f"--hfusion-enable-cross-if-fusion={enable_cross_if_fusion}"]
 
         plan_memory_strategy = metadata["plan_memory_strategy"]
         if plan_memory_strategy is not None:
-            cmd_list += [f"--plan-memory-strategy={plan_memory_strategy}"]
+            _compile_option_list += [f"--plan-memory-strategy={plan_memory_strategy}"]
+
+        cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])
 
         if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
             print_cmd_list = cmd_list.copy()

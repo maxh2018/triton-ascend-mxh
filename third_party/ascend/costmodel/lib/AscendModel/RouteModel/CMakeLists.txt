@@ -11,12 +11,11 @@ add_mlir_library(AscendModelRouteModel
   ../Analysis/SimtRegisterPressureAnalysis.cpp
   StageCostModels.cpp
   Models/IndirectGatherMemoryCostModel.cpp
-  Models/PartialStructuredMemoryCostModel.cpp
+  Models/IndirectMemoryChainCostModel.cpp
   Models/PartialStructuredStaticModel.cpp
   Models/PartialStructuredStaticCostModel.cpp
   Models/PartialStructuredMemoryModel.cpp
   Models/PartialStructuredSimtLoadModel.cpp
-  Models/PartialStructuredSimtLoadCostModel.cpp
   StageRouteCostModel.cpp
   SimdSimtCostModel.cpp
   ../Transforms/SelectSimdSimtCostModel.cpp

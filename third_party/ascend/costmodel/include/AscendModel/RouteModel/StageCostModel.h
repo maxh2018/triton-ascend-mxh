@@ -23,6 +23,12 @@ struct StageMemoryCost {
   std::string pricing;
   const char *loadPricing = nullptr;
   const char *storePricing = nullptr;
+  // SIMD native target loop, including generated UB traffic and completion.
+  // Only the proven exclusive predicate is covered; never erase producers.
+  bool nativeSimdEnvelope = false;
+  Operation *coveredPredicate = nullptr;
+  Operation *coveredMemory = nullptr;
+  std::optional<std::pair<double, double>> densityRange;
 };
 
 /// Extension point for newly calibrated Stage resources. Existing workload,

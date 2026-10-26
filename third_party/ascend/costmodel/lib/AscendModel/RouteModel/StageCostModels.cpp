@@ -3,6 +3,7 @@
 #include "AscendModel/RouteModel/StageCostModels.h"
 #include "AscendModel/RouteModel/Models/IndirectGatherMemoryCostModel.h"
 #include "AscendModel/RouteModel/Models/PartialStructuredMemoryCostModel.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
@@ -1008,8 +1009,16 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
     mapCompositeDotPaths(work, profile, superblockFactor, resources);
   const bool simd = mode == StageMode::SIMD;
   resources.setup = work.paysKernelSetup ? profile.setupCycles : 0.0;
-  if (simd)
-    mapSimdIrregularTileCompletion(work, profile, resources);
+  if (simd) {
+    StageWorkload completionWork = work;
+    if (fitted.nativeSimdEnvelope)
+      llvm::erase_if(completionWork.memoryAccesses,
+                     [&](const StageMemoryAccess &a) {
+                       return a.addressDependsOnLoadedIndex &&
+                              a.store == bool(fitted.store);
+                     });
+    mapSimdIrregularTileCompletion(completionWork, profile, resources);
+  }
   if (work.scalarLoadCount > 0.0)
     resources.load +=
         simd ? mainScalarLoadCycles(work.scalarLoadCount, profile)
@@ -1958,6 +1967,27 @@ mapWorkload(const LogicalStage &stage, const StageModeProfile &profile,
       resources.predicate +=
           count * instructions / profile.predicateOperationsPerCycle;
     }
+  }
+  if (simd && fitted.coveredPredicate) {
+    auto tensor =
+        cast<RankedTensorType>(fitted.coveredPredicate->getResult(0).getType());
+    double instructions =
+        std::ceil(double(tensor.getNumElements()) / profile.vectorWidth);
+    if (fullyDescribed(segmented.logicalElements.lookup("predicate.cmp"),
+                       predicateElements)) {
+      for (const auto &entry : work.tensorOperationWorkloads)
+        if (entry.operation == "predicate.cmp" &&
+            entry.logicalElements == tensor.getNumElements()) {
+          instructions = entry.segmentCount *
+                         std::ceil(double(entry.contiguousElementsPerSegment *
+                                          entry.elementBitWidth) /
+                                   profile.vectorWidthBits);
+          break;
+        }
+    }
+    resources.predicate =
+        std::max(0.0, resources.predicate -
+                          instructions / profile.predicateOperationsPerCycle);
   }
   const double simdReductionStartupOwners =
       std::min(1.0, std::max(0.0, work.reductionOperations));
@@ -3443,31 +3473,23 @@ bool HardwareProfile::isValid() const {
              0 &&
          !profileVersion.empty() && !target.empty() &&
          (simtIndirectLoadModel.empty() ||
-          ((simtIndirectLoadModel == "random_i32_six_term_20261007" ||
-            simtIndirectLoadModel == "random_dtype_six_term_20261008" ||
-            simtIndirectLoadModel == "unmasked_factor_candidate_20261017" ||
+          ((simtIndirectLoadModel == "unmasked_complete_factor_20261020" ||
             simtIndirectLoadModel == "prefix_mask_rank_factor_20261017" ||
             simtIndirectLoadModel == "random_mask_rank_factor_20261017") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectLoadModel.empty() ||
-          ((simdIndirectLoadModel == "random_f32_matched_ab_20261007" ||
-            simdIndirectLoadModel == "random_dtype_matched_ab_20261008") &&
+          ((simdIndirectLoadModel == "random_dtype_matched_ab_20261008" ||
+            simdIndirectLoadModel == "simd_mask_envelope_20261019") &&
            target == "Ascend950PR/dav-c310")) &&
          (simtIndirectStoreModel.empty() ||
-          ((simtIndirectStoreModel == "random_f32_store_fill_ab_20261007" ||
-            simtIndirectStoreModel == "random_store_no_fill_first_20261008" ||
-            simtIndirectStoreModel == "unmasked_factor_candidate_20261017" ||
+          ((simtIndirectStoreModel == "unmasked_complete_factor_20261020" ||
             simtIndirectStoreModel == "prefix_mask_rank_factor_20261017" ||
-            simtIndirectStoreModel == "random_mask_rank_factor_20261017" ||
-            simtIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
+            simtIndirectStoreModel == "random_mask_rank_factor_20261017") &&
            target == "Ascend950PR/dav-c310")) &&
          (simdIndirectStoreModel.empty() ||
-          ((simdIndirectStoreModel ==
-                "random_f32_store_no_fill_first_20261007" ||
-            simdIndirectStoreModel ==
-                "random_f32_store_no_fill_reuse_20261007" ||
-            simdIndirectStoreModel == "random_store_no_fill_first_20261008" ||
-            simdIndirectStoreModel == "random_store_no_fill_reuse_20261008") &&
+          ((simdIndirectStoreModel == "random_store_no_fill_first_20261008" ||
+            simdIndirectStoreModel == "random_store_no_fill_reuse_20261008" ||
+            simdIndirectStoreModel == "simd_mask_envelope_20261019") &&
            target == "Ascend950PR/dav-c310")) &&
          logicalWarpGroupCount > 0 && superblockUsefulFactorLimit > 0 &&
          superblockPersistentStatePressureFreeFactor > 0 &&
@@ -3731,15 +3753,10 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
         cost.formulaEvidence = "uncalibrated_superblock_fallback";
       else
         cost.formulaEvidence = "analytical_resource_formula";
-      if (fitted.load || fitted.store)
-        cost.formulaEvidence =
-            fitted.coversSuperblockGroup
-                ? (fitted.store
-                       ? "matched_ab_partial_simt_store_full_group_20261020"
-                       : "matched_ab_partial_simt_load_full_group_20261017")
-                : "matched_ab_indirect_memory_increment";
-      if (fitted.pricing.find("_static_20261020") != std::string::npos)
+      if (fitted.replacesTensorMemory)
         cost.formulaEvidence = fitted.pricing;
+      else if (fitted.load || fitted.store)
+        cost.formulaEvidence = "matched_ab_indirect_memory_increment";
       if (resources->indirectMemoryAnalyticalFallback &&
           cost.formulaEvidence.find(
               "analytical_indirect_memory_resource_fallback") ==
@@ -3864,6 +3881,18 @@ StageCostEvaluator::evaluate(const StagePartition &partition,
                         *resources),
           fitted.coversSuperblockGroup ? fitted.load.value_or(0.0) : 0.0,
           fitted.coversSuperblockGroup ? fitted.store.value_or(0.0) : 0.0);
+      if (fitted.nativeSimdEnvelope)
+        cost.formulaEvidence += "+native_simd_target_loop_completion";
+      if (fitted.densityRange) {
+        auto upper = *resources;
+        (fitted.store ? upper.store : upper.load) +=
+            fitted.densityRange->second - fitted.densityRange->first;
+        const double high = applySuperBlock(
+            executionStage, upper, implementation, profile,
+            estimateStage(executionStage, profile, implementation.mode, upper));
+        cost.totalCycles = (cost.totalCycles + high) / 2;
+        cost.formulaEvidence += "+stage_density_range_midpoint";
+      }
       if (implementation.aivSubblocks > 1) {
         cost.cvPartitionIdealTotalCycles = cost.totalCycles;
         cost.cvPartitionPayloadEfficiency =
