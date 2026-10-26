@@ -116,11 +116,84 @@ struct FoldOneHotPayload : OpRewritePattern<triton::ReduceOp> {
   }
 };
 
+// Updating a single score must not materialize full-vector prefix copies.
+// Keep tensor SSA semantics so bufferization can preserve other users of the
+// original tensor instead of unconditionally mutating its storage.
+struct FoldOneHotUpdate : OpRewritePattern<arith::SelectOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op,
+                                PatternRewriter &rewriter) const override {
+    auto type = dyn_cast<RankedTensorType>(op.getType());
+    if (!type || type.getRank() != 1 || !type.hasStaticShape() ||
+        type.getDimSize(0) < 1 ||
+        type.getDimSize(0) > std::numeric_limits<int32_t>::max() ||
+        type.getEncoding() || !type.getElementType().isF32())
+      return failure();
+
+    auto cmp = op.getCondition().getDefiningOp<arith::CmpIOp>();
+    if (!cmp || cmp.getPredicate() != arith::CmpIPredicate::eq)
+      return failure();
+    auto range = cmp.getLhs().getDefiningOp<triton::MakeRangeOp>();
+    auto position = cmp.getRhs().getDefiningOp<triton::SplatOp>();
+    if (!range || !position) {
+      range = cmp.getRhs().getDefiningOp<triton::MakeRangeOp>();
+      position = cmp.getLhs().getDefiningOp<triton::SplatOp>();
+    }
+    if (!range || !position || range.getStart() != 0 ||
+        range.getEnd() != type.getDimSize(0) ||
+        !position.getSrc().getType().isInteger(32))
+      return failure();
+
+    Value replacement;
+    FloatAttr replacementAttr;
+    if (auto splat = op.getTrueValue().getDefiningOp<triton::SplatOp>()) {
+      replacement = splat.getSrc();
+    } else if (auto constant =
+                   op.getTrueValue().getDefiningOp<arith::ConstantOp>()) {
+      auto dense = dyn_cast<DenseFPElementsAttr>(constant.getValue());
+      if (!dense || !dense.isSplat())
+        return failure();
+      replacementAttr =
+          FloatAttr::get(type.getElementType(), dense.getSplatValue<APFloat>());
+    } else {
+      return failure();
+    }
+
+    Location loc = op.getLoc();
+    if (!replacement)
+      replacement = rewriter.create<arith::ConstantOp>(loc, replacementAttr);
+    Value winner = position.getSrc();
+    Value zero = rewriter.create<arith::ConstantIntOp>(loc, 0, 32);
+    Value size =
+        rewriter.create<arith::ConstantIntOp>(loc, type.getDimSize(0), 32);
+    Value lower = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sge,
+                                                 winner, zero);
+    Value upper = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::slt,
+                                                 winner, size);
+    Value inRange = rewriter.create<arith::AndIOp>(loc, lower, upper);
+    auto result = rewriter.create<scf::IfOp>(
+        loc, inRange,
+        [&](OpBuilder &builder, Location nestedLoc) {
+          Value index = builder.create<arith::IndexCastOp>(
+              nestedLoc, builder.getIndexType(), winner);
+          Value updated = builder.create<tensor::InsertOp>(
+              nestedLoc, replacement, op.getFalseValue(), ValueRange{index});
+          builder.create<scf::YieldOp>(nestedLoc, updated);
+        },
+        [&](OpBuilder &builder, Location nestedLoc) {
+          builder.create<scf::YieldOp>(nestedLoc, op.getFalseValue());
+        });
+    rewriter.replaceOp(op, result.getResults());
+    return success();
+  }
+};
+
 } // namespace
 
 namespace TTOpConverters {
 void populatePreConversionCanonicalizationPatterns(
     RewritePatternSet &patterns) {
-  patterns.add<FoldOneHotPayload>(patterns.getContext());
+  patterns.add<FoldOneHotPayload, FoldOneHotUpdate>(patterns.getContext());
 }
 } // namespace TTOpConverters
