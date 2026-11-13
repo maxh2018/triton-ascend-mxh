@@ -258,6 +258,50 @@ def _can_materialize_scope_superblock(metadata, opt, whole_kernel_materializable
                 and int(getattr(opt, "num_warps", 0) or 0) > 0)
 
 
+def _resolve_forced_mixed_options(options):
+    """Resolve explicit controls before JIT caching; kwargs override environment."""
+    route = options.get("auto_simt_force_route")
+    if route is None:
+        route = os.environ.get("TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE", "")
+    if route not in ("", "mixed_simd_simt"):
+        raise ValueError("auto_simt_force_route must be empty or 'mixed_simd_simt'")
+    resolved = {key: value for key, value in options.items() if key != "auto_simt_force_route"}
+    resolved["auto_simt_force_route"] = route
+    if not route:
+        return resolved
+    mode = resolved.get("compile_mode", os.environ.get("TRITON_ASCEND_COMPILE_MODE", "simd_simt"))
+    scope = resolved.get("auto_simt_scope_mode", os.environ.get("TRITON_ASCEND_AUTO_SIMT_SCOPE", "auto"))
+    if mode != "simd_simt" or scope != "auto":
+        raise ValueError("forced Mixed requires compile_mode='simd_simt' and auto_simt_scope_mode='auto'")
+    resolved.update(compile_mode=mode, auto_simt_scope_mode=scope)
+    if "superblock_factor" not in resolved:
+        raw = os.environ.get("TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR", "1")
+        try:
+            resolved["superblock_factor"] = int(raw)
+        except ValueError as error:
+            raise ValueError("TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR must be an integer") from error
+    factor = resolved["superblock_factor"]
+    if type(factor) is not int or factor not in (1, 2, 4, 8, 16, 32, 64):
+        raise ValueError("forced Mixed factor must be a power of two in 1..64")
+    return resolved
+
+
+def _verify_forced_mixed_result(mod, metadata, opt, effective, factor, report):
+    if not getattr(opt, "auto_simt_force_route", ""):
+        return
+    data = json.loads(report)
+    text = str(mod)
+    factor_attr = r"ascend\.scope_superblock\.factor\s*=\s*" + str(factor) + r"\s*:\s*i64"
+    if (effective != "mixed_simd_simt" or factor != opt.superblock_factor
+            or data.get("action_supported") is not True
+            or data.get("materialized_simt_anchor_count", 0) < 1
+            or "scope.scope" not in text or not re.search(factor_attr, text)):
+        raise RuntimeError("forced Mixed was not materialized with the requested factor; refusing fallback")
+    metadata["auto_simt_forced_route"] = effective
+    metadata["auto_simt_forced_factor"] = factor
+    metadata["auto_simt_forced_ttir_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+
+
 def _publish_route_transform_capability(metadata, opt) -> str:
     """Publish the single capability fact consumed by scoring and lowering.
 
@@ -326,6 +370,13 @@ def _publish_route_transform_capability(metadata, opt) -> str:
             }
             for factor in legal_factors
         }
+    if getattr(opt, "auto_simt_force_route", ""):
+        requested = opt.superblock_factor
+        if requested not in scope_factors:
+            raise ValueError(f"forced Mixed F{requested} unsupported; legal scope factors={scope_factors}")
+        scope_factors = [requested]
+        capability["scope_superblock_factors"] = scope_factors
+        capability["backend_forced_route_candidate"] = "mixed_simd_simt"
     capability_json = json.dumps(capability, sort_keys=True, separators=(",", ":"))
     metadata["route_transform_capability"] = capability_json
     metadata["route_transform_v1_materializable"] = v1_materializable
@@ -390,6 +441,7 @@ def _run_cpp_simd_simt_costmodel(mod, metadata, opt, analysis_ttir_code: str = "
     if not report or effective not in {"all_simd", "all_simt_only", "mixed_simd_simt", "backend_default"}:
         raise RuntimeError("invalid native SIMD/SIMT costmodel result")
     _apply_cpp_simd_simt_decision(metadata, effective, superblock_factor, report, int(opt.num_warps))
+    _verify_forced_mixed_result(mod, metadata, opt, effective, superblock_factor, report)
     return effective
 
 
@@ -1766,6 +1818,7 @@ class NPUOptions:
     logical_program_count_hint: int = 0
     physical_vector_core_count_hint: int = 0
     # Native AscendModel selection: Python only schedules the C++ passes.
+    auto_simt_force_route: Optional[str] = None
     auto_simt_scope_mode: str = ""
     auto_simt_scope_dump: str = ""
     auto_simt_model_profile: str = ""
@@ -1807,6 +1860,11 @@ class NPUOptions:
                 stacklevel=2,
             )
             object.__setattr__(self, "compile_mode", "simd_simt_template")
+
+        if self.auto_simt_force_route and (
+                self.auto_simt_force_route != "mixed_simd_simt" or self.compile_mode != "simd_simt"
+                or self.auto_simt_scope_mode != "auto"):
+            raise ValueError("forced Mixed conflicts with the resolved compile mode or scope mode")
 
         _apply_ascend_patch()
 
@@ -1905,6 +1963,9 @@ def ttir_to_npubin(mod, metadata, opt):
 
 
 class AscendBackend(BaseBackend):
+    @staticmethod
+    def resolve_launch_options(options):
+        return _resolve_forced_mixed_options(options)
 
     @staticmethod
     def supports_target(target: GPUTarget):
@@ -1968,6 +2029,7 @@ class AscendBackend(BaseBackend):
                 object.__setattr__(options, "shared_mem_dynamic_size", 122880)
 
     def parse_options(self, opts) -> Any:
+        opts = self.resolve_launch_options(opts)
         # TODO: get available targets when building options?
         if self.target.backend == "npu":
             args = {k: opts[k] for k in NPUOptions.__dataclass_fields__.keys() if k in opts}
