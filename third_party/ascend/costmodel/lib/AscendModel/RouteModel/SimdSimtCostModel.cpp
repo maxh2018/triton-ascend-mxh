@@ -628,7 +628,7 @@ static llvm::Expected<StageCostModelSummary> evaluateStageModel(
     int64_t maximumWholeKernelSuperblockFactor,
     int64_t maximumScopeSuperblockFactor, int64_t logicalProgramCountHint,
     int64_t physicalCoreCountHint, ModuleOp module,
-    const SimtAnchorPlan *anchorPlan) {
+    const SimtAnchorPlan *anchorPlan, int64_t forcedMixedFactor) {
   StagePartitionerOptions partitionerOptions;
   partitionerOptions.tinyDotFlopsMax = profile.structural.tinyDotFlopsMax;
   const int64_t warpLimitedFactorUpperBound =
@@ -657,6 +657,12 @@ static llvm::Expected<StageCostModelSummary> evaluateStageModel(
       partitioner.partition(module, *anchorPlan, partitionerOptions);
   if (!partition)
     return partition.takeError();
+
+  if (forcedMixedFactor > 0)
+    for (LogicalStage &stage : partition->stages)
+      llvm::erase_if(stage.localSimtFactors, [&](int64_t factor) {
+        return factor != forcedMixedFactor;
+      });
 
   HardwareProfile hardwareProfile = profile.hardware;
   hardwareProfile.logicalWarpGroupCount = std::max<int64_t>(1, numWarps);
@@ -892,7 +898,8 @@ estimateSimdSimtCandidatesImpl(const SimdSimtFeatureSummary &features,
       options.scopeSuperblockMaterializable,
       options.maximumWholeKernelSuperblockFactor,
       options.maximumScopeSuperblockFactor, options.logicalProgramCountHint,
-      options.physicalVectorCoreCountHint, module, anchorPlan);
+      options.physicalVectorCoreCountHint, module, anchorPlan,
+      options.forcedMixedFactor);
   if (!stageModel)
     return stageModel.takeError();
   report.stageModel = std::move(*stageModel);
@@ -913,6 +920,15 @@ estimateSimdSimtCandidatesImpl(const SimdSimtFeatureSummary &features,
   report.decision =
       chooseBest(report.candidateCosts, report.allSimdCandidateLegal,
                  report.allSimtOnlyCandidateLegal, report.mixedCandidateLegal);
+  if (options.forceMixedRoute) {
+    if (!report.mixedCandidateLegal ||
+        report.stageModel.mixed.routeSuperblockFactor !=
+            options.forcedMixedFactor)
+      return llvm::createStringError(
+          std::errc::not_supported,
+          "requested Mixed route/factor has no legal materializable plan");
+    report.decision = SimdSimtCandidateKind::MixedSIMDSIMT;
+  }
   return report;
 }
 

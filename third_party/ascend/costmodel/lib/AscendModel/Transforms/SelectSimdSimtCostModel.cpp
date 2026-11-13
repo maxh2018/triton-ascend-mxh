@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <system_error>
 
@@ -183,9 +184,25 @@ struct SelectSimdSimtCostModelPass
         std::max<int64_t>(0, logicalProgramCountHint.getValue());
     if (auto capability =
             llvm::json::parse(routeTransformCapabilityJSON.getValue()))
-      if (auto *object = capability->getAsObject())
+      if (auto *object = capability->getAsObject()) {
         if (auto count = object->getInteger("physical_vector_core_count_hint"))
           options.physicalVectorCoreCountHint = std::max<int64_t>(0, *count);
+        if (auto forced = object->getString("backend_forced_route_candidate")) {
+          auto *factors = object->getArray("scope_superblock_factors");
+          auto factor = factors && factors->size() == 1
+                            ? (*factors)[0].getAsInteger()
+                            : std::nullopt;
+          if (*forced != kMixedSimdSimt || !autoMode || !factor ||
+              !isSupportedScopeSuperBlockFactor(*factor) ||
+              *factor > options.maximumScopeSuperblockFactor) {
+            module.emitError("invalid forced Mixed route/factor contract");
+            signalPassFailure();
+            return;
+          }
+          options.forceMixedRoute = true;
+          options.forcedMixedFactor = *factor;
+        }
+      }
 
     SimtAnchorPlan anchorPlan =
         buildMixedSimtAnchorPlan(module, options.compileOn91095);
@@ -267,10 +284,19 @@ struct SelectSimdSimtCostModelPass
       applicationReason = "superblock_requires_auto_blockify_v1";
     }
 
+    if (options.forceMixedRoute && !actionSupported) {
+      module.emitError("forced Mixed route cannot be materialized: ")
+          << applicationReason;
+      signalPassFailure();
+      return;
+    }
     if (autoMode && actionSupported) {
       effective = recommended;
-      selectionSource = "cpp_cost_model";
-      applicationReason = "minimum_cost_candidate";
+      selectionSource =
+          options.forceMixedRoute ? "explicit_forced_route" : "cpp_cost_model";
+      applicationReason = options.forceMixedRoute
+                              ? "forced_legal_mixed_candidate"
+                              : "minimum_cost_candidate";
     } else if (!autoMode) {
       applicationReason = "report_mode";
     } else if (applicationReason.empty()) {
