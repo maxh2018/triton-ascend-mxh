@@ -85,6 +85,10 @@ struct SimdSimtCostModelOptions {
   int64_t maximumWholeKernelSuperblockFactor = 64;
   /// Largest factor accepted by the outlined local-scope backend contract.
   int64_t maximumScopeSuperblockFactor = 4;
+  /// Explicit diagnostic selection, without overriding candidate legality.
+  bool forceMixedRoute = false;
+  /// Zero leaves normal factor selection unchanged.
+  int64_t forcedMixedFactor = 0;
   /// Optional runtime launch count. Zero means unknown; a positive value
   /// prevents the solver from pricing factors that cannot form one full
   /// logical-program group.
