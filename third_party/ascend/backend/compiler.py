@@ -274,12 +274,7 @@ def _resolve_forced_mixed_options(options):
     if mode != "simd_simt" or scope != "auto":
         raise ValueError("forced Mixed requires compile_mode='simd_simt' and auto_simt_scope_mode='auto'")
     resolved.update(compile_mode=mode, auto_simt_scope_mode=scope)
-    if "superblock_factor" not in resolved:
-        raw = os.environ.get("TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR", "1")
-        try:
-            resolved["superblock_factor"] = int(raw)
-        except ValueError as error:
-            raise ValueError("TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR must be an integer") from error
+    resolved.setdefault("superblock_factor", 1)
     factor = resolved["superblock_factor"]
     if type(factor) is not int or factor not in (1, 2, 4, 8, 16, 32, 64):
         raise ValueError("forced Mixed factor must be a power of two in 1..64")

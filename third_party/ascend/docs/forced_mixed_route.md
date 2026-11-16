@@ -9,15 +9,14 @@ Enable it for an existing launch without editing the operator:
 
 ```bash
 export TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE=mixed_simd_simt
-export TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR=2
 python your_test.py
 ```
 
 When the launch does not specify them, this supplies
 `compile_mode="simd_simt"` and `auto_simt_scope_mode="auto"`.
 An explicitly conflicting mode, including `off` or `report`, raises an error.
-The factor defaults to 1 when the factor environment variable is absent.
-Explicit JIT options override the new environment variables:
+Pass F through the existing `superblock_factor` launch option. Its default is 1.
+An explicit `auto_simt_force_route` overrides the route environment variable.
 
 ```python
 kernel[grid](
@@ -25,20 +24,18 @@ kernel[grid](
     compile_mode="simd_simt",
     auto_simt_scope_mode="auto",
     auto_simt_force_route="mixed_simd_simt",
-    superblock_factor=4,
+    superblock_factor=2,
 )
 ```
 
 Set `auto_simt_force_route=""` on a launch to disable forcing even when the
-environment variable is set, or unset the environment variables to restore the
+environment variable is set, or unset the route variable to restore the
 ordinary defaults. The route value must be empty or exactly `mixed_simd_simt`.
-The factor environment variable is ignored while forcing is disabled.
 
 Controls are resolved before the JIT in-process cache lookup and also by
 `AscendBackend.parse_options` for direct compilation. They participate in the
-serialized compiler options and disk-cache hash, including at F1. Changing only
-the environment factor in one Python process must not reuse the previous F's
-executable.
+serialized compiler options and disk-cache hash, including at F1. Changing
+`superblock_factor` in one Python process selects the corresponding executable.
 
 The scope backend currently supports F1/F2/F4. Admission also requires the
 original warp, target, logical-program, resource and scope-materialization
@@ -58,7 +55,8 @@ temporary in UB. CV lowering then transfers the gathered result to Cube. Leaving
 that temporary unclassified can pull vector-produced indices into L1 and emit an
 unsupported Cube scalar read, which failed on hardware with error 507015/271.
 The opt-in `test_costmodel_forced_mixed_factors` regression checks F1/F2 precision,
-distinct binaries, and environment-only changes through the live JIT cache.
+distinct binaries, route environment changes and explicit factor changes through
+the live JIT cache.
 
 This is different from `compile_mode="simd_simt_template"` with the CostModel
 disabled. That mode uses the compiler's template SIMT subpaths and is a separate

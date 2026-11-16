@@ -251,11 +251,10 @@ class CompilerCostmodelContractTest(unittest.TestCase):
 
     def test_forced_mixed_environment_and_explicit_override(self):
         cmplr, _, _ = self._load_compiler_module()
-        with patch.dict(os.environ, {"TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE": "mixed_simd_simt",
-                                     "TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR": "2"}, clear=True):
+        with patch.dict(os.environ, {"TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE": "mixed_simd_simt"}, clear=True):
             options = cmplr._resolve_forced_mixed_options({"num_warps": 4})
             self.assertEqual(options["auto_simt_force_route"], "mixed_simd_simt")
-            self.assertEqual(options["superblock_factor"], 2)
+            self.assertEqual(options["superblock_factor"], 1)
             self.assertEqual(options["compile_mode"], "simd_simt")
             self.assertEqual(options["auto_simt_scope_mode"], "auto")
             self.assertEqual(cmplr._resolve_forced_mixed_options({"superblock_factor": 4})["superblock_factor"], 4)
@@ -266,15 +265,11 @@ class CompilerCostmodelContractTest(unittest.TestCase):
         cmplr, _, _ = self._load_compiler_module()
         with patch.dict(os.environ, {}, clear=True):
             for extra in ({"auto_simt_force_route": "all_simd"},
-                          {"superblock_factor": 3}, {"superblock_factor": True},
+                          {"superblock_factor": 3}, {"superblock_factor": True}, {"superblock_factor": "2"},
                           {"compile_mode": "simd"}, {"auto_simt_scope_mode": "off"},
                           {"auto_simt_scope_mode": "report"}):
                 with self.subTest(extra=extra), self.assertRaises(ValueError):
                     cmplr._resolve_forced_mixed_options({"auto_simt_force_route": "mixed_simd_simt", **extra})
-        with patch.dict(os.environ, {"TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE": "mixed_simd_simt",
-                                     "TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR": "two"}, clear=True):
-            with self.assertRaisesRegex(ValueError, "integer"):
-                cmplr._resolve_forced_mixed_options({})
 
     def test_forced_mixed_factor_restricts_capability_without_changing_legality(self):
         cmplr, _, _ = self._load_compiler_module()
@@ -338,15 +333,12 @@ class CompilerCostmodelContractTest(unittest.TestCase):
         launch = lambda **kwargs: namespace["run"](instance, grid=(1,), warmup=True,
                                                     compile_mode="simd_simt", auto_simt_scope_mode="auto", **kwargs)
         with patch.dict(os.environ, {}, clear=True):
-            automatic = launch()
+            automatic = launch(superblock_factor=1)
             os.environ["TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE"] = "mixed_simd_simt"
-            os.environ["TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR"] = "2"
-            f2 = launch()
-            os.environ["TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR"] = "4"
-            f4 = launch()
-            os.environ["TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR"] = "2"
-            self.assertIs(launch(), f2)
-            self.assertIs(launch(auto_simt_force_route=""), automatic)
+            f2 = launch(superblock_factor=2)
+            f4 = launch(superblock_factor=4)
+            self.assertIs(launch(superblock_factor=2), f2)
+            self.assertIs(launch(auto_simt_force_route="", superblock_factor=1), automatic)
         self.assertIsNot(f2, f4)
         self.assertEqual(f2.options["superblock_factor"], 2)
         self.assertEqual(f4.options["superblock_factor"], 4)

@@ -376,8 +376,8 @@ def test_costmodel_forced_mixed_factors(tmp_path, monkeypatch):
     index_cpu = indices.cpu().long()
     expected = a.cpu()[:, index_cpu].float() @ b.cpu()[index_cpu, :].float()
     args = (a, b, indices, output, a.shape[0], b.shape[1], *a.stride(), *b.stride(), *output.stride())
-    # Keep every explicit option, including the report path, fixed. Only the
-    # environment changes, so this also exercises the real in-process cache.
+    # Reuse the report path while toggling route forcing through the environment
+    # and supplying F through the ordinary superblock_factor launch option.
     options = dict(_launch_options(tmp_path / "forced_mixed_route.json", logical_programs),
                    BLOCK_M=block, BLOCK_N=block, BLOCK_K=block)
     kernels = {}
@@ -385,11 +385,10 @@ def test_costmodel_forced_mixed_factors(tmp_path, monkeypatch):
     for factor in (None, 1, 2, 1, None):
         if factor is None:
             monkeypatch.delenv("TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE", raising=False)
-            monkeypatch.delenv("TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR", raising=False)
         else:
             monkeypatch.setenv("TRITON_ASCEND_AUTO_SIMT_FORCE_ROUTE", "mixed_simd_simt")
-            monkeypatch.setenv("TRITON_ASCEND_AUTO_SIMT_FORCE_FACTOR", str(factor))
-        compiled = gather_dot_min.warmup(*args, grid=(logical_programs, 1), **options)
+        launch_options = dict(options, superblock_factor=factor if factor is not None else 1)
+        compiled = gather_dot_min.warmup(*args, grid=(logical_programs, 1), **launch_options)
         if factor is not None:
             assert compiled.metadata.auto_simt_effective_kind == "mixed_simd_simt"
             assert compiled.metadata.auto_simt_forced_factor == factor
@@ -400,7 +399,7 @@ def test_costmodel_forced_mixed_factors(tmp_path, monkeypatch):
             assert compiled is kernels[factor]
         kernels[factor] = compiled
         binaries[factor] = compiled.asm["npubin"]
-        gather_dot_min[(logical_programs, 1)](*args, **options)
+        gather_dot_min[(logical_programs, 1)](*args, **launch_options)
         torch.npu.synchronize()
         torch.testing.assert_close(output.cpu(), expected, rtol=1e-2, atol=1e-2)
     assert binaries[1] != binaries[2]
